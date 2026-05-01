@@ -1,6 +1,6 @@
 import pytest
 
-from hungerloop.models.enums import AcceptanceCheckType, HungerItemStatus
+from hungerloop.models.enums import AcceptanceCheckType
 from hungerloop.services.requirement_compiler import RuleBasedCompiler
 
 

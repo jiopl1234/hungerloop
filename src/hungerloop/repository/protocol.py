@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any, Protocol
 
 from hungerloop.models.blackboard import BestState, CandidateState
+from hungerloop.models.enums import LoopPhase
 from hungerloop.models.hunger import (
     HungerClockState,
     HungerItem,
@@ -10,7 +11,6 @@ from hungerloop.models.hunger import (
     HungerPolicy,
     HungerSnapshot,
 )
-from hungerloop.models.enums import LoopPhase
 from hungerloop.models.validation import ValidationReport
 
 
