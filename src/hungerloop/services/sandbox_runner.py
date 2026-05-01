@@ -9,6 +9,9 @@ The runner delegates evidence persistence to the repository protocol (Task 14).
 from __future__ import annotations
 
 import asyncio
+import os
+import signal
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -31,6 +34,7 @@ class SandboxRunner:
     """Execute shell commands with timeout and output limits."""
 
     def __init__(self, repo: Any, max_output_chars: int = 5000) -> None:
+        # TODO(Task 14): tighten ``repo`` to the Repository protocol once it lands.
         """Initialize the runner.
 
         Args:
@@ -63,7 +67,12 @@ class SandboxRunner:
             Execution result with exit code, output, and evidence ID.
 
         Raises:
-            ValueError: If ``argv`` is empty or ``timeout`` is non-positive.
+            ValueError: If ``argv`` is empty, ``timeout`` is non-positive, or
+                ``cwd`` does not exist.
+            FileNotFoundError: If the executable named by ``argv[0]`` is not found.
+            PermissionError: If ``argv[0]`` is not executable.
+            Exception: Whatever ``repo.save_shell_output_as_evidence`` raises;
+                evidence-persistence failures propagate to the caller.
         """
         if not argv:
             raise ValueError("argv cannot be empty")
@@ -71,11 +80,15 @@ class SandboxRunner:
         if timeout <= 0:
             raise ValueError("timeout must be positive")
 
+        if not cwd.is_dir():
+            raise ValueError(f"cwd does not exist or is not a directory: {cwd}")
+
         proc = await asyncio.create_subprocess_exec(
             *argv,
             cwd=str(cwd),
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            start_new_session=sys.platform != "win32",
         )
 
         try:
@@ -84,14 +97,27 @@ class SandboxRunner:
             )
             timed_out = False
         except asyncio.TimeoutError:
-            proc.kill()
+            if sys.platform != "win32":
+                try:
+                    os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+                except (ProcessLookupError, PermissionError):
+                    proc.kill()
+            else:
+                proc.kill()
             stdout_b, stderr_b = await proc.communicate()
             timed_out = True
 
+        # NB: decode FIRST, then slice. Slicing bytes before decode could split a
+        # multi-byte UTF-8 sequence and produce spurious replacement characters.
         stdout = stdout_b.decode(errors="replace")[: self.max_output_chars]
         stderr = stderr_b.decode(errors="replace")[: self.max_output_chars]
+        # proc.returncode is guaranteed non-None after communicate() per asyncio docs;
+        # the fallback exists only as a defensive belt-and-braces.
         exit_code = proc.returncode if proc.returncode is not None else -1
 
+        # Evidence persistence failures propagate to the caller. The orchestrator
+        # treats them as I/O errors that abort the loop iteration; partial results
+        # without evidence are not recorded as a successful sandbox run.
         evidence_id: str = self.repo.save_shell_output_as_evidence(
             task_id=task_id,
             loop_id=loop_id,
