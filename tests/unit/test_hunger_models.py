@@ -82,3 +82,5 @@ def test_hunger_snapshot_construction() -> None:
         stop_reason=None,
     )
     assert snap.active_hunger == 60.0
+    assert snap.phase == LoopPhase.EXPLORE
+    assert snap.should_stop is False

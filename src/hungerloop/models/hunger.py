@@ -1,6 +1,28 @@
+"""Hunger domain models for HungerLoop v0.4.1.
+
+Contains the baseline v0.4 models (:class:`AcceptanceCheck`, :class:`HungerItem`,
+:class:`HungerPolicy`, :class:`HungerClockState`, :class:`HungerSnapshot`) and the
+v0.4.1 :class:`HungerLedger` that encodes invariant I-9 (BLOCKED items do not
+count as DONE).
+
+Status model:
+    - OPEN / WORKING — actionable by the agent; contribute to work pressure.
+    - BLOCKED        — the agent is stuck; excluded from ``active_items`` but
+                       still counted as unfinished so ``is_done()`` stays False.
+                       The orchestrator emits ``StopReason.BLOCKED`` when every
+                       remaining item is BLOCKED.
+    - PAUSED         — held for human input; also excluded from ``active_items``
+                       and also counted as unfinished (the orchestrator emits
+                       ``StopReason.HUMAN_PAUSED``). PAUSED is intentionally
+                       *not* merged with BLOCKED — they map to different stop
+                       reasons and drive different recovery flows.
+    - CLOSED / VALIDATED_SATISFIED — terminal-done; excluded from
+                       ``unfinished_items``.
+"""
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -16,7 +38,7 @@ from hungerloop.models.enums import (
 
 class AcceptanceCheck(BaseModel):
     check_type: AcceptanceCheckType
-    params: dict[str, object] = Field(default_factory=dict)
+    params: dict[str, Any] = Field(default_factory=dict)
     description: str = ""
 
 
@@ -29,12 +51,30 @@ class HungerItem(BaseModel):
     status: HungerItemStatus = HungerItemStatus.OPEN
 
     acceptance_checks: list[AcceptanceCheck] = Field(default_factory=list)
-    acceptance_mode: str = "all"
+    acceptance_mode: Literal["all", "any"] = "all"
 
     consecutive_failure_count: int = 0
     last_progress_loop_id: int | None = None
     evidence_ids: list[str] = Field(default_factory=list)
     updated_at_loop: int = 0
+
+
+_INACTIVE_STATUSES: frozenset[HungerItemStatus] = frozenset(
+    {
+        HungerItemStatus.CLOSED,
+        HungerItemStatus.PAUSED,
+        HungerItemStatus.BLOCKED,
+    }
+)
+"""Statuses that exclude an item from ``active_items`` (cannot be progressed)."""
+
+_DONE_STATUSES: frozenset[HungerItemStatus] = frozenset(
+    {
+        HungerItemStatus.CLOSED,
+        HungerItemStatus.VALIDATED_SATISFIED,
+    }
+)
+"""Statuses that mark an item as terminal-finished (excluded from ``unfinished_items``)."""
 
 
 class HungerLedger(BaseModel):
@@ -45,12 +85,7 @@ class HungerLedger(BaseModel):
         return [
             item
             for item in self.items
-            if item.status
-            not in {
-                HungerItemStatus.CLOSED,
-                HungerItemStatus.PAUSED,
-                HungerItemStatus.BLOCKED,
-            }
+            if item.status not in _INACTIVE_STATUSES
             and item.gap_score > 0
         ]
 
@@ -65,11 +100,7 @@ class HungerLedger(BaseModel):
         return [
             item
             for item in self.items
-            if item.status
-            not in {
-                HungerItemStatus.CLOSED,
-                HungerItemStatus.VALIDATED_SATISFIED,
-            }
+            if item.status not in _DONE_STATUSES
             and item.gap_score > 0
         ]
 
