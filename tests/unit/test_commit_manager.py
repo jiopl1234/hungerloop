@@ -155,3 +155,67 @@ def test_reject_moves_to_rejected(cm: CommitManager, ws: WorkspaceManager) -> No
     rejected = ws.rejected_files_dir("t1", 1)
     assert (rejected / "broken.txt").read_text() == "bad"
     assert not candidate_dir.exists()
+
+
+def test_commit_persists_best_state_with_correct_fields(
+    cm: CommitManager, repo: MagicMock, ws: WorkspaceManager
+) -> None:
+    """Verify that commit persists a BestState with the right fields."""
+    ws.create_candidate_workspace("t1", 1)
+    candidate = _candidate()
+    report = _report(
+        newly_passed=["H-001:0"],
+        currently_passed=["H-001:0", "H-002:0"],
+    )
+    cm.apply(candidate, report)
+
+    repo.save_best_state.assert_called_once()
+    best = repo.save_best_state.call_args.args[0]
+    assert best.task_id == "t1"
+    assert best.state_id == "CAND-t1-1"
+    assert best.validation_id == "VAL-t1-1"
+    assert best.accepted_check_keys == ["H-001:0", "H-002:0"]
+    assert best.workspace_ref == "best"
+    assert best.score == 0.0
+    repo.mark_candidate_committed.assert_called_once_with("CAND-t1-1")
+
+
+def test_reject_records_failure_and_marks_candidate(
+    cm: CommitManager, repo: MagicMock, ws: WorkspaceManager
+) -> None:
+    """Verify that reject calls the right repo methods and doesn't save BestState."""
+    ws.create_candidate_workspace("t1", 1)
+    cm.apply(_candidate(), _report(verdict=ValidationVerdict.FAIL))
+    repo.mark_candidate_rejected.assert_called_once_with("CAND-t1-1")
+    repo.add_failure_from_validation.assert_called_once()
+    repo.save_best_state.assert_not_called()
+
+
+def test_reject_reason_priority_verdict_fail_over_others(
+    cm: CommitManager, ws: WorkspaceManager
+) -> None:
+    """When multiple reject conditions hold, verdict_fail takes priority."""
+    ws.create_candidate_workspace("t1", 1)
+    report = _report(
+        verdict=ValidationVerdict.FAIL,
+        newly_passed=[],
+        regressed=["H-001:0"],
+        missing_evidence=["missing log"],
+    )
+    result = cm.apply(_candidate(), report)
+    assert result["reason"] == "verdict_fail"
+
+
+def test_reject_reason_priority_regressed_over_missing_evidence(
+    cm: CommitManager, ws: WorkspaceManager
+) -> None:
+    """When both regressed and missing_evidence hold, regressed takes priority."""
+    ws.create_candidate_workspace("t1", 1)
+    report = _report(
+        verdict=ValidationVerdict.PASS,
+        newly_passed=["H-001:1"],
+        regressed=["H-001:0"],
+        missing_evidence=["missing log"],
+    )
+    result = cm.apply(_candidate(), report)
+    assert result["reason"] == "regressed_checks_detected"

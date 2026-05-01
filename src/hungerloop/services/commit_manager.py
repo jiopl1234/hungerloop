@@ -10,11 +10,18 @@ and persists state transitions via the repository protocol (Task 14).
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, TypedDict
 
-from hungerloop.models.blackboard import BestState
+from hungerloop.models.blackboard import BestState, CandidateState
 from hungerloop.models.enums import ValidationVerdict
+from hungerloop.models.validation import ValidationReport
 from hungerloop.services.workspace_manager import WorkspaceManager
+
+
+class CommitDecision(TypedDict):
+    """Result of a commit/reject decision."""
+    committed: bool
+    reason: str
 
 
 class CommitManager:
@@ -25,15 +32,21 @@ class CommitManager:
         self.repo = repo
         self.workspace_manager = workspace_manager
 
-    def apply(self, candidate: Any, report: Any) -> dict[str, object]:
+    def apply(self, candidate: CandidateState, report: ValidationReport) -> CommitDecision:
         """Apply a validation report: promote if I-3 conditions hold, else reject.
 
         Args:
-            candidate: The candidate state (``CandidateState``).
-            report: The validation report (``ValidationReport``).
+            candidate: The candidate state.
+            report: The validation report.
 
         Returns:
-            A dict with ``committed: bool`` and ``reason: str``.
+            A decision with ``committed: bool`` and ``reason: str``.
+
+        Note:
+            Operations are not transactional. If a later step fails after the
+            workspace has been promoted/rejected, state may diverge between the
+            filesystem and the repository. Task 14's repository will provide
+            idempotent calls; recovery on restart is the orchestrator's job.
         """
         if self._can_commit(report):
             self.workspace_manager.promote_candidate_to_best(
@@ -45,7 +58,7 @@ class CommitManager:
                 task_id=candidate.task_id,
                 state_id=candidate.id,
                 summary=candidate.summary,
-                score=0.0,
+                score=0.0,  # I-3: score is not a commit signal; preserved for schema only
                 artifact_ids=candidate.artifact_ids,
                 evidence_ids=report.evidence_ids,
                 validation_id=report.id,
@@ -73,7 +86,7 @@ class CommitManager:
             "reason": self._reject_reason(report),
         }
 
-    def _can_commit(self, report: Any) -> bool:
+    def _can_commit(self, report: ValidationReport) -> bool:
         """Check if a report satisfies I-3 commit conditions."""
         if report.verdict not in {ValidationVerdict.PASS, ValidationVerdict.PARTIAL}:
             return False
@@ -85,7 +98,7 @@ class CommitManager:
             return False
         return True
 
-    def _reject_reason(self, report: Any) -> str:
+    def _reject_reason(self, report: ValidationReport) -> str:
         """Determine the rejection reason from a report."""
         if report.verdict == ValidationVerdict.FAIL:
             return "verdict_fail"
