@@ -39,13 +39,14 @@ def test_acceptance_check_type_values() -> None:
 
 
 def test_hunger_item_status_values() -> None:
-    values = {e.value for e in HungerItemStatus}
-    assert "open" in values
-    assert "working" in values
-    assert "blocked" in values
-    assert "paused" in values
-    assert "closed" in values
-    assert "validated_satisfied" in values
+    assert {e.value for e in HungerItemStatus} == {
+        "open",
+        "working",
+        "blocked",
+        "paused",
+        "closed",
+        "validated_satisfied",
+    }
 
 
 def test_decay_type_values() -> None:
@@ -63,3 +64,14 @@ def test_loop_phase_values() -> None:
 def test_hunger_item_type_values() -> None:
     assert HungerItemType.GOAL_GAP.value == "goal_gap"
     assert HungerItemType.MEMORY_CONSOLIDATION.value == "memory_consolidation"
+
+
+def test_str_enum_equality() -> None:
+    """Verify (str, Enum) inheritance gives transparent string equality."""
+    assert StopReason.DONE == "done"
+    assert ValidationVerdict.FAIL == "fail"
+    assert HungerItemStatus.BLOCKED == "blocked"
+    assert AcceptanceCheckType.FILE_EXISTS == "file_exists"
+    assert DecayType.LOOP_COUNT == "loop_count"
+    assert LoopPhase.EXPLORE == "explore"
+    assert HungerItemType.GOAL_GAP == "goal_gap"
