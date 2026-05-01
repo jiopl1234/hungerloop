@@ -5,6 +5,8 @@ implementing invariant I-10 (requirement compilation).
 """
 from __future__ import annotations
 
+from typing import Any, Literal, cast
+
 from hungerloop.models.enums import (
     AcceptanceCheckType,
     HungerItemStatus,
@@ -26,7 +28,7 @@ class RuleBasedCompiler:
         self,
         task_id: str,
         raw_goal: str,
-        hints: dict[str, object] | None = None,
+        hints: dict[str, Any] | None = None,
     ) -> tuple[str, HungerLedger]:
         """Compile a raw goal into a HungerLedger.
 
@@ -48,8 +50,13 @@ class RuleBasedCompiler:
         items: list[HungerItem] = []
 
         core_checks = hints.get("core_acceptance_checks")
-        if not core_checks:
+        if not core_checks or not isinstance(core_checks, list):
             raise ValueError("MVP requires core_acceptance_checks.")
+
+        mode_str = str(hints.get("core_acceptance_mode", "all"))
+        mode: Literal["all", "any"] = cast(
+            Literal["all", "any"], mode_str if mode_str in ("all", "any") else "all"
+        )
 
         items.append(
             HungerItem(
@@ -59,9 +66,9 @@ class RuleBasedCompiler:
                 priority=1.0,
                 gap_score=1.0,
                 acceptance_checks=[
-                    AcceptanceCheck(**c) for c in core_checks  # type: ignore[arg-type]
+                    AcceptanceCheck(**c) for c in core_checks
                 ],
-                acceptance_mode=str(hints.get("core_acceptance_mode", "all")),
+                acceptance_mode=mode,
             )
         )
 
