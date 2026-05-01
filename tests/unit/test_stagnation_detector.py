@@ -89,7 +89,9 @@ def test_max_failures_blocks_item() -> None:
     result = detector.update("t1", 1, report)
 
     assert h1.status == HungerItemStatus.BLOCKED
-    assert "H-001" in result["blocked_items"]
+    blocked = result["blocked_items"]
+    assert isinstance(blocked, list)
+    assert "H-001" in blocked
 
 
 def test_unattempted_item_not_counted() -> None:
