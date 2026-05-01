@@ -92,7 +92,7 @@ class ValidationGate:
 
                 previously = check_key in previously_passed
                 newly = passed and not previously
-                regressed = previously and not passed
+                is_regressed = previously and not passed
 
                 result = CheckResult(
                     hunger_item_id=item.id,
@@ -102,7 +102,7 @@ class ValidationGate:
                     passed=passed,
                     previously_passed=previously,
                     newly_passed=newly,
-                    regressed=regressed,
+                    regressed=is_regressed,
                     detail=detail,
                     evidence_id=ev_id,
                     workspace_ref=candidate.workspace_ref,

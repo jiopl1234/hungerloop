@@ -1,12 +1,9 @@
 """Unit tests for AcceptanceCheckRunner and ValidationGate."""
 from unittest.mock import AsyncMock, MagicMock
 
-import pytest
-
 from hungerloop.models.blackboard import BestState, CandidateState
 from hungerloop.models.enums import (
     AcceptanceCheckType,
-    HungerItemStatus,
     HungerItemType,
     ValidationVerdict,
 )
@@ -74,7 +71,6 @@ async def test_untargeted_item_not_validated() -> None:
     runner.run = AsyncMock(return_value=(True, "pass", None))
 
     h1 = _item("H-001")
-    h2 = _item("H-002")
 
     repo = MagicMock()
     repo.get_best_state.return_value = None
@@ -125,7 +121,12 @@ async def test_previously_passed_checked_as_regression() -> None:
 async def test_regression_detected() -> None:
     call_count = 0
 
-    async def mock_run(check, task_id, loop_id, candidate):
+    async def mock_run(
+        check: AcceptanceCheck,
+        task_id: str,
+        loop_id: int,
+        candidate: CandidateState,
+    ) -> tuple[bool, str, str | None]:
         nonlocal call_count
         call_count += 1
         if check.params.get("path") == "report.md":
