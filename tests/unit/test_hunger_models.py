@@ -8,7 +8,6 @@ from hungerloop.models.hunger import (
     AcceptanceCheck,
     HungerClockState,
     HungerItem,
-    HungerLedger,  # noqa: F401 – used by Task 3 tests added to this file
     HungerPolicy,
     HungerSnapshot,
 )
