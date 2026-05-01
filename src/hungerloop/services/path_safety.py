@@ -23,16 +23,20 @@ def resolve_workspace_path(workspace_root: Path, user_path: str) -> Path:
         PermissionError: If ``user_path`` is absolute or escapes the workspace.
 
     Examples:
-        >>> root = Path("/workspace")
-        >>> resolve_workspace_path(root, "sub/file.txt")
-        PosixPath('/workspace/sub/file.txt')
-        >>> resolve_workspace_path(root, "../etc/passwd")
-        PermissionError: Path escapes workspace: ../etc/passwd
+        Resolving a relative path inside the workspace succeeds::
+
+            resolve_workspace_path(Path("/workspace"), "sub/file.txt")
+            # returns Path('/workspace/sub/file.txt')
+
+        Traversal attempts are rejected::
+
+            resolve_workspace_path(Path("/workspace"), "../etc/passwd")
+            # raises PermissionError: Path escapes workspace: ../etc/passwd
     """
     root = workspace_root.resolve()
 
-    if not user_path or user_path.strip() == "":
-        raise ValueError("Empty path is not allowed.")
+    if not user_path.strip():
+        raise ValueError("Empty or whitespace-only path is not allowed.")
 
     raw = Path(user_path)
     if raw.is_absolute():
@@ -40,9 +44,7 @@ def resolve_workspace_path(workspace_root: Path, user_path: str) -> Path:
 
     resolved = (root / raw).resolve()
 
-    try:
-        resolved.relative_to(root)
-    except ValueError:
+    if not resolved.is_relative_to(root):
         raise PermissionError(f"Path escapes workspace: {user_path}")
 
     return resolved
