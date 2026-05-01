@@ -7,7 +7,11 @@ JSON alongside the workspace tree so the manifest survives across process runs.
 """
 from __future__ import annotations
 
+from typing import Literal
+
 from pydantic import BaseModel, Field
+
+WorkspaceStatus = Literal["candidate", "best", "rejected"]
 
 
 class WorkspaceManifest(BaseModel):
@@ -17,10 +21,10 @@ class WorkspaceManifest(BaseModel):
     path: str
 
     source_workspace_ref: str | None = None
-    status: str = "candidate"
+    status: WorkspaceStatus = "candidate"
 
-    created_by: str = ""
-    created_at: str = ""
+    created_by: str | None = None
+    created_at: str | None = None
 
     file_count: int = 0
     total_bytes: int = 0

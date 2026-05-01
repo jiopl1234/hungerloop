@@ -1,4 +1,4 @@
-from hungerloop.models.enums import ValidationVerdict
+from hungerloop.models.enums import AcceptanceCheckType, ValidationVerdict
 from hungerloop.models.validation import CheckResult, ValidationReport
 
 
@@ -12,7 +12,7 @@ def _check_result(
         hunger_item_id=item_id,
         check_index=int(idx_str),
         check_key=check_key,
-        check_type="file_exists",
+        check_type=AcceptanceCheckType.FILE_EXISTS,
         passed=passed,
         previously_passed=previously_passed,
         newly_passed=passed and not previously_passed,
@@ -68,6 +68,8 @@ def test_second_check_passes_later_is_also_progress() -> None:
         has_real_progress=True,
     )
     assert report.has_real_progress is True
+    assert report.newly_passed_check_keys == ["H-001:1"]
+    assert "H-001:0" not in report.newly_passed_check_keys
 
 
 def test_no_new_checks_is_no_progress() -> None:
@@ -91,3 +93,14 @@ def test_no_new_checks_is_no_progress() -> None:
         has_real_progress=False,
     )
     assert report.has_real_progress is False
+
+
+def test_previously_passing_check_now_fails_is_regression() -> None:
+    """A check that was passing in baseline but fails now must mark
+    ``regressed=True`` and ``newly_passed=False`` (the I-3 regression signal).
+    """
+    result = _check_result("H-001:0", passed=False, previously_passed=True)
+    assert result.regressed is True
+    assert result.newly_passed is False
+    assert result.passed is False
+    assert result.previously_passed is True

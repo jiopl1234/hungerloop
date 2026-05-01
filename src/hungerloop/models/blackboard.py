@@ -8,10 +8,12 @@ single loop iteration that may or may not be promoted to ``BestState``. The
 """
 from __future__ import annotations
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class BestState(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
     task_id: str
     state_id: str
     summary: str
@@ -28,6 +30,8 @@ class BestState(BaseModel):
 
 
 class CandidateState(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
     id: str
     task_id: str
     loop_id: int
