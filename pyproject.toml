@@ -30,11 +30,10 @@ testpaths = ["tests"]
 [tool.mypy]
 python_version = "3.11"
 strict = true
-plugins = ["pydantic.mypy"]
-
-[tool.pydantic-mypy]
-init_forbid_extra = true
-warn_required_dynamic_aliases = true
+# Note: the pydantic.mypy plugin is intentionally not enabled.
+# Pydantic v2 models are understood natively by recent mypy releases, and the
+# plugin bundled with pydantic 2.13.x crashes against mypy >=1.18 due to an
+# internal API mismatch. Re-enable once both upstreams realign.
 
 [tool.ruff]
 target-version = "py311"

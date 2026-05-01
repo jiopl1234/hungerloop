@@ -67,11 +67,24 @@ def test_hunger_item_type_values() -> None:
 
 
 def test_str_enum_equality() -> None:
-    """Verify (str, Enum) inheritance gives transparent string equality."""
-    assert StopReason.DONE == "done"
-    assert ValidationVerdict.FAIL == "fail"
-    assert HungerItemStatus.BLOCKED == "blocked"
-    assert AcceptanceCheckType.FILE_EXISTS == "file_exists"
-    assert DecayType.LOOP_COUNT == "loop_count"
-    assert LoopPhase.EXPLORE == "explore"
-    assert HungerItemType.GOAL_GAP == "goal_gap"
+    """Verify (str, Enum) inheritance gives transparent string equality.
+
+    Assigning the enum member into a ``str``-typed local proves the member
+    is a real ``str`` subclass at both the type-check and runtime layers,
+    and the assertion confirms value equality with the underlying literal.
+    """
+    done: str = StopReason.DONE
+    fail: str = ValidationVerdict.FAIL
+    blocked: str = HungerItemStatus.BLOCKED
+    file_exists: str = AcceptanceCheckType.FILE_EXISTS
+    loop_count: str = DecayType.LOOP_COUNT
+    explore: str = LoopPhase.EXPLORE
+    goal_gap: str = HungerItemType.GOAL_GAP
+
+    assert done == "done"
+    assert fail == "fail"
+    assert blocked == "blocked"
+    assert file_exists == "file_exists"
+    assert loop_count == "loop_count"
+    assert explore == "explore"
+    assert goal_gap == "goal_gap"
