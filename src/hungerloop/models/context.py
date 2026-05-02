@@ -1,10 +1,15 @@
-"""Context models for HungerLoop v0.4.1.
+"""Context models for HungerLoop v0.5a.
 
-:class:`ContextPack` is the agent's execution context for a single loop iteration.
+:class:`ContextPack` is the agent's execution context for a single loop
+iteration. The ``budget`` field is now typed as :class:`BudgetAllocation`
+(PRD §4.3 / §28.7); the v0.4.1 ``dict[str, object]`` shape is gone so callers
+can use attribute access (``context.budget.max_wall_clock_seconds``).
 """
 from __future__ import annotations
 
 from pydantic import BaseModel, Field
+
+from hungerloop.models.planning import BudgetAllocation
 
 
 class ContextPack(BaseModel):
@@ -30,5 +35,5 @@ class ContextPack(BaseModel):
     allowed_tools: list[str] = Field(default_factory=list)
     forbidden_tools: list[str] = Field(default_factory=list)
 
-    budget: dict[str, object] = Field(default_factory=dict)
+    budget: BudgetAllocation
     required_output_schema: str = ""

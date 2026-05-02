@@ -64,9 +64,6 @@ class ContextBuilder:
             best_state_summary=best.summary if best else None,
             candidate_workspace_ref=candidate_workspace_ref,
             allowed_tools=allowed_tools,
-            budget={
-                "max_tokens": budget.max_tokens,
-                "max_tool_calls": budget.max_tool_calls,
-            },
+            budget=budget,
             required_output_schema=output_schema_name,
         )

@@ -1,6 +1,10 @@
-"""Tracing models for HungerLoop v0.4.1.
+"""Tracing models for HungerLoop v0.5a.
 
 :class:`LoopTrace` records the outcome of one loop iteration.
+
+``candidate_state_id`` / ``validation_report_id`` are nullable so the
+Orchestrator can emit a trace on empty-plan, SafetyStopError, and worker-
+timeout paths where no candidate or validation exists (reverse-spec U10).
 """
 from __future__ import annotations
 
@@ -20,8 +24,8 @@ class LoopTrace(BaseModel):
     work_pressure: float
     selected_hunger_item_ids: list[str] = Field(default_factory=list)
     worker_ids: list[str] = Field(default_factory=list)
-    candidate_state_id: str
-    validation_report_id: str
+    candidate_state_id: str | None = None
+    validation_report_id: str | None = None
     committed: bool
     delta_summary: str = ""
     blocked_item_ids: list[str] = Field(default_factory=list)

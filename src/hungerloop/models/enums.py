@@ -50,3 +50,19 @@ class LoopPhase(str, Enum):
     EXPLORE = "explore"
     EXPLOIT = "exploit"
     COOLDOWN = "cooldown"
+
+
+class EvidenceType(str, Enum):
+    """Taxonomy for evidence rows.
+
+    New in v0.5a (PRD §3.3 / §28 M7). Freezes the set of type strings so
+    repository implementations and ``count_evidence_by_type`` callers stop
+    relying on ad-hoc literals.
+    """
+
+    SANDBOX_RUN = "sandbox_run"
+    MODEL_CALL = "model_call"
+    MODEL_ERROR = "model_error"
+    VALIDATION_CHECK = "validation_check"
+    TOOL_CALL = "tool_call"
+    HUMAN_INPUT = "human_input"
