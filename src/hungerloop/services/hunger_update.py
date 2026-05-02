@@ -10,18 +10,18 @@ FAIL verdicts are a no-op — no writes occur.
 """
 from __future__ import annotations
 
-from typing import Any
-
 from hungerloop.models.enums import HungerItemStatus, ValidationVerdict
+from hungerloop.models.validation import ValidationReport
+from hungerloop.repository.protocol import RepositoryProtocol
 
 
 class HungerUpdateService:
     """Applies validation outcomes to hunger items."""
 
-    def __init__(self, repo: Any) -> None:
+    def __init__(self, repo: RepositoryProtocol) -> None:
         self.repo = repo
 
-    def apply_validation(self, task_id: str, report: Any) -> None:
+    def apply_validation(self, task_id: str, report: ValidationReport) -> None:
         """Apply a ValidationReport to the task's hunger items.
 
         Args:

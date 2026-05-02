@@ -4,17 +4,15 @@
 """
 from __future__ import annotations
 
-from typing import Any
-
 from hungerloop.models.context import ContextPack
 from hungerloop.models.planning import BudgetAllocation
+from hungerloop.repository.protocol import RepositoryProtocol
 
 
 class ContextBuilder:
     """Build agent execution contexts."""
 
-    def __init__(self, repo: Any) -> None:
-        # TODO(Task 14): tighten ``repo`` to the Repository protocol once it lands.
+    def __init__(self, repo: RepositoryProtocol) -> None:
         self.repo = repo
 
     def build_for_agent(

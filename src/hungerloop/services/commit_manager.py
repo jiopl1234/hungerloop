@@ -10,11 +10,13 @@ and persists state transitions via the repository protocol (Task 14).
 
 from __future__ import annotations
 
-from typing import Any, TypedDict
+from typing import TypedDict
 
 from hungerloop.models.blackboard import BestState, CandidateState
 from hungerloop.models.enums import ValidationVerdict
 from hungerloop.models.validation import ValidationReport
+from hungerloop.repository.protocol import RepositoryProtocol
+from hungerloop.services.validation_gate import make_check_key
 from hungerloop.services.workspace_manager import WorkspaceManager
 
 
@@ -27,8 +29,9 @@ class CommitDecision(TypedDict):
 class CommitManager:
     """Decide whether to promote or reject a candidate based on validation."""
 
-    def __init__(self, repo: Any, workspace_manager: WorkspaceManager) -> None:
-        # TODO(Task 14): tighten ``repo`` to the Repository protocol once it lands.
+    def __init__(
+        self, repo: RepositoryProtocol, workspace_manager: WorkspaceManager
+    ) -> None:
         self.repo = repo
         self.workspace_manager = workspace_manager
 
@@ -43,10 +46,11 @@ class CommitManager:
             A decision with ``committed: bool`` and ``reason: str``.
 
         Note:
-            Operations are not transactional. If a later step fails after the
-            workspace has been promoted/rejected, state may diverge between the
-            filesystem and the repository. Task 14's repository will provide
-            idempotent calls; recovery on restart is the orchestrator's job.
+            v0.5a (ADR-001): the repository writes that follow promotion or
+            rejection execute inside ``repo.transaction()``. Filesystem
+            operations remain outside the transaction (they cannot
+            participate in SQLite atomicity); recovery on restart is the
+            Orchestrator's job.
         """
         if self._can_commit(report):
             self.workspace_manager.promote_candidate_to_best(
@@ -67,8 +71,23 @@ class CommitManager:
                 workspace_ref="best",
             )
 
-            self.repo.save_best_state(best)
-            self.repo.mark_candidate_committed(candidate.id)
+            with self.repo.transaction():
+                self.repo.save_best_state(best)
+                self.repo.mark_candidate_committed(candidate.id)
+                # §28.9 / M9: per-check accepted record; only newly-passed
+                # rows are inserted (previously-passed rows already exist).
+                evidence_by_key = self._evidence_by_check_key(report)
+                for check_key in report.newly_passed_check_keys:
+                    item_id, idx_str = check_key.split(":", 1)
+                    self.repo.save_accepted_check(
+                        task_id=candidate.task_id,
+                        check_key=check_key,
+                        hunger_item_id=item_id,
+                        check_index=int(idx_str),
+                        accepted_at_loop=candidate.loop_id,
+                        validation_id=report.id,
+                        evidence_id=evidence_by_key.get(check_key),
+                    )
             return {
                 "committed": True,
                 "reason": "validation_passed_with_check_progress",
@@ -78,12 +97,21 @@ class CommitManager:
             task_id=candidate.task_id,
             loop_id=candidate.loop_id,
         )
-        self.repo.mark_candidate_rejected(candidate.id)
-        self.repo.add_failure_from_validation(report)
+        with self.repo.transaction():
+            self.repo.mark_candidate_rejected(candidate.id)
+            self.repo.add_failure_from_validation(report)
 
         return {
             "committed": False,
             "reason": self._reject_reason(report),
+        }
+
+    @staticmethod
+    def _evidence_by_check_key(report: ValidationReport) -> dict[str, str | None]:
+        """Map ``check_key`` to the first evidence_id from CheckResult, if any."""
+        return {
+            make_check_key(r.hunger_item_id, r.check_index): r.evidence_id
+            for r in report.check_results
         }
 
     def _can_commit(self, report: ValidationReport) -> bool:

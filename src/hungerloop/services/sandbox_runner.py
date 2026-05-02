@@ -13,9 +13,10 @@ import os
 import signal
 import sys
 from pathlib import Path
-from typing import Any
 
 from pydantic import BaseModel
+
+from hungerloop.repository.protocol import RepositoryProtocol
 
 
 class SandboxRunResult(BaseModel):
@@ -33,8 +34,7 @@ class SandboxRunResult(BaseModel):
 class SandboxRunner:
     """Execute shell commands with timeout and output limits."""
 
-    def __init__(self, repo: Any, max_output_chars: int = 5000) -> None:
-        # TODO(Task 14): tighten ``repo`` to the Repository protocol once it lands.
+    def __init__(self, repo: RepositoryProtocol, max_output_chars: int = 5000) -> None:
         """Initialize the runner.
 
         Args:

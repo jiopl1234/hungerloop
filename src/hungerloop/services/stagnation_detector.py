@@ -1,17 +1,26 @@
-"""StagnationDetector service for HungerLoop v0.4.1.
+"""StagnationDetector service for HungerLoop v0.5a.
 
 Tracks per-item consecutive failures and global no-progress streaks. When an item
 reaches the failure threshold, it is marked BLOCKED. When the global no-progress
 streak exceeds the threshold, the orchestrator should emit StopReason.BLOCKED.
 
 Only items in ``attempted_hunger_item_ids`` are counted; unattempted items are
-ignored (invariant I-8: attempted-only tracking).
+ignored (invariant I-6: attempted-only tracking).
 """
 from __future__ import annotations
 
-from typing import Any
+from typing import TypedDict
 
 from hungerloop.models.enums import HungerItemStatus
+from hungerloop.models.validation import ValidationReport
+from hungerloop.repository.protocol import RepositoryProtocol
+
+
+class StagnationResult(TypedDict):
+    """Result of stagnation detection."""
+
+    blocked_items: list[str]
+    global_blocked: bool
 
 
 class StagnationDetector:
@@ -26,7 +35,7 @@ class StagnationDetector:
 
     def __init__(
         self,
-        repo: Any,
+        repo: RepositoryProtocol,
         max_item_consecutive_failures: int = 3,
         max_global_no_progress_loops: int = 5,
     ) -> None:
@@ -35,8 +44,8 @@ class StagnationDetector:
         self.max_global_no_progress = max_global_no_progress_loops
 
     def update(
-        self, task_id: str, loop_id: int, validation_report: Any
-    ) -> dict[str, object]:
+        self, task_id: str, loop_id: int, validation_report: ValidationReport
+    ) -> StagnationResult:
         """Update stagnation counters based on validation report.
 
         Args:
@@ -46,9 +55,7 @@ class StagnationDetector:
                 newly_passed_check_keys, and has_real_progress.
 
         Returns:
-            Dictionary with:
-                - blocked_items: List of item IDs newly marked BLOCKED.
-                - global_blocked: True if global no-progress streak exceeded threshold.
+            StagnationResult with blocked_items and global_blocked.
         """
         attempted = set(validation_report.attempted_hunger_item_ids)
         newly_progressed: set[str] = set()

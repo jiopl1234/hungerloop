@@ -24,6 +24,7 @@ from typing import Any
 
 from hungerloop.models.enums import ValidationVerdict
 from hungerloop.models.validation import CheckResult, ValidationReport
+from hungerloop.repository.protocol import RepositoryProtocol
 from hungerloop.services.acceptance_runner import AcceptanceCheckRunner
 
 
@@ -35,8 +36,9 @@ def make_check_key(hunger_item_id: str, check_index: int) -> str:
 class ValidationGate:
     """Validate a candidate workspace against target hunger items."""
 
-    def __init__(self, repo: Any, acceptance_runner: AcceptanceCheckRunner) -> None:
-        # TODO(Task 14): tighten ``repo`` to the Repository protocol once it lands.
+    def __init__(
+        self, repo: RepositoryProtocol, acceptance_runner: AcceptanceCheckRunner
+    ) -> None:
         self.repo = repo
         self.runner = acceptance_runner
 

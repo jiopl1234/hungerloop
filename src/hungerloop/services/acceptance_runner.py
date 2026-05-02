@@ -15,7 +15,9 @@ from __future__ import annotations
 from typing import Any
 
 from hungerloop.models.enums import AcceptanceCheckType
+from hungerloop.repository.protocol import RepositoryProtocol
 from hungerloop.services.path_safety import resolve_workspace_path
+from hungerloop.services.sandbox_runner import SandboxRunner
 from hungerloop.services.workspace_manager import WorkspaceManager
 
 
@@ -24,12 +26,10 @@ class AcceptanceCheckRunner:
 
     def __init__(
         self,
-        repo: Any,
+        repo: RepositoryProtocol,
         workspace_manager: WorkspaceManager,
-        sandbox_runner: Any,
+        sandbox_runner: SandboxRunner,
     ) -> None:
-        # TODO(Task 14): tighten ``repo`` and ``sandbox_runner`` once the
-        # Repository protocol lands.
         self.repo = repo
         self.workspace_manager = workspace_manager
         self.sandbox_runner = sandbox_runner

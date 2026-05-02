@@ -8,7 +8,8 @@ every LLM/tool invocation to prevent runaway spend.
 """
 from __future__ import annotations
 
-from typing import Any
+from hungerloop.models.usage import ModelUsage
+from hungerloop.repository.protocol import RepositoryProtocol
 
 
 class SafetyStopError(RuntimeError):
@@ -19,8 +20,7 @@ class SafetyStopError(RuntimeError):
 class CostGuard:
     """Enforce cost and token ceilings."""
 
-    def __init__(self, repo: Any) -> None:
-        # TODO(Task 14): tighten ``repo`` to the Repository protocol once it lands.
+    def __init__(self, repo: RepositoryProtocol) -> None:
         self.repo = repo
 
     def assert_within_budget(self, task_id: str) -> None:
@@ -47,7 +47,7 @@ class CostGuard:
                 f" >= {policy.max_total_tokens}"
             )
 
-    def record_llm_usage(self, task_id: str, usage: Any) -> None:
+    def record_llm_usage(self, task_id: str, usage: ModelUsage) -> None:
         """Record LLM usage and check budget.
 
         Args:
