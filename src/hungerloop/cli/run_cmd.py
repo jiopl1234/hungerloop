@@ -8,6 +8,7 @@ import click
 from hungerloop.cli.context import CliContext
 from hungerloop.cli.orchestrator_factory import build_orchestrator
 from hungerloop.cli.preflight import PreflightError, check_resume_preflight
+from hungerloop.services.skill_manager import SkillManager
 
 
 @click.command("run")
@@ -100,9 +101,12 @@ def run(
     orchestrator.workspace_manager.ensure_task_workspace(task_id)
 
     report = asyncio.run(orchestrator.run(task_id))
+    skill_card = SkillManager(ctx.repo).maybe_create_skill_card(task_id, report)
     ctx.repo.save_stop_report(report)
 
     click.echo(f"Task {task_id} stopped: {report.stop_reason.value}")
+    if skill_card is not None:
+        click.echo(f"  skill_card: {skill_card.skill_id}")
     click.echo(f"  goal_status: {report.goal_status}")
     click.echo(f"  total_loops: {report.total_loops}")
     click.echo(f"  total_cost_usd: {report.total_cost_usd:.4f}")

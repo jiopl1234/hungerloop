@@ -59,15 +59,6 @@ class _ProposesMemory(Protocol):
     ) -> object: ...
 
 
-@runtime_checkable
-class _ProposesSkill(Protocol):
-    """Optional :class:`SkillManager` shape (Day 12)."""
-
-    def propose_from_loop(
-        self, task_id: str, loop_id: int, validation: ValidationReport
-    ) -> object: ...
-
-
 def _build_delta_summary(
     *, committed: bool, newly_passed: list[str], regressed: list[str], reason: str
 ) -> str:
@@ -98,7 +89,6 @@ class LoopOrchestrator:
         hunger_update: HungerUpdateService,
         stagnation_detector: StagnationDetector,
         memory_manager: _ProposesMemory | None = None,
-        skill_manager: _ProposesSkill | None = None,
         max_loops_safety_cap: int = 1000,
     ) -> None:
         self.repo = repo
@@ -114,7 +104,6 @@ class LoopOrchestrator:
         self.hunger_update = hunger_update
         self.stagnation_detector = stagnation_detector
         self.memory_manager = memory_manager
-        self.skill_manager = skill_manager
         self.max_loops_safety_cap = max_loops_safety_cap
 
     async def step(self, task_id: str) -> LoopTrace | StopReport:
@@ -198,8 +187,8 @@ class LoopOrchestrator:
 
         if self.memory_manager is not None:
             self.memory_manager.propose_from_loop(task_id, loop_id, validation)
-        if self.skill_manager is not None:
-            self.skill_manager.propose_from_loop(task_id, loop_id, validation)
+        # SkillCard generation is end-of-task only (PRD §20.2); the CLI calls
+        # SkillManager.maybe_create_skill_card after the StopReport is built.
 
         usage_after = self.repo.get_usage_snapshot(task_id).model_copy()
         trace = LoopTrace(
