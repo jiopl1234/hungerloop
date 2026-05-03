@@ -78,6 +78,45 @@ def test_full_progress_sets_validated_satisfied() -> None:
     assert h1.status == HungerItemStatus.VALIDATED_SATISFIED
 
 
+def test_epsilon_snap_to_zero_after_repeated_decrements() -> None:
+    """PRD §14: residual ~1e-17 after fractional decrements must snap to 0.0."""
+    h1 = _item("H-001", num_checks=3, gap=1.0)
+    repo = MagicMock()
+    repo.get_hunger_item.return_value = h1
+
+    svc = HungerUpdateService(repo)
+    # Three rounds of single-check progress; 1.0 - 3 * (1/3) leaves a float dust.
+    for i in range(3):
+        report = _report(
+            ValidationVerdict.PARTIAL,
+            newly_passed=[f"H-001:{i}"],
+            satisfied=[],
+        )
+        svc.apply_validation("t1", report)
+
+    assert h1.gap_score == 0.0
+    assert h1.status == HungerItemStatus.VALIDATED_SATISFIED
+
+
+def test_satisfied_force_zeroes_gap_even_if_decrement_falls_short() -> None:
+    """PRD §14.3: items in satisfied_hunger_item_ids are force-zeroed."""
+    h1 = _item("H-001", num_checks=4, gap=0.75)
+    repo = MagicMock()
+    repo.get_hunger_item.return_value = h1
+
+    svc = HungerUpdateService(repo)
+    # Only one new check, but validator says the whole item is satisfied.
+    report = _report(
+        ValidationVerdict.PASS,
+        newly_passed=["H-001:0"],
+        satisfied=["H-001"],
+    )
+    svc.apply_validation("t1", report)
+
+    assert h1.gap_score == 0.0
+    assert h1.status == HungerItemStatus.VALIDATED_SATISFIED
+
+
 def test_fail_verdict_no_update() -> None:
     h1 = _item("H-001")
     repo = MagicMock()

@@ -2,9 +2,15 @@
 
 Applies validation outcomes to hunger items by decrementing their ``gap_score``
 proportionally to the number of newly-passed acceptance checks (check-level
-progress, invariant I-3). When an item reaches zero gap AND is listed in
-``satisfied_hunger_item_ids``, its status transitions to VALIDATED_SATISFIED.
-Otherwise an item with progress becomes WORKING.
+progress, invariant I-3). When an item reaches zero gap, its status transitions
+to VALIDATED_SATISFIED. Otherwise an item with progress becomes WORKING.
+
+Float convergence (PRD §14):
+    Multi-round decrement of ``new_count / total_checks`` can leave a residual
+    of ~1e-17 so ``gap_score == 0.0`` never holds. The fix:
+
+    * Items present in ``satisfied_hunger_item_ids`` are force-zeroed.
+    * All other items snap to 0.0 once ``gap_score <= EPSILON`` (1e-9).
 
 FAIL verdicts are a no-op — no writes occur.
 """
@@ -13,6 +19,8 @@ from __future__ import annotations
 from hungerloop.models.enums import HungerItemStatus, ValidationVerdict
 from hungerloop.models.validation import ValidationReport
 from hungerloop.repository.protocol import RepositoryProtocol
+
+EPSILON = 1e-9
 
 
 class HungerUpdateService:
@@ -45,14 +53,17 @@ class HungerUpdateService:
             total_checks = max(1, len(item.acceptance_checks))
             decrement = new_count / total_checks
 
-            item.gap_score = max(0.0, item.gap_score - decrement)
+            if item.id in report.satisfied_hunger_item_ids:
+                item.gap_score = 0.0
+            else:
+                item.gap_score = max(0.0, item.gap_score - decrement)
+                if item.gap_score <= EPSILON:
+                    item.gap_score = 0.0
+
             item.evidence_ids.extend(report.evidence_ids)
             item.updated_at_loop = report.loop_id
 
-            if (
-                item.id in report.satisfied_hunger_item_ids
-                and item.gap_score == 0.0
-            ):
+            if item.gap_score == 0.0:
                 item.status = HungerItemStatus.VALIDATED_SATISFIED
             else:
                 item.status = HungerItemStatus.WORKING

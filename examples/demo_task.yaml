@@ -1,0 +1,22 @@
+goal: "Create a small report and validate it."
+policy:
+  initial_hunger: 100
+  h_max: 100
+  decay_type: loop_count
+  decay_duration_seconds: 8
+  max_total_cost_usd: 1.0
+  max_total_tokens: 100000
+model:
+  provider: dummy
+  model_name: dummy
+acceptance:
+  core_acceptance_checks:
+    - check_type: file_exists
+      params:
+        path: report.md
+      description: report.md exists
+    - check_type: shell_exit_zero
+      params:
+        argv: ["python", "-c", "open('report.md').read(); print('ok')"]
+        timeout: 10
+      description: report.md is readable
