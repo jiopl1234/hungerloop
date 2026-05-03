@@ -134,9 +134,17 @@ def test_loop_plan_persists() -> None:
 
 def test_stop_report_history() -> None:
     repo = InMemoryRepository()
-    repo.save_stop_report(StopReport(task_id="t1", stop_reason=StopReason.DONE))
     repo.save_stop_report(
-        StopReport(task_id="t1", stop_reason=StopReason.HUNGER_EXPIRED)
+        StopReport(
+            task_id="t1", stop_reason=StopReason.DONE, goal_status="completed"
+        )
+    )
+    repo.save_stop_report(
+        StopReport(
+            task_id="t1",
+            stop_reason=StopReason.HUNGER_EXPIRED,
+            goal_status="abandoned",
+        )
     )
     assert repo.get_last_stop_reason("t1") == StopReason.HUNGER_EXPIRED
 

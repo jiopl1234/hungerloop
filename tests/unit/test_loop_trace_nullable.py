@@ -44,7 +44,10 @@ def test_loop_trace_round_trips_with_ids() -> None:
 
 
 def test_stop_report_minimal() -> None:
-    report = StopReport(task_id="t1", stop_reason=StopReason.DONE)
+    report = StopReport(
+        task_id="t1", stop_reason=StopReason.DONE, goal_status="completed"
+    )
     assert report.task_id == "t1"
     assert report.stop_reason == StopReason.DONE
+    assert report.goal_status == "completed"
     assert report.summary == ""
