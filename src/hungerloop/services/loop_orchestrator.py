@@ -56,7 +56,7 @@ class _ProposesMemory(Protocol):
 
     def propose_from_loop(
         self, task_id: str, loop_id: int, validation: ValidationReport
-    ) -> None: ...
+    ) -> object: ...
 
 
 @runtime_checkable
@@ -65,7 +65,7 @@ class _ProposesSkill(Protocol):
 
     def propose_from_loop(
         self, task_id: str, loop_id: int, validation: ValidationReport
-    ) -> None: ...
+    ) -> object: ...
 
 
 def _build_delta_summary(
