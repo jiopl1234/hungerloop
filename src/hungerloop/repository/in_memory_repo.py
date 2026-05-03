@@ -329,7 +329,6 @@ class InMemoryRepository:
         return [self._artifacts[aid] for aid in artifact_ids if aid in self._artifacts]
 
     def save_artifact(self, artifact: Artifact) -> None:
-        """Test/CLI helper (not in protocol)."""
         self._artifacts[artifact.artifact_id] = artifact
 
     # =====================================================================

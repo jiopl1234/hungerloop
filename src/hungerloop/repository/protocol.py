@@ -158,6 +158,12 @@ class RepositoryProtocol(Protocol):
 
     def get_artifacts_by_ids(self, artifact_ids: list[str]) -> list[Artifact]: ...
 
+    def save_artifact(self, artifact: Artifact) -> None: ...
+    """New in v0.5a (Day 5): ToolHarness persists artifacts produced by
+    write_file / patch_file. Previously a test-only helper on
+    InMemoryRepository; promoted to the protocol now that the production
+    path needs it."""
+
     # =====================================================================
     # Section 5 — Worker / Planning
     # =====================================================================

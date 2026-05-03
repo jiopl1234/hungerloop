@@ -28,6 +28,7 @@ from hungerloop.repository.protocol import RepositoryProtocol
 from hungerloop.services.budget_guard import BudgetGuard, WorkerBudgetExceeded
 from hungerloop.services.cost_guard import CostGuard, SafetyStopError
 from hungerloop.services.model_client import ModelAuthError, ModelCallError
+from hungerloop.services.tool_harness import ToolNotPermitted
 
 _UNKNOWN_PROVIDER = "unknown"
 """WorkerRuntime cannot know which provider raised — only the model client
@@ -116,6 +117,17 @@ class WorkerRuntime:
                 loop_id=context.loop_id,
                 error=str(exc),
                 error_type="worker_budget_exceeded",
+                requires_human=False,
+                retryable=False,
+            )
+
+        except ToolNotPermitted as exc:
+            return WorkerResult(
+                agent_id=spec.agent_id,
+                task_id=context.task_id,
+                loop_id=context.loop_id,
+                error=str(exc),
+                error_type="tool_not_permitted",
                 requires_human=False,
                 retryable=False,
             )

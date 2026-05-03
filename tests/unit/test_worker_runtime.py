@@ -15,6 +15,7 @@ from hungerloop.repository.in_memory_repo import InMemoryRepository
 from hungerloop.services.budget_guard import BudgetGuard, WorkerBudgetExceeded
 from hungerloop.services.cost_guard import CostGuard, SafetyStopError
 from hungerloop.services.model_client import ModelAuthError, ModelCallError
+from hungerloop.services.tool_harness import ToolNotPermitted
 from hungerloop.services.worker_runtime import WorkerRuntime
 
 _AGENT_ID = "execution_worker_v1"
@@ -209,3 +210,17 @@ async def test_safety_stop_from_cost_guard_re_raises(
     runtime = WorkerRuntime({_AGENT_ID: _FakeWorker()}, cost_guard, BudgetGuard(), repo)
     with pytest.raises(SafetyStopError, match="Cost ceiling"):
         await runtime.run(_spec(), _context(), Path("/tmp"))
+
+
+async def test_tool_not_permitted_maps_to_result(
+    repo: InMemoryRepository, cost_guard: CostGuard
+) -> None:
+    """PRD §28.11: ToolNotPermitted -> error_type='tool_not_permitted'."""
+    worker = _FakeWorker(raises=ToolNotPermitted("shell disabled by budget"))
+    runtime = WorkerRuntime({_AGENT_ID: worker}, cost_guard, BudgetGuard(), repo)
+    result = await runtime.run(_spec(), _context(), Path("/tmp"))
+
+    assert result.error_type == "tool_not_permitted"
+    assert result.requires_human is False
+    assert result.retryable is False
+    assert "shell disabled" in (result.error or "")
