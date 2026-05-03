@@ -68,6 +68,7 @@ class OpenAIModelClient:
         self,
         *,
         task_id: str,
+        loop_id: int,
         agent_id: str,
         messages: list[dict[str, str]],
         max_tokens: int,
@@ -75,16 +76,21 @@ class OpenAIModelClient:
         retry_base_delay_seconds: float = 1.0,
         retry_max_delay_seconds: float = 20.0,
     ) -> ModelResponse:
-        """Send one chat-completion request with retries (PRD §28.2)."""
-        self.cost_guard.assert_within_budget(task_id)
+        """Send one chat-completion request with retries (PRD §28.2).
 
+        I-8: ``cost_guard.assert_within_budget`` runs *before every* attempt,
+        not just before the first one, so a budget that flips during a long
+        retry sequence still short-circuits cleanly with ``SafetyStopError``.
+        """
         last_error: ModelCallError | None = None
         async with self._client_factory() as client:
             for attempt in range(max_retries + 1):
+                self.cost_guard.assert_within_budget(task_id)
                 try:
                     return await self._call_once(
                         client,
                         task_id=task_id,
+                        loop_id=loop_id,
                         agent_id=agent_id,
                         messages=messages,
                         max_tokens=max_tokens,
@@ -93,7 +99,7 @@ class OpenAIModelClient:
                     # never retry; still record final-error evidence (PRD §11.4 #6)
                     self.repo.save_model_error_as_evidence(
                         task_id=task_id,
-                        loop_id=None,
+                        loop_id=loop_id,
                         agent_id=agent_id,
                         provider=self.config.provider.value,
                         model=self.config.model_name,
@@ -128,7 +134,7 @@ class OpenAIModelClient:
         # Final-error evidence (PRD §11.4 #6).
         self.repo.save_model_error_as_evidence(
             task_id=task_id,
-            loop_id=None,
+            loop_id=loop_id,
             agent_id=agent_id,
             provider=self.config.provider.value,
             model=self.config.model_name,
@@ -143,6 +149,7 @@ class OpenAIModelClient:
         client: httpx.AsyncClient,
         *,
         task_id: str,
+        loop_id: int,
         agent_id: str,
         messages: list[dict[str, str]],
         max_tokens: int,
@@ -189,7 +196,7 @@ class OpenAIModelClient:
 
         evidence_id = self.repo.save_model_call_as_evidence(
             task_id=task_id,
-            loop_id=0,  # ModelClient doesn't know loop_id; orchestrator sets evidence at write time
+            loop_id=loop_id,
             agent_id=agent_id,
             provider=self.config.provider.value,
             model=self.config.model_name,

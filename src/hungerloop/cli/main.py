@@ -17,6 +17,8 @@ clear message. Tests inject a :class:`CliContext` carrying an
 """
 from __future__ import annotations
 
+from importlib.metadata import PackageNotFoundError, version
+
 import click
 
 from hungerloop.cli.checks_cmd import checks
@@ -28,6 +30,12 @@ from hungerloop.cli.run_cmd import run
 from hungerloop.cli.skill_cmd import skill
 from hungerloop.cli.status_cmd import status
 from hungerloop.cli.workspace_cmd import workspace
+
+try:
+    _PACKAGE_VERSION = version("hungerloop")
+except PackageNotFoundError:
+    # Editable install / source checkout without metadata: fall back gracefully.
+    _PACKAGE_VERSION = "0+source"
 
 
 def _default_context() -> CliContext:
@@ -46,7 +54,7 @@ def _default_context() -> CliContext:
 
 
 @click.group()
-@click.version_option(version="0.5.0")
+@click.version_option(version=_PACKAGE_VERSION)
 @click.pass_context
 def cli(click_ctx: click.Context) -> None:
     """HungerLoop Agent Harness CLI."""

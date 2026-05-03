@@ -38,6 +38,7 @@ async def test_dummy_returns_fallback_when_script_empty() -> None:
     client = DummyModelClient()
     response = await client.complete_json(
         task_id="t1",
+        loop_id=1,
         agent_id="a1",
         messages=[{"role": "user", "content": "hi"}],
         max_tokens=100,
@@ -61,13 +62,13 @@ async def test_dummy_consumes_script_in_order() -> None:
     client = DummyModelClient([first, second])
 
     r1 = await client.complete_json(
-        task_id="t1", agent_id="a1", messages=[], max_tokens=10
+        task_id="t1", loop_id=1, agent_id="a1", messages=[], max_tokens=10
     )
     r2 = await client.complete_json(
-        task_id="t1", agent_id="a1", messages=[], max_tokens=10
+        task_id="t1", loop_id=1, agent_id="a1", messages=[], max_tokens=10
     )
     r3 = await client.complete_json(
-        task_id="t1", agent_id="a1", messages=[], max_tokens=10
+        task_id="t1", loop_id=1, agent_id="a1", messages=[], max_tokens=10
     )
 
     assert r1.json_data == {"summary": "a", "actions": []}
@@ -82,7 +83,7 @@ async def test_dummy_with_actions_emits_them() -> None:
     ]
     client = DummyModelClient.with_actions(actions)
     response = await client.complete_json(
-        task_id="t1", agent_id="a1", messages=[], max_tokens=10
+        task_id="t1", loop_id=1, agent_id="a1", messages=[], max_tokens=10
     )
     assert response.json_data is not None
     assert response.json_data["actions"] == actions
@@ -94,6 +95,7 @@ async def test_dummy_ignores_retry_kwargs() -> None:
     client = DummyModelClient()
     response = await client.complete_json(
         task_id="t1",
+        loop_id=1,
         agent_id="a1",
         messages=[],
         max_tokens=10,

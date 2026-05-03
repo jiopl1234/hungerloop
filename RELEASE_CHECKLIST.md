@@ -4,10 +4,10 @@ Pre-release verification per PRD §22.1 (v0.5a Acceptance Criteria) and §23 (Te
 
 ## 1. Test suites
 
-- [ ] `pytest tests/` — all unit + integration tests green (310 expected).
+- [ ] `pytest tests/` — all unit + integration tests green (311 expected: 304 unit + 7 integration).
 - [ ] `mypy --strict src/` — clean across the 60 source files.
 - [ ] `ruff check src/ tests/` — no violations.
-- [ ] `pytest tests/integration/` — six end-to-end orchestrator scenarios pass.
+- [ ] `pytest tests/integration/` — seven end-to-end orchestrator scenarios pass.
 
 ## 2. PRD §22.1 acceptance criteria
 

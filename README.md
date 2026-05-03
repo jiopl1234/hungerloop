@@ -4,7 +4,7 @@ A Python async agent harness implementing check-level progress tracking, hunger-
 
 ## Status
 
-**v0.5a — Orchestrator + Dummy ExecutionWorker.** 310 tests green, `mypy --strict src/` clean, all v0.4 invariants preserved.
+**v0.5a — Orchestrator + Dummy ExecutionWorker.** 311 tests green (304 unit + 7 integration), `mypy --strict src/` clean, all v0.4 invariants preserved.
 
 The v0.5a release adds the loop orchestrator, planner, worker runtime, model client, tool harness, memory candidate generation, skill card trigger, and CLI. Production persistence (`SQLiteRepository`) ships in v0.5b.
 
@@ -38,7 +38,7 @@ The v0.5a release adds the loop orchestrator, planner, worker runtime, model cli
 pip install -e ".[dev]"
 
 # Tests
-pytest tests/                      # 310 tests
+pytest tests/                      # 311 tests (304 unit + 7 integration)
 mypy --strict src/                 # 60 source files, clean
 ruff check src/ tests/
 
@@ -79,8 +79,8 @@ src/hungerloop/
   repository/     # Protocol + InMemoryRepository (SQLite ships in v0.5b)
   cli/            # click-based: new, run, status, hunger, memory, skill, workspace, checks
 tests/
-  unit/           # 280 unit tests
-  integration/    # 6 end-to-end orchestrator tests (PRD §23.2)
+  unit/           # 304 unit tests
+  integration/    # 7 end-to-end orchestrator tests (PRD §23.2)
 ```
 
 ## Documentation

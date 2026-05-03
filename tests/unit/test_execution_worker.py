@@ -113,6 +113,7 @@ async def test_execution_worker_passes_retry_kwargs(tmp_path: Path) -> None:
             self,
             *,
             task_id: str,
+            loop_id: int,
             agent_id: str,
             messages: list[dict[str, str]],
             max_tokens: int,
@@ -120,11 +121,13 @@ async def test_execution_worker_passes_retry_kwargs(tmp_path: Path) -> None:
             retry_base_delay_seconds: float = 1.0,
             retry_max_delay_seconds: float = 20.0,
         ):
+            captured["loop_id"] = loop_id
             captured["max_retries"] = max_retries
             captured["retry_base"] = retry_base_delay_seconds
             captured["retry_max"] = retry_max_delay_seconds
             return await super().complete_json(
                 task_id=task_id,
+                loop_id=loop_id,
                 agent_id=agent_id,
                 messages=messages,
                 max_tokens=max_tokens,
@@ -139,3 +142,4 @@ async def test_execution_worker_passes_retry_kwargs(tmp_path: Path) -> None:
     assert captured["max_retries"] == ctx.budget.max_model_retries
     assert captured["retry_base"] == ctx.budget.retry_base_delay_seconds
     assert captured["retry_max"] == ctx.budget.retry_max_delay_seconds
+    assert captured["loop_id"] == ctx.loop_id

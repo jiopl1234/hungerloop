@@ -68,6 +68,7 @@ async def test_complete_json_happy_path(
     client, repo = _make_client(monkeypatch, handler)
     response = await client.complete_json(
         task_id="t1",
+        loop_id=1,
         agent_id="execution_worker_v1",
         messages=[{"role": "user", "content": "hi"}],
         max_tokens=64,
@@ -82,6 +83,12 @@ async def test_complete_json_happy_path(
     assert response.evidence_id is not None
     snapshot = repo.get_usage_snapshot("t1")
     assert snapshot.llm_calls == 1
+    # Evidence row must carry the threaded loop_id, not the legacy 0 sentinel.
+    call_evidence = [
+        e for e in repo._evidence.values() if e.get("type") == "model_call"
+    ]
+    assert len(call_evidence) == 1
+    assert call_evidence[0]["loop_id"] == 1
 
 
 @pytest.mark.asyncio
@@ -98,6 +105,7 @@ async def test_auth_error_never_retries(
     with pytest.raises(ModelAuthError):
         await client.complete_json(
             task_id="t1",
+            loop_id=1,
             agent_id="execution_worker_v1",
             messages=[{"role": "user", "content": "hi"}],
             max_tokens=64,
@@ -110,6 +118,66 @@ async def test_auth_error_never_retries(
     ]
     assert len(error_evidence) == 1
     assert error_evidence[0]["retryable"] is False
+    # Error evidence must carry the threaded loop_id (not None).
+    assert error_evidence[0]["loop_id"] == 1
+
+
+@pytest.mark.asyncio
+async def test_assert_within_budget_runs_per_attempt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """I-8: SafetyStopError on the second attempt aborts the retry loop."""
+    from hungerloop.services.cost_guard import SafetyStopError
+
+    monkeypatch.setenv("HL_TEST_API_KEY", "sk-test")
+    repo = InMemoryRepository()
+    config = ModelConfig(
+        provider=ModelProvider.OPENAI,
+        model_name="gpt-4o-mini",
+        api_key_env="HL_TEST_API_KEY",
+    )
+    pricing = PricingTable(repo)
+
+    # Hand-rolled CostGuard stub: pass first call, raise on second.
+    class _FlippingGuard:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def assert_within_budget(self, task_id: str) -> None:
+            self.calls += 1
+            if self.calls >= 2:
+                raise SafetyStopError("budget tripped between retries")
+
+        def record_llm_usage(self, *args: object, **kwargs: object) -> None:
+            return None
+
+    guard = _FlippingGuard()
+    transport = httpx.MockTransport(
+        lambda _: httpx.Response(503, json={"error": "down"})
+    )
+
+    def _factory() -> httpx.AsyncClient:
+        return httpx.AsyncClient(transport=transport, timeout=2.0)
+
+    from hungerloop.services.openai_model_client import OpenAIModelClient as _Client
+
+    client = _Client(
+        config, guard, pricing, repo, client_factory=_factory  # type: ignore[arg-type]
+    )
+    with pytest.raises(SafetyStopError):
+        await client.complete_json(
+            task_id="t1",
+            loop_id=2,
+            agent_id="execution_worker_v1",
+            messages=[{"role": "user", "content": "hi"}],
+            max_tokens=64,
+            max_retries=3,
+            retry_base_delay_seconds=0.0,
+            retry_max_delay_seconds=0.0,
+        )
+    # Two assert_within_budget calls: one on first attempt (passed), one on
+    # the second attempt that raised. The retry loop did not call out a third.
+    assert guard.calls == 2
 
 
 @pytest.mark.asyncio
@@ -129,6 +197,7 @@ async def test_rate_limit_retries_then_succeeds(
     client, _ = _make_client(monkeypatch, handler)
     response = await client.complete_json(
         task_id="t1",
+        loop_id=1,
         agent_id="execution_worker_v1",
         messages=[{"role": "user", "content": "hi"}],
         max_tokens=64,
@@ -154,6 +223,7 @@ async def test_server_error_retries_then_exhausts(
     with pytest.raises(ModelCallError) as exc_info:
         await client.complete_json(
             task_id="t1",
+            loop_id=1,
             agent_id="execution_worker_v1",
             messages=[{"role": "user", "content": "hi"}],
             max_tokens=64,
@@ -188,6 +258,7 @@ async def test_invalid_json_response_not_retryable(
     with pytest.raises(ModelCallError, match="invalid_json_response"):
         await client.complete_json(
             task_id="t1",
+            loop_id=1,
             agent_id="execution_worker_v1",
             messages=[{"role": "user", "content": "hi"}],
             max_tokens=64,
@@ -213,6 +284,7 @@ async def test_json_response_not_object_rejected(
     with pytest.raises(ModelCallError, match="json_response_not_object"):
         await client.complete_json(
             task_id="t1",
+            loop_id=1,
             agent_id="execution_worker_v1",
             messages=[{"role": "user", "content": "hi"}],
             max_tokens=64,
@@ -232,6 +304,7 @@ async def test_missing_choices_rejected(
     with pytest.raises(ModelCallError, match="missing_choices"):
         await client.complete_json(
             task_id="t1",
+            loop_id=1,
             agent_id="execution_worker_v1",
             messages=[{"role": "user", "content": "hi"}],
             max_tokens=64,

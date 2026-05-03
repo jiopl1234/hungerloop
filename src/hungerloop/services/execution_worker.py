@@ -61,6 +61,7 @@ class ExecutionWorker:
         """
         response = await self.model_client.complete_json(
             task_id=context.task_id,
+            loop_id=context.loop_id,
             agent_id=context.agent_id,
             messages=self._messages(context),
             max_tokens=context.budget.max_tokens,
