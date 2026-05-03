@@ -1,21 +1,61 @@
 """HungerLoop CLI entry point.
 
-Provides ``hungerloop`` command with subcommands for workspace inspection
-and check status reporting.
+v0.5a CLI surface (PRD §18):
+
+* ``hungerloop new`` — compile a task from goal + acceptance specs.
+* ``hungerloop run`` — preflight then drive the orchestrator.
+* ``hungerloop status`` — print task summary.
+* ``hungerloop hunger {refill,unblock,unblock-all,freeze,resume}`` —
+  human operations on hunger state.
+* ``hungerloop workspace`` / ``hungerloop checks`` — pre-existing
+  inspection helpers (v0.4.1).
+
+Production users currently cannot invoke the v0.5a commands: there is no
+``SQLiteRepository`` yet, so the default context factory raises with a
+clear message. Tests inject a :class:`CliContext` carrying an
+:class:`InMemoryRepository`.
 """
 from __future__ import annotations
 
 import click
 
 from hungerloop.cli.checks_cmd import checks
+from hungerloop.cli.context import CliContext
+from hungerloop.cli.hunger_cmd import hunger
+from hungerloop.cli.new_cmd import new
+from hungerloop.cli.run_cmd import run
+from hungerloop.cli.status_cmd import status
 from hungerloop.cli.workspace_cmd import workspace
 
 
+def _default_context() -> CliContext:
+    """Build the default :class:`CliContext` for production use.
+
+    Raises:
+        click.ClickException: v0.5a does not ship :class:`SQLiteRepository`
+            yet; the CLI cannot create a persistence-backed context outside
+            of tests. Wire SQLiteRepository here when it lands.
+    """
+    raise click.ClickException(
+        "v0.5a CLI cannot run without SQLiteRepository yet. "
+        "Tests inject CliContext with InMemoryRepository via runner.invoke(obj=...). "
+        "SQLiteRepository ships in v0.5b; until then the CLI is library-only."
+    )
+
+
 @click.group()
-@click.version_option(version="0.4.1")
-def cli() -> None:
+@click.version_option(version="0.5.0")
+@click.pass_context
+def cli(click_ctx: click.Context) -> None:
     """HungerLoop Agent Harness CLI."""
+    if click_ctx.obj is None:
+        # Real CLI invocation — try to build a default context.
+        click_ctx.obj = _default_context()
 
 
+cli.add_command(new)
+cli.add_command(run)
+cli.add_command(status)
+cli.add_command(hunger)
 cli.add_command(workspace)
 cli.add_command(checks)

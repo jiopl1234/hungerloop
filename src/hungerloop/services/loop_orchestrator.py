@@ -327,14 +327,18 @@ class LoopOrchestrator:
         *,
         recommendation: str = "",
     ) -> StopReport:
-        """Build, persist, and return a :class:`StopReport`."""
-        report = build_stop_report(
+        """Build and return a :class:`StopReport`.
+
+        Persistence is the CLI's responsibility (PRD §28.16 / M4): the
+        Orchestrator never calls ``repo.save_stop_report``. Tests that
+        need a record in repository state must call ``save_stop_report``
+        themselves after receiving the report.
+        """
+        return build_stop_report(
             self.repo,
             task_id,
             stop_reason,
             recommendation=recommendation,
         )
-        self.repo.save_stop_report(report)
-        return report
 
 
