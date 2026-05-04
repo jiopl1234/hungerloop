@@ -13,14 +13,21 @@ Float convergence (PRD §14):
     * All other items snap to 0.0 once ``gap_score <= EPSILON`` (1e-9).
 
 FAIL verdicts are a no-op — no writes occur.
+
+Malformed check keys (no ":" separator) are skipped — a single bad upstream
+report must not crash hunger updates for unrelated items.
 """
 from __future__ import annotations
+
+import logging
 
 from hungerloop.models.enums import HungerItemStatus, ValidationVerdict
 from hungerloop.models.validation import ValidationReport
 from hungerloop.repository.protocol import RepositoryProtocol
 
 EPSILON = 1e-9
+
+logger = logging.getLogger(__name__)
 
 
 class HungerUpdateService:
@@ -42,6 +49,15 @@ class HungerUpdateService:
 
         progress_by_item: dict[str, int] = {}
         for key in report.newly_passed_check_keys:
+            if ":" not in key:
+                logger.warning(
+                    "hunger_update: skipping malformed check_key %r in "
+                    "report %s (task=%s); expected '<item_id>:<index>'",
+                    key,
+                    report.id,
+                    task_id,
+                )
+                continue
             item_id, _ = key.split(":", 1)
             progress_by_item[item_id] = progress_by_item.get(item_id, 0) + 1
 

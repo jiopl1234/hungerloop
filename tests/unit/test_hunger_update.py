@@ -130,6 +130,28 @@ def test_fail_verdict_no_update() -> None:
     repo.save_hunger_item.assert_not_called()
 
 
+def test_malformed_check_key_is_skipped_not_crashing(caplog) -> None:  # type: ignore[no-untyped-def]
+    """BRITTLE-1: a check_key without ":" used to crash via tuple-unpack
+    `item_id, _ = key.split(":", 1)`. The service must skip the bad key,
+    log a warning, and still apply progress for well-formed siblings."""
+    h1 = _item("H-001", num_checks=2)
+    repo = MagicMock()
+    repo.get_hunger_item.return_value = h1
+
+    svc = HungerUpdateService(repo)
+    report = _report(
+        ValidationVerdict.PARTIAL,
+        newly_passed=["malformed-no-colon", "H-001:0"],
+    )
+    import logging
+
+    with caplog.at_level(logging.WARNING, logger="hungerloop.services.hunger_update"):
+        svc.apply_validation("t1", report)
+
+    assert h1.gap_score == 0.5
+    assert any("malformed check_key" in rec.message for rec in caplog.records)
+
+
 def test_subepsilon_gap_snaps_to_zero_and_satisfies() -> None:
     """PRD §14: float-arithmetic residue (e.g. 5e-10) must snap to 0.0
     so the item flips to VALIDATED_SATISFIED. Without the EPSILON snap
