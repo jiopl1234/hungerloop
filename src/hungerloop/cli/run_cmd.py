@@ -2,6 +2,9 @@
 from __future__ import annotations
 
 import asyncio
+import os
+import socket
+import uuid
 
 import click
 
@@ -10,6 +13,27 @@ from hungerloop.cli.orchestrator_factory import build_orchestrator
 from hungerloop.cli.preflight import PreflightError, check_resume_preflight
 from hungerloop.models.events import EventType
 from hungerloop.services.skill_manager import SkillManager
+
+DEFAULT_LOCK_STALE_SEC = 30 * 60  # 30 minutes
+
+
+def _build_lock_owner() -> str:
+    """Return ``hostname:pid:uuid8``; recorded so a human can identify
+    which terminal/host owns a held lock (PRD §5.1.1)."""
+    return f"{socket.gethostname()}:{os.getpid()}:{uuid.uuid4().hex[:8]}"
+
+
+def _resolve_stale_threshold(cli_value: int | None) -> int:
+    """CLI flag wins over env; env wins over the 30-min default."""
+    if cli_value is not None:
+        return cli_value
+    raw = os.environ.get("HUNGERLOOP_LOCK_STALE_SEC")
+    if raw is None:
+        return DEFAULT_LOCK_STALE_SEC
+    try:
+        return int(raw)
+    except ValueError:
+        return DEFAULT_LOCK_STALE_SEC
 
 
 @click.command("run")
@@ -54,6 +78,26 @@ from hungerloop.services.skill_manager import SkillManager
         "was SAFETY_STOP."
     ),
 )
+@click.option(
+    "--steal-lock",
+    "steal_lock",
+    is_flag=True,
+    default=False,
+    help=(
+        "Force-take the task lock from a stale or live owner. "
+        "Audit-logged via the lock_stolen event."
+    ),
+)
+@click.option(
+    "--lock-stale-sec",
+    "lock_stale_sec",
+    type=int,
+    default=None,
+    help=(
+        "Stale-lock threshold in seconds (overrides "
+        "HUNGERLOOP_LOCK_STALE_SEC; default 1800 = 30 min)."
+    ),
+)
 @click.pass_obj
 def run(
     ctx: CliContext,
@@ -63,6 +107,8 @@ def run(
     unblock_all: bool,
     resume_human: bool,
     raise_cost_ceiling: float | None,
+    steal_lock: bool,
+    lock_stale_sec: int | None,
 ) -> None:
     """Drive ``task_id`` through the orchestrator until a StopReport.
 
@@ -94,17 +140,50 @@ def run(
         raise_cost_ceiling=raise_cost_ceiling,
     )
 
-    orchestrator = build_orchestrator(
-        repo=ctx.repo,
-        workspace_root=ctx.workspace_root,
-        model_client=ctx.model_client,
-        max_loops_safety_cap=max_loops,
+    # Acquire the task lock (PRD §5.1.1) before invoking the orchestrator.
+    owner = _build_lock_owner()
+    stale_threshold = _resolve_stale_threshold(lock_stale_sec)
+    outcome = ctx.repo.acquire_task_lock(
+        task_id,
+        owner,
+        stale_threshold_seconds=stale_threshold,
+        steal=steal_lock,
     )
-    orchestrator.workspace_manager.ensure_task_workspace(task_id)
+    if outcome == "held_live":
+        click.echo(
+            f"Task {task_id} is locked by another live process. "
+            f"Wait or pass --steal-lock if you've verified the owner is dead.",
+            err=True,
+        )
+        raise click.exceptions.Exit(3)
+    if outcome == "held_stale":
+        click.echo(
+            f"Task {task_id} has a stale lock "
+            f"(idle ≥ {stale_threshold}s). "
+            f"Pass --steal-lock to force-take it.",
+            err=True,
+        )
+        raise click.exceptions.Exit(6)
+    # outcome ∈ {acquired, reentrant, stolen} — proceed.
 
-    report = asyncio.run(orchestrator.run(task_id))
-    skill_card = SkillManager(ctx.repo).maybe_create_skill_card(task_id, report)
-    ctx.repo.save_stop_report(report)
+    try:
+        orchestrator = build_orchestrator(
+            repo=ctx.repo,
+            workspace_root=ctx.workspace_root,
+            model_client=ctx.model_client,
+            max_loops_safety_cap=max_loops,
+        )
+        orchestrator.workspace_manager.ensure_task_workspace(task_id)
+
+        report = asyncio.run(orchestrator.run(task_id))
+        skill_card = SkillManager(ctx.repo).maybe_create_skill_card(task_id, report)
+        ctx.repo.save_stop_report(report)
+    finally:
+        # Release in finally so a crashed orchestrator doesn't leave the
+        # lock held. SQLiteRepository will move this into the same
+        # transaction as save_stop_report; InMemory has no transaction
+        # boundary, so finally is the closest equivalent.
+        ctx.repo.release_task_lock(task_id, owner)
 
     click.echo(f"Task {task_id} stopped: {report.stop_reason.value}")
     if skill_card is not None:

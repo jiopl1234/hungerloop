@@ -11,7 +11,7 @@ writes such as ``CommitManager.apply`` execute inside it.
 from __future__ import annotations
 
 from contextlib import AbstractContextManager
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol
 
 from hungerloop.models.blackboard import Artifact, BestState, CandidateState
 from hungerloop.models.enums import EvidenceType, LoopPhase, StopReason
@@ -228,12 +228,38 @@ class RepositoryProtocol(Protocol):
     def list_skill_cards(self, task_id: str | None = None) -> list[SkillCard]: ...
 
     # =====================================================================
-    # Section 8 — Approvals, misc, transactions
+    # Section 8 — Approvals, misc, transactions, task lock
     # =====================================================================
     def is_approval_granted(self, approval_id: str) -> bool: ...
     def reset_no_progress_streak(self, task_id: str) -> None: ...
     def increment_no_progress_streak(self, task_id: str) -> int: ...
     def next_loop_id(self, task_id: str) -> int: ...
+
+    def acquire_task_lock(
+        self,
+        task_id: str,
+        owner: str,
+        *,
+        stale_threshold_seconds: int,
+        steal: bool = False,
+    ) -> Literal["acquired", "reentrant", "held_live", "held_stale", "stolen"]: ...
+    """v0.5b.0 (PRD §5.1.1): Task lock with stale detection and steal.
+
+    Outcomes:
+      * ``acquired``    — no prior owner; lock now held by ``owner``.
+      * ``reentrant``   — same hostname:pid as the existing owner; pass-through.
+      * ``held_live``   — held by another live process; CALLER MUST exit 3.
+      * ``held_stale``  — stale lock and ``steal=False``; CALLER MUST exit 6.
+      * ``stolen``      — ``steal=True`` was passed; emits ``lock_stolen`` event.
+
+    The owner string MUST be ``f"{hostname}:{pid}:{uuid4_hex8}"``. Stale
+    detection compares against ``stale_threshold_seconds`` provided by the
+    caller (env ``HUNGERLOOP_LOCK_STALE_SEC`` or ``--lock-stale-sec``)."""
+
+    def release_task_lock(self, task_id: str, owner: str) -> None: ...
+    """No-op when the current owner doesn't match — defends against
+    double-release after a steal. Clean shutdown calls this in the same
+    transaction that persists ``StopReport`` (PRD §5.1.1)."""
 
     def transaction(self) -> AbstractContextManager[Any]: ...
     """Cross-cutting writes (CommitManager) execute inside ``with

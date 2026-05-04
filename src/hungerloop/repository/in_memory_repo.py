@@ -10,7 +10,8 @@ from __future__ import annotations
 import uuid
 from collections.abc import Iterator
 from contextlib import contextmanager
-from typing import Any
+from datetime import datetime, timezone
+from typing import Any, Literal
 
 from hungerloop.models.blackboard import Artifact, BestState, CandidateState
 from hungerloop.models.enums import EvidenceType, LoopPhase, StopReason
@@ -78,6 +79,8 @@ class InMemoryRepository:
         self._no_progress_streaks: dict[str, int] = {}
         self._loop_counters: dict[str, int] = {}
         self._events: list[dict[str, object]] = []
+        # Task locks: task_id -> {"owner": str, "locked_at": datetime}
+        self._task_locks: dict[str, dict[str, Any]] = {}
 
     # =====================================================================
     # Section 1 — Hunger
@@ -428,6 +431,70 @@ class InMemoryRepository:
         current = self._loop_counters.get(task_id, 0)
         self._loop_counters[task_id] = current + 1
         return current + 1
+
+    # ---- Task lock (PRD §5.1.1) ------------------------------------------
+    @staticmethod
+    def _same_host_pid(owner_a: str, owner_b: str) -> bool:
+        """Compare ``hostname:pid`` prefixes; the ``:uuid`` tail differs
+        between calls but the same physical process keeps the same prefix."""
+        head_a = owner_a.rsplit(":", 1)[0]
+        head_b = owner_b.rsplit(":", 1)[0]
+        return head_a == head_b
+
+    def acquire_task_lock(
+        self,
+        task_id: str,
+        owner: str,
+        *,
+        stale_threshold_seconds: int,
+        steal: bool = False,
+    ) -> Literal["acquired", "reentrant", "held_live", "held_stale", "stolen"]:
+        now = datetime.now(timezone.utc)
+        existing = self._task_locks.get(task_id)
+
+        if existing is None:
+            self._task_locks[task_id] = {"owner": owner, "locked_at": now}
+            return "acquired"
+
+        if self._same_host_pid(existing["owner"], owner):
+            # Re-entrant from the same physical process — no mutation.
+            return "reentrant"
+
+        elapsed = (now - existing["locked_at"]).total_seconds()
+        is_stale = elapsed >= stale_threshold_seconds
+
+        if not is_stale and not steal:
+            return "held_live"
+
+        if is_stale and not steal:
+            return "held_stale"
+
+        # steal=True path — replace the owner and audit the takeover.
+        prev_owner = existing["owner"]
+        prev_locked_at = existing["locked_at"]
+        self._task_locks[task_id] = {"owner": owner, "locked_at": now}
+        # Local import to keep the v0.5a module surface unchanged.
+        from hungerloop.models.events import EventType
+
+        self.append_event(
+            EventType.LOCK_STOLEN,
+            {
+                "prev_owner": prev_owner,
+                "prev_locked_at": prev_locked_at.isoformat(),
+                "new_owner": owner,
+            },
+            task_id=task_id,
+        )
+        return "stolen"
+
+    def release_task_lock(self, task_id: str, owner: str) -> None:
+        existing = self._task_locks.get(task_id)
+        if existing is None:
+            return
+        # Only release if the caller still owns the lock — defends against
+        # double-release after a steal.
+        if existing["owner"] == owner:
+            del self._task_locks[task_id]
 
     @contextmanager
     def transaction(self) -> Iterator[None]:
