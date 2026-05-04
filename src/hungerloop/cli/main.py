@@ -26,6 +26,7 @@ from hungerloop.cli.context import CliContext
 from hungerloop.cli.hunger_cmd import hunger
 from hungerloop.cli.memory_cmd import memory
 from hungerloop.cli.new_cmd import new
+from hungerloop.cli.report_cmd import report
 from hungerloop.cli.run_cmd import run
 from hungerloop.cli.skill_cmd import skill
 from hungerloop.cli.status_cmd import status
@@ -66,6 +67,7 @@ def cli(click_ctx: click.Context) -> None:
 cli.add_command(new)
 cli.add_command(run)
 cli.add_command(status)
+cli.add_command(report)
 cli.add_command(hunger)
 cli.add_command(memory)
 cli.add_command(skill)

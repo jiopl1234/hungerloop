@@ -186,6 +186,11 @@ class RepositoryProtocol(Protocol):
     # Section 6 — Trace / Stop
     # =====================================================================
     def save_loop_trace(self, trace: LoopTrace) -> None: ...
+
+    def list_loop_traces(self, task_id: str) -> list[LoopTrace]: ...
+    """v0.5b.0 (PRD §4.1): chronological list of LoopTrace rows for a
+    task; used by ``hungerloop report`` to surface the last loop's
+    delta_summary and by ``hungerloop trace export`` (v0.5c.1)."""
     """New in v0.5a (§28 / N2)."""
 
     def save_stop_report(self, report: StopReport) -> None: ...

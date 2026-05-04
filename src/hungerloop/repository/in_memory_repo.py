@@ -359,6 +359,13 @@ class InMemoryRepository:
     def save_loop_trace(self, trace: LoopTrace) -> None:
         self._loop_traces[(trace.task_id, trace.loop_id)] = trace
 
+    def list_loop_traces(self, task_id: str) -> list[LoopTrace]:
+        return [
+            trace
+            for (tid, _loop_id), trace in sorted(self._loop_traces.items())
+            if tid == task_id
+        ]
+
     def save_stop_report(self, report: StopReport) -> None:
         self._stop_reports_history.setdefault(report.task_id, []).append(report)
 
