@@ -22,6 +22,8 @@ import asyncio
 import json
 import os
 import random
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from typing import Any
 
 import httpx
@@ -56,7 +58,12 @@ class OpenAIModelClient:
         self.cost_guard = cost_guard
         self.pricing = pricing
         self.repo = repo
-        self.api_key = os.environ[config.api_key_env]
+        api_key = os.getenv(config.api_key_env)
+        if not api_key:
+            raise ModelAuthError(
+                f"Environment variable {config.api_key_env} is not set"
+            )
+        self.api_key = api_key
         self.base_url = config.base_url or "https://api.openai.com/v1"
         # Tests inject a custom factory yielding an httpx.AsyncClient bound
         # to a transport mock; production gets the default constructor.
@@ -154,17 +161,22 @@ class OpenAIModelClient:
         messages: list[dict[str, str]],
         max_tokens: int,
     ) -> ModelResponse:
-        response = await client.post(
-            f"{self.base_url}/chat/completions",
-            headers={"Authorization": f"Bearer {self.api_key}"},
-            json={
-                "model": self.config.model_name,
-                "messages": messages,
-                "max_tokens": max_tokens,
-                "temperature": self.config.temperature,
-                "response_format": {"type": "json_object"},
-            },
-        )
+        try:
+            response = await client.post(
+                f"{self.base_url}/chat/completions",
+                headers={"Authorization": f"Bearer {self.api_key}"},
+                json={
+                    "model": self.config.model_name,
+                    "messages": messages,
+                    "max_tokens": max_tokens,
+                    "temperature": self.config.temperature,
+                    "response_format": {"type": "json_object"},
+                },
+            )
+        except httpx.TransportError as exc:
+            raise ModelCallError(
+                f"network_error:{type(exc).__name__}: {exc}", retryable=True
+            ) from exc
 
         if response.status_code in {401, 403}:
             raise ModelAuthError(
@@ -176,9 +188,23 @@ class OpenAIModelClient:
             )
         if response.status_code >= 500:
             raise ModelCallError("provider_server_error", retryable=True)
-        response.raise_for_status()
+        if response.status_code >= 400:
+            raise ModelCallError(
+                f"provider_http_error:{response.status_code}", retryable=False
+            )
 
-        data = response.json()
+        try:
+            data = response.json()
+        except ValueError as exc:
+            raise ModelCallError(
+                "invalid_provider_json_response", retryable=False
+            ) from exc
+
+        if not isinstance(data, dict):
+            raise ModelCallError(
+                f"provider_json_not_object: type={type(data).__name__}",
+                retryable=False,
+            )
         usage_raw = data.get("usage", {}) or {}
         input_tokens = int(usage_raw.get("prompt_tokens", 0))
         output_tokens = int(usage_raw.get("completion_tokens", 0))
@@ -209,7 +235,12 @@ class OpenAIModelClient:
         choices = data.get("choices") or []
         if not choices:
             raise ModelCallError("missing_choices", retryable=False)
-        content = choices[0].get("message", {}).get("content", "")
+        first_choice = choices[0] if isinstance(choices[0], dict) else {}
+        message = first_choice.get("message", {})
+        content = message.get("content", "") if isinstance(message, dict) else ""
+        if not isinstance(content, str):
+            raise ModelCallError("invalid_content_type", retryable=False)
+
         try:
             json_data = json.loads(content)
         except json.JSONDecodeError as exc:
@@ -243,5 +274,14 @@ class OpenAIModelClient:
             try:
                 return min(cap, float(retry_after))
             except ValueError:
-                pass
+                try:
+                    retry_time = parsedate_to_datetime(retry_after)
+                    if retry_time.tzinfo is None:
+                        retry_time = retry_time.replace(tzinfo=timezone.utc)
+                    seconds = (
+                        retry_time - datetime.now(timezone.utc)
+                    ).total_seconds()
+                    return min(cap, max(0.0, seconds))
+                except (TypeError, ValueError, OverflowError):
+                    pass
         return float(min(cap, base * (2**attempt) + random.uniform(0, 0.5)))

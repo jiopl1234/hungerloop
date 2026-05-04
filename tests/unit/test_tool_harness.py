@@ -171,15 +171,26 @@ async def test_budget_guard_records_after_call(
     assert snap.elapsed_seconds >= 0.0
 
 
-async def test_path_safety_violation_propagates(
+async def test_path_safety_violation_surfaces_as_invalid_args(
     harness_setup: tuple[ToolHarness, InMemoryRepository, BudgetGuard, Path],
 ) -> None:
-    """Path-escape attempts raise PermissionError; not gracefully ignored."""
-    harness, _, _, workspace = harness_setup
-    with pytest.raises(PermissionError):
-        await harness.execute(
-            _ctx(),
-            "write_file",
-            {"path": "../escape.txt", "content": "x"},
-            workspace,
-        )
+    """Path-escape attempts surface as invalid_args ToolResult + evidence row.
+
+    Tools no longer crash the worker on bad input; the harness catches
+    PermissionError / ValueError, writes a tool_call evidence row, and
+    returns a structured ToolResult so the worker keeps making progress
+    on its other actions.
+    """
+    harness, repo, _, workspace = harness_setup
+    result = await harness.execute(
+        _ctx(),
+        "write_file",
+        {"path": "../escape.txt", "content": "x"},
+        workspace,
+    )
+    assert result.success is False
+    assert result.error_type == "invalid_args"
+    assert len(result.evidence_ids) == 1
+    evidence = repo._evidence[result.evidence_ids[0]]
+    assert evidence["type"] == "tool_call"
+    assert evidence["success"] is False

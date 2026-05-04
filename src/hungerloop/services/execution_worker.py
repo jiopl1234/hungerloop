@@ -18,6 +18,7 @@ from pathlib import Path
 from hungerloop.models.context import ContextPack
 from hungerloop.models.worker import WorkerResult
 from hungerloop.repository.protocol import RepositoryProtocol
+from hungerloop.services.budget_guard import BudgetGuard
 from hungerloop.services.model_client import ModelClient
 from hungerloop.services.tool_harness import ToolHarness
 
@@ -35,10 +36,12 @@ class ExecutionWorker:
         model_client: ModelClient,
         tool_harness: ToolHarness,
         repo: RepositoryProtocol,
+        budget_guard: BudgetGuard | None = None,
     ) -> None:
         self.model_client = model_client
         self.tool_harness = tool_harness
         self.repo = repo
+        self.budget_guard = budget_guard
 
     async def run(
         self, *, context: ContextPack, workspace_root: Path
@@ -59,6 +62,9 @@ class ExecutionWorker:
         both are caught by :class:`WorkerRuntime` rather than this method
         so we don't double-handle the same exceptions.
         """
+        if self.budget_guard is not None:
+            self.budget_guard.assert_can_spend(context, addl_llm_calls=1)
+
         response = await self.model_client.complete_json(
             task_id=context.task_id,
             loop_id=context.loop_id,
@@ -69,6 +75,17 @@ class ExecutionWorker:
             retry_base_delay_seconds=context.budget.retry_base_delay_seconds,
             retry_max_delay_seconds=context.budget.retry_max_delay_seconds,
         )
+
+        if self.budget_guard is not None:
+            used_tokens = response.usage.input_tokens + response.usage.output_tokens
+            self.budget_guard.record(
+                context.task_id,
+                context.loop_id,
+                context.agent_id,
+                tokens=used_tokens,
+                llm_calls=1,
+            )
+            self.budget_guard.assert_can_spend(context)
 
         evidence_ids: list[str] = []
         artifact_ids: list[str] = []

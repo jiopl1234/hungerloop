@@ -59,7 +59,7 @@ def build_orchestrator(
 
     client: ModelClient = model_client if model_client is not None else DummyModelClient()
     harness = ToolHarness(repo, default_tool_registry(sandbox), budget_guard)
-    worker = ExecutionWorker(client, harness, repo)
+    worker = ExecutionWorker(client, harness, repo, budget_guard=budget_guard)
 
     runtime = WorkerRuntime(
         {"execution_worker_v1": worker}, cost_guard, budget_guard, repo

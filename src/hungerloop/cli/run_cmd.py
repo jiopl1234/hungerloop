@@ -89,6 +89,7 @@ def run(
         task_id,
         refill_loops=refill_loops,
         unblock_all=unblock_all,
+        resume_human=resume_human,
         raise_cost_ceiling=raise_cost_ceiling,
     )
 
@@ -121,6 +122,7 @@ def _apply_user_overrides(
     *,
     refill_loops: int | None,
     unblock_all: bool,
+    resume_human: bool,
     raise_cost_ceiling: float | None,
 ) -> None:
     """Translate CLI flags into repository state mutations.
@@ -166,6 +168,15 @@ def _apply_user_overrides(
                     task_id=task_id,
                 )
         ctx.repo.reset_no_progress_streak(task_id)
+
+    if resume_human:
+        clock = ctx.repo.get_hunger_clock(task_id)
+        if clock.frozen:
+            clock.frozen = False
+            ctx.repo.save_hunger_clock(clock)
+            ctx.repo.append_event(
+                "hunger_resumed", {"via": "run --resume"}, task_id=task_id
+            )
 
     if raise_cost_ceiling is not None:
         policy = ctx.repo.get_hunger_policy(task_id)

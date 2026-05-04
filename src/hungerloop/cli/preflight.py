@@ -105,8 +105,8 @@ def check_resume_preflight(
         if not resume_human:
             raise PreflightError(
                 f"Task {task_id} previously stopped with HUMAN_PAUSED. "
-                "Run 'hungerloop hunger resume "
-                f"{task_id}' to unfreeze, then re-run."
+                "Pass --resume to unfreeze during this run, or run "
+                f"'hungerloop hunger resume {task_id}' first."
             )
 
     # DONE / ERROR fall through: re-running is allowed; orchestrator will

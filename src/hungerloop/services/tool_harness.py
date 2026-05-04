@@ -108,12 +108,48 @@ class ToolHarness:
         self.budget_guard.assert_can_spend(context, addl_tool_calls=1)
 
         started = time.monotonic()
-        outcome = await tool.run(
-            args=args,
-            workspace_root=workspace_root,
-            task_id=context.task_id,
-            loop_id=context.loop_id,
-        )
+        try:
+            outcome = await tool.run(
+                args=args,
+                workspace_root=workspace_root,
+                task_id=context.task_id,
+                loop_id=context.loop_id,
+            )
+        except Exception as exc:
+            elapsed_seconds = time.monotonic() - started
+            elapsed_ms = int(elapsed_seconds * 1000)
+            error_type = (
+                "invalid_args"
+                if isinstance(exc, (ValueError, PermissionError))
+                else "tool_exception"
+            )
+            summary = f"{type(exc).__name__}: {exc}"
+            evidence_id = self.repo.save_tool_call_as_evidence(
+                task_id=context.task_id,
+                loop_id=context.loop_id,
+                agent_id=context.agent_id,
+                tool_name=tool_name,
+                args_summary=self._summarize_args(args),
+                result_summary=summary[:1000],
+                success=False,
+                elapsed_ms=elapsed_ms,
+            )
+            self.budget_guard.record(
+                context.task_id,
+                context.loop_id,
+                context.agent_id,
+                tool_calls=1,
+                elapsed_seconds=elapsed_seconds,
+            )
+            return ToolResult(
+                tool_name=tool_name,
+                success=False,
+                summary=summary,
+                evidence_ids=[evidence_id],
+                artifact_ids=[],
+                error=summary,
+                error_type=error_type,
+            )
         elapsed_seconds = time.monotonic() - started
         elapsed_ms = int(elapsed_seconds * 1000)
 
@@ -164,6 +200,11 @@ class ToolHarness:
             error=None if outcome.success else outcome.summary,
             error_type=None if outcome.success else "tool_failed",
         )
+
+    @staticmethod
+    def _summarize_args(args: dict[str, object], limit: int = 1000) -> str:
+        text = repr(args)
+        return text if len(text) <= limit else text[:limit]
 
     @staticmethod
     def _enforce_side_effect_policy(tool: Tool, context: ContextPack) -> None:
