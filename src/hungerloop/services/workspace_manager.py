@@ -19,7 +19,9 @@ Layout under ``root``::
 from __future__ import annotations
 
 import json
+import os
 import shutil
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -73,24 +75,77 @@ class WorkspaceManager:
         return dst
 
     def promote_candidate_to_best(self, task_id: str, loop_id: int) -> None:
-        """Atomically replace ``best/files`` with the named candidate."""
+        """Atomically replace ``best/files`` with the named candidate.
+
+        Atomicity model
+        ---------------
+        We rely on POSIX ``rename(2)``: a rename within one filesystem is
+        atomic. We never call ``shutil.copytree`` *into* the live ``best/``
+        path, because a mid-copy failure would leave ``best/`` partially
+        written with no good backup.
+
+        Sequence:
+
+        1. Copy the candidate into a sibling staging directory
+           ``best/../.best.staging.<unique>/``. If this fails, ``best/``
+           is untouched and we raise — the caller's prior good state is
+           still in place.
+        2. Rename the live ``best/`` to a sibling
+           ``best/../.best.old.<unique>/`` (atomic on POSIX).
+        3. Rename the staging directory to ``best/`` (atomic on POSIX).
+           If this rename fails, we rename the ``.best.old.*`` back to
+           ``best/`` so the caller is left with the prior good state.
+        4. Remove the ``.best.old.*`` directory.
+
+        The ``<unique>`` suffix uses ``os.getpid() + uuid4`` so two
+        concurrent failed promotes can't clobber each other's recovery
+        data — the previous implementation used a fixed ``best_backup/``
+        name and *deleted it on entry*, which silently destroyed
+        recoverable data after a second consecutive failure (BUG-1 in
+        the test audit).
+
+        Raises:
+            FileNotFoundError: Candidate workspace doesn't exist.
+            OSError: Filesystem error during copy/rename. Best/ left
+                unchanged in this case (atomicity guarantee).
+        """
         candidate = self.candidate_files_dir(task_id, loop_id)
         best = self.best_files_dir(task_id)
 
         if not candidate.exists():
             raise FileNotFoundError(f"Candidate workspace not found: {candidate}")
 
-        backup = self.task_root(task_id) / "best_backup"
-        if backup.exists():
-            shutil.rmtree(backup)
+        token = f"{os.getpid()}.{uuid.uuid4().hex[:8]}"
+        staging = best.parent / f".best.staging.{token}"
+        old = best.parent / f".best.old.{token}"
 
-        if best.exists():
-            shutil.move(str(best), str(backup))
+        # 1. Stage the new content. If this fails, best/ untouched.
+        if staging.exists():
+            shutil.rmtree(staging)
+        shutil.copytree(candidate, staging)
 
-        shutil.copytree(candidate, best)
+        try:
+            # 2-3. Atomic swap.
+            if best.exists():
+                os.rename(str(best), str(old))
+                try:
+                    os.rename(str(staging), str(best))
+                except Exception:
+                    # Roll back: put the old best/ back in place.
+                    os.rename(str(old), str(best))
+                    raise
+            else:
+                # No prior best/; just rename staging into place.
+                os.rename(str(staging), str(best))
+        except Exception:
+            # Clean up staging if it's still around (atomicity preserved).
+            if staging.exists():
+                shutil.rmtree(staging, ignore_errors=True)
+            raise
 
-        if backup.exists():
-            shutil.rmtree(backup)
+        # 4. Remove the displaced old directory (after the swap succeeded).
+        if old.exists():
+            shutil.rmtree(old, ignore_errors=True)
 
         self._write_manifest(
             task_id=task_id,
