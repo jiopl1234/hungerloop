@@ -15,6 +15,7 @@ on novel model names.
 from __future__ import annotations
 
 import os
+import sys
 from enum import Enum
 from pathlib import Path
 from typing import Any
@@ -25,6 +26,17 @@ from pydantic import BaseModel, Field
 from hungerloop.models.events import EventType
 from hungerloop.repository.protocol import RepositoryProtocol
 from hungerloop.services.model_client import ModelAuthError
+
+# Truthy strings recognised by ``HUNGERLOOP_QUIET_DUMMY`` (PRD §6.4).
+# CI logs that pipe stderr can opt out of the dummy-warning chatter.
+_QUIET_DUMMY_TRUTHY = frozenset({"1", "true", "yes"})
+
+# Stderr text the loader emits when YAML wires up a dummy provider.
+# Tests grep for this prefix; production users see it once per run.
+_DUMMY_WARNING_PREFIX = (
+    "Warning: using DummyModelClient — outputs are scripted and not from "
+    "a real model."
+)
 
 
 class ModelProvider(str, Enum):
@@ -87,7 +99,30 @@ class ModelConfigLoader:
                     f"Environment variable {config.api_key_env} is not set"
                 )
 
+        if config.provider == ModelProvider.DUMMY:
+            self._maybe_warn_dummy()
+
         return config
+
+    @staticmethod
+    def _maybe_warn_dummy() -> None:
+        """Print the v0.5b.1 stderr warning (PRD §6.4).
+
+        The warning exists so a YAML config that quietly wires up a
+        scripted client can't masquerade as a real LLM run. Tests that
+        construct ``ModelConfig`` directly (no YAML) bypass this path,
+        which is intentional: the warning is about YAML drift, not
+        about test scaffolding.
+
+        ``HUNGERLOOP_QUIET_DUMMY=1`` (or ``true`` / ``yes``) suppresses
+        the warning for CI logs that pipe stderr.
+        """
+        if (
+            os.environ.get("HUNGERLOOP_QUIET_DUMMY", "").strip().lower()
+            in _QUIET_DUMMY_TRUTHY
+        ):
+            return
+        sys.stderr.write(f"{_DUMMY_WARNING_PREFIX}\n")
 
 
 class PricingTable:

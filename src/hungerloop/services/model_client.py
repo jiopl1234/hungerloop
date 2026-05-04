@@ -114,6 +114,16 @@ class DummyModelClient:
         self._script: list[ModelResponse] = list(scripted_responses or [])
         self._calls: int = 0
 
+    # ----- FROZEN ACTION SCHEMA (v0.5b.1+) -----
+    # Each action is a dict with at least:
+    #   tool_name: str   - matches a Tool registered in tool_harness
+    #   args: dict       - tool-specific args (any JSON-serializable shape)
+    # Optional keys:
+    #   delay_ms: int    - test scaffolding for timing assertions
+    # Adding new optional keys is allowed across minor releases.
+    # Removing or renaming any of the above requires a major-version bump
+    # on this schema and a coordinated test migration.
+    # -------------------------------------------
     @classmethod
     def with_actions(cls, actions: list[dict[str, object]]) -> DummyModelClient:
         """Build a dummy client with one scripted response carrying ``actions``.

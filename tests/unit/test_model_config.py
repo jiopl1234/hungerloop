@@ -30,6 +30,20 @@ def test_loader_rejects_literal_api_key(tmp_path: Path) -> None:
         ModelConfigLoader().load(p)
 
 
+def test_loader_rejects_literal_api_key_for_dummy_too(tmp_path: Path) -> None:
+    """Security regression net (PRD §6.4): the api_key check is provider-
+    independent; a YAML that wires ``provider: dummy`` AND ``api_key:`` is
+    still rejected so a future copy-paste can't smuggle a key past the
+    dummy branch.
+    """
+    p = _write(
+        tmp_path,
+        "provider: dummy\nmodel_name: dummy\napi_key: sk-leak\n",
+    )
+    with pytest.raises(ValueError, match="Do not put literal API keys"):
+        ModelConfigLoader().load(p)
+
+
 def test_loader_rejects_azure_provider(tmp_path: Path) -> None:
     p = _write(tmp_path, "provider: azure_openai\nmodel_name: gpt-4o\n")
     with pytest.raises(NotImplementedError, match="Azure runtime"):
