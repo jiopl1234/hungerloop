@@ -797,6 +797,154 @@ class RepositoryProtocol(Protocol):
 
 `StopReport` is persisted in its own table (§5.2 `stop_reports`), keyed by `task_id` (one row per task — re-runs after `--reset` overwrite). `tasks.stop_reason` is the indexable copy used by preflight; `stop_reports.payload_json` is the full report consumed by `hungerloop status` / `hungerloop report`. Implementations must keep these two columns consistent within a single transaction.
 
+### 4.1.5 Protocol composition
+
+The 60-method protocol in §4.1 is the **composite** view. Services do not type-hint against it directly. Each service depends on the smallest aggregate Protocol it actually uses. This enforces ISP, keeps test fixtures shallow, and lets v0.6 features add aggregates without editing every service signature.
+
+Aggregate Protocols (each is a real `typing.Protocol`, not just a docstring section):
+
+```python
+class TaskRepository(Protocol):
+    def create_task(self, task: TaskRecord) -> None: ...
+    def get_task(self, task_id: str) -> TaskRecord | None: ...
+    def update_task_status(self, task_id: str, status: str) -> None: ...
+    def acquire_task_lock(self, task_id: str, owner: str) -> bool: ...
+    def release_task_lock(self, task_id: str, owner: str) -> None: ...
+    def save_stop_report(self, report: StopReport) -> None: ...
+    def get_stop_report(self, task_id: str) -> StopReport | None: ...
+
+
+class HungerRepository(Protocol):
+    def get_hunger_policy(self, task_id: str) -> HungerPolicy: ...
+    def save_hunger_policy(self, task_id: str, policy: HungerPolicy) -> None: ...
+    def get_hunger_clock(self, task_id: str) -> HungerClockState: ...
+    def save_hunger_clock(self, task_id: str, clock: HungerClockState) -> None: ...
+    def get_hunger_ledger(self, task_id: str) -> HungerLedger: ...
+    def save_hunger_ledger(self, ledger: HungerLedger) -> None: ...
+    def get_hunger_item(self, item_id: str) -> HungerItem | None: ...
+    def get_hunger_items(self, item_ids: list[str]) -> list[HungerItem]: ...
+    def save_hunger_item(self, item: HungerItem) -> None: ...
+    def get_open_hunger_items(self, task_id: str) -> list[HungerItem]: ...
+    def select_highest_priority_open_hunger_item(self, task_id: str) -> HungerItem | None: ...
+
+
+class LoopRepository(Protocol):
+    def next_loop_id(self, task_id: str) -> int: ...
+    def get_last_phase(self, task_id: str) -> LoopPhase | None: ...
+    def save_hunger_snapshot(self, task_id: str, snapshot: HungerSnapshot) -> None: ...
+    def save_loop_plan(self, plan: LoopPlan) -> None: ...
+    def get_loop_plan(self, task_id: str, loop_id: int) -> LoopPlan | None: ...
+    def save_loop_trace(self, trace: LoopTrace) -> None: ...
+    def get_loop_trace(self, task_id: str, loop_id: int) -> LoopTrace | None: ...
+    def list_loop_traces(self, task_id: str) -> list[LoopTrace]: ...
+
+
+class AgentRepository(Protocol):
+    def get_agent_spec(self, agent_id: str) -> AgentSpec: ...
+    def save_agent_spec(self, spec: AgentSpec) -> None: ...
+    def save_worker_result(self, result: WorkerResult) -> None: ...
+    def list_worker_results(
+        self, task_id: str, loop_id: int | None = None
+    ) -> list[WorkerResult]: ...
+
+
+class StateRepository(Protocol):
+    def save_candidate(self, candidate: CandidateState) -> None: ...
+    def get_candidate(self, candidate_id: str) -> CandidateState | None: ...
+    def mark_candidate_committed(self, candidate_id: str) -> None: ...
+    def mark_candidate_rejected(self, candidate_id: str) -> None: ...
+    def get_best_state(self, task_id: str) -> BestState | None: ...
+    def save_best_state(self, best: BestState) -> None: ...
+
+
+class ValidationRepository(Protocol):
+    def save_validation_report(self, report: ValidationReport) -> None: ...
+    def get_validation_report(self, validation_id: str) -> ValidationReport | None: ...
+    def get_items_for_check_keys(
+        self, task_id: str, check_keys: list[str]
+    ) -> list[HungerItem]: ...
+    def save_accepted_checks(
+        self, task_id: str, validation: ValidationReport
+    ) -> None: ...
+    def list_accepted_checks(self, task_id: str) -> list[str]: ...
+
+
+class EvidenceRepository(Protocol):
+    def save_evidence(self, evidence: EvidenceRecord) -> str: ...
+    def get_evidence(self, evidence_id: str) -> EvidenceRecord | None: ...
+    def count_evidence_by_type(
+        self,
+        task_id: str,
+        evidence_ids: list[str],
+        evidence_type: EvidenceType | Literal["any"],
+    ) -> int: ...
+    def save_shell_output_as_evidence(self, **kw: Any) -> str: ...
+    def save_model_error_as_evidence(self, **kw: Any) -> str: ...
+    def save_model_call_as_evidence(self, **kw: Any) -> str: ...
+    def save_tool_call_as_evidence(self, **kw: Any) -> str: ...
+    def get_artifacts_by_ids(self, artifact_ids: list[str]) -> list[ArtifactRecord]: ...
+    def save_artifact(self, artifact: ArtifactRecord) -> str: ...
+
+
+class StagnationRepository(Protocol):
+    def add_failure_from_validation(self, report: ValidationReport) -> None: ...
+    def get_no_progress_streak(self, task_id: str) -> int: ...
+    def reset_no_progress_streak(self, task_id: str) -> None: ...
+    def increment_no_progress_streak(self, task_id: str) -> int: ...
+
+
+class MemorySkillRepository(Protocol):
+    def save_memory_candidate(self, candidate: MemoryCandidate) -> None: ...
+    def list_memory_candidates(
+        self, task_id: str | None = None
+    ) -> list[MemoryCandidate]: ...
+    def count_committed_references(self, candidate_id: str) -> int: ...
+    def save_skill_card(self, card: SkillCard) -> None: ...
+    def list_skill_cards(self, task_id: str | None = None) -> list[SkillCard]: ...
+
+
+class UsageRepository(Protocol):
+    def get_usage_snapshot(self, task_id: str) -> UsageSnapshot: ...
+    def save_usage_snapshot(self, snapshot: UsageSnapshot) -> None: ...
+    def append_event(self, event_type: str, payload: dict[str, object]) -> None: ...
+
+
+class RepositoryProtocol(
+    TaskRepository,
+    HungerRepository,
+    LoopRepository,
+    AgentRepository,
+    StateRepository,
+    ValidationRepository,
+    EvidenceRepository,
+    StagnationRepository,
+    MemorySkillRepository,
+    UsageRepository,
+    Protocol,
+):
+    """Composite — for orchestrator and CLI wiring only."""
+```
+
+**Service binding rule:** services type-hint against the narrowest aggregate they need.
+
+```python
+class MemoryManager:
+    def __init__(self, repo: MemorySkillRepository): ...
+
+class CommitManager:
+    def __init__(self, repo: StateRepository): ...
+
+class HungerEngine:
+    def __init__(self, repo: HungerRepository): ...
+
+class LoopOrchestrator:
+    def __init__(self, repo: RepositoryProtocol, ...): ...  # only the orchestrator gets the composite
+```
+
+`SQLiteRepository` and `InMemoryRepository` implement the composite — same single class — but the type system enforces aggregate boundaries at every call site.
+
+**Why this matters for v0.5b.0:** doing this *before* `SQLiteRepository` lands costs ~50 LOC of Protocol declarations (zero runtime cost). Doing it *after* SQLiteRepository ships requires editing every service signature plus their tests. Land it as the first PR of v0.5b.0.
+
 ### 4.2 Compatibility rule
 
 `InMemoryRepository` must implement the same protocol as `SQLiteRepository`.
@@ -1324,11 +1472,34 @@ except ModelCallError as exc:
 except WorkerBudgetExceeded as exc:
     return WorkerResult(error=str(exc), error_type="budget", requires_human=False)
 
+except SafetyStopError as exc:
+    # I-8: CostGuard raised mid-call. Bubble through as a special-cased
+    # WorkerResult; Orchestrator must map error_type="safety_stop" -> StopReason.SAFETY_STOP.
+    return WorkerResult(
+        error=str(exc),
+        error_type="safety_stop",
+        requires_human=False,
+    )
+
 except asyncio.TimeoutError:
     return WorkerResult(error="worker_timeout", error_type="timeout", requires_human=False)
 ```
 
 Unexpected errors become `error_type="unexpected"`, and Orchestrator maps them to `StopReason.ERROR` after writing trace.
+
+**Orchestrator-side mapping (in `WorkerRuntimeStep` / §12.0):**
+
+```text
+WorkerResult.error_type        → StopReason / handling
+"safety_stop"                   → StopReason.SAFETY_STOP (immediate, no further loops)
+"model_auth"                    → StopReason.HUMAN_REQUIRED
+"model_non_retryable"           → if requires_human: HUMAN_REQUIRED, else ERROR
+"model_retryable"               → continue loop; trace records the retry exhaustion
+"budget"                        → continue loop; stagnation may eventually escalate
+"timeout"                       → continue loop; stagnation tracks repeated timeouts
+"tool_failed" / "invalid_args"  → continue loop
+"unexpected"                    → StopReport(stop_reason=ERROR)
+```
 
 ---
 
@@ -1447,6 +1618,98 @@ Only after stagnation threshold does StopReason become `BLOCKED`.
 ---
 
 ## 12. Orchestrator loop semantics
+
+### 12.0 LoopStep pipeline
+
+The orchestrator is a **pipeline**, not a procedure. v0.5a's single-method `run()` already runs ~14 steps; v0.5b adds 4 more (T1/T2/T3 transactions, stop_report persistence, manifest verify); v0.6 will add memory recall, fan-out, and join steps. Keeping all of that in one `async def run` is a maintenance dead-end.
+
+Recast as composition:
+
+```python
+@dataclass
+class LoopContext:
+    """Mutable state passed through the pipeline. One instance per loop attempt."""
+    task_id: str
+    loop_id: int
+    snapshot: HungerSnapshot | None = None
+    plan: LoopPlan | None = None
+    candidate: CandidateState | None = None
+    validation: ValidationReport | None = None
+    committed: bool = False
+    trace: LoopTrace = field(default_factory=LoopTrace.empty)
+
+    # Termination signal
+    terminating: bool = False
+    stop_report: StopReport | None = None
+
+
+class LoopStep(Protocol):
+    name: str  # for logging / observability
+
+    async def run(self, ctx: LoopContext) -> LoopContext: ...
+
+
+class LoopOrchestrator:
+    def __init__(
+        self,
+        steps: Sequence[LoopStep],
+        repo: RepositoryProtocol,
+        clock_advancer: HungerClockAdvancer,
+    ):
+        self.steps = steps
+        self.repo = repo
+        self.clock_advancer = clock_advancer
+
+    async def run(self, task_id: str) -> StopReport:
+        while True:
+            loop_id = self.repo.next_loop_id(task_id)
+            ctx = LoopContext(task_id=task_id, loop_id=loop_id)
+            try:
+                for step in self.steps:
+                    ctx = await step.run(ctx)
+                    if ctx.terminating:
+                        break
+            finally:
+                if ctx.candidate is not None:  # candidate workspace was created
+                    self.clock_advancer.advance(task_id)  # increment loop_count exactly once
+                self.repo.save_loop_trace(ctx.trace)
+            if ctx.stop_report is not None:
+                self.repo.save_stop_report(ctx.stop_report)
+                return ctx.stop_report
+```
+
+**Step inventory for v0.5b.0** (canonical order):
+
+```python
+default_steps = [
+    HungerTickStep(),         # may set ctx.terminating + ctx.stop_report (DONE / HUNGER_EXPIRED / BLOCKED / HUMAN_PAUSED / SAFETY_STOP)
+    CreateCandidateWorkspaceStep(),
+    AllocateLoopBudgetStep(),
+    PlanStep(),               # empty plan handling lives here, not in the worker step
+    BuildContextPackStep(),
+    WorkerRuntimeStep(),      # wraps WorkerRuntime.run with asyncio.wait_for + error mapping
+    IntegrateWorkerResultsStep(),  # WorkerResult list -> CandidateState
+    ValidateStep(),
+    CommitOrRejectStep(),     # CommitManager + filesystem manifest verify (§22.3)
+    HungerUpdateStep(),
+    StagnationUpdateStep(),
+    MemoryProposeStep(),
+    PopulateLoopTraceStep(),
+]
+```
+
+**Step contract:**
+
+1. A step reads only what it declares to read (we'll codify this in §22 Operability via a `LoopStep.requires` introspection field, but it's not a runtime check in v0.5b.0 — discipline only).
+2. A step that wants to terminate the task sets `ctx.terminating = True` and assigns `ctx.stop_report`. The pipeline breaks out of the loop and the orchestrator's outer `while True` exits.
+3. Errors raised by a step bubble up to the orchestrator's `try/finally`. The `finally` block guarantees `loop_count` is incremented and `LoopTrace` is persisted regardless. Unhandled exceptions become `StopReport(stop_reason=ERROR)`.
+4. Steps must be idempotent on `(task_id, loop_id)` — re-running a step after a crash with the same `LoopContext` must not create duplicate evidence rows. This is enforced via UNIQUE constraints in §5.2 (see R-10 / §22.4).
+
+**Testing implication:** every step is a 1-method class; unit tests construct a `LoopContext` and assert the post-state. No need to spin up the whole orchestrator. Integration tests still exercise the pipeline end-to-end against the same `default_steps` list.
+
+**v0.6 multi-worker:** `WorkerRuntimeStep` becomes `FanOutWorkerStep` + `JoinWorkerStep`; the rest of the pipeline is untouched.
+
+**Why this matters for v0.5b.0:** before SQLiteRepository ships, the orchestrator is one ~200-line function. After v0.5b.0 adds T1/T2/T3 + stop_report + manifest verify, it'll be ~350 lines. The pipeline refactor at v0.5b.0 entry is ~150 LOC of step classes; the same refactor at v0.5b.0 exit is a 350→0 rewrite of a critical path. Land it first.
 
 ### 12.1 Loop ID and loop_count
 
@@ -2023,7 +2286,176 @@ If these break, the implementation likely violated compatibility constraints.
 
 ---
 
-## 22. Acceptance criteria
+## 22. Operability
+
+This section covers what the orchestrator must do to be **observable, debuggable, and safe to leave running unattended**. Evidence rows and `LoopTrace` already give post-hoc explainability; this section adds live observability and runtime safety.
+
+### 22.1 Structured logging
+
+v0.5b.0 must emit JSON-formatted Python `logging` records on every step boundary, with a fixed correlation envelope.
+
+```python
+# Required log extra on every record emitted from inside a loop:
+{
+    "task_id": "T-2026-05-04-0001",
+    "loop_id": 47,
+    "agent_id": "execution_worker_v1" | None,
+    "step": "WorkerRuntimeStep" | None,
+    "phase": "EXPLORE" | "EXPLOIT" | "COOLDOWN",
+}
+```
+
+Implementation:
+
+- `services/logging_setup.py` configures a single root JSON handler.
+- `LoopContext.bind_log()` returns a `logging.LoggerAdapter` pre-loaded with the envelope.
+- Each `LoopStep.run` calls `log = ctx.bind_log()` once, then logs at DEBUG/INFO at step entry and exit, INFO on termination, WARNING on retryable failure, ERROR on unexpected.
+- No new dependency. Stdlib `logging` + a 30-LOC formatter.
+
+This is the minimum viable correlation. v0.6 can wire the same envelope into OpenTelemetry without changing call sites.
+
+### 22.2 Live status file
+
+v0.5c.0 must write a per-task live status file the runner updates each loop boundary:
+
+```text
+~/.hungerloop/runs/<task_id>.live.json
+```
+
+Contents:
+
+```json
+{
+  "task_id": "T-2026-05-04-0001",
+  "pid": 48201,
+  "started_at": "2026-05-04T12:00:00Z",
+  "last_heartbeat": "2026-05-04T12:14:33Z",
+  "loop_id": 47,
+  "phase": "EXPLOIT",
+  "loop_count": 47,
+  "drive_budget": 53,
+  "cost_so_far_usd": 0.42,
+  "tokens_so_far": 81234,
+  "current_step": "WorkerRuntimeStep",
+  "stop_reason": null
+}
+```
+
+`hungerloop status --watch <task_id>` polls this file (50ms cadence) and re-renders to the terminal. When `stop_reason` becomes non-null, `--watch` exits.
+
+Stale-runner detection: if `last_heartbeat` is older than 5 × `max_wall_clock_seconds`, `hungerloop status` flags the runner as `stale` and offers `hungerloop unlock <task_id>` (only valid after the lock-owner pid is gone).
+
+### 22.3 Filesystem manifest for BestState commits
+
+`CommitOrRejectStep` writes a manifest **before** the SQLite commit and verifies it **after** the filesystem move:
+
+```text
+workspaces/<task_id>/best/files.manifest.json
+```
+
+```json
+{
+  "best_state_id": "BS-T-2026-05-04-0001-loop47",
+  "validation_id": "VAL-...",
+  "committed_at": "2026-05-04T12:14:35Z",
+  "files": [
+    {"path": "src/demo_math.py", "sha256": "abc123...", "size": 142},
+    {"path": "tests/test_demo_math.py", "sha256": "def456...", "size": 89}
+  ]
+}
+```
+
+Commit sequence:
+
+1. SQLite T3a: `save_best_state(...)` (status pending; manifest path stored).
+2. Atomic filesystem swap: `mv candidates/loop_47/files best.new && mv best best.old && mv best.new best && rm -rf best.old`. POSIX `rename(2)` is atomic per-file; using a sibling-temp + rename gives us atomic-enough swap semantics.
+3. Walk the manifest: re-hash every file in `best/`; compare to expected. Any mismatch → write `system_event` evidence row + raise `BestStateConsistencyError`. The orchestrator catches this and emits `StopReport(stop_reason=ERROR, recommendation="run `hungerloop repair-state <task_id>`")`.
+4. SQLite T3b: flip `best_states.status = committed`.
+
+`hungerloop repair-state <task_id> --check`:
+
+- For every `best_state` row, walk its manifest and verify every file exists with matching hash.
+- For every `candidate_state` row marked `committed`, verify it equals the current `best_state.state_id`.
+- Report each divergence as a row in the output; non-zero exit if any.
+
+`--fix` (v0.5c.1+): given a divergence, prompts the operator to choose: roll DB back to last known consistent state, or treat workspace as authoritative and re-derive DB rows.
+
+### 22.4 Idempotency guards
+
+The pipeline must tolerate **at-most-once-per-loop** semantics for every step. Repository tables that record loop attempts have UNIQUE constraints:
+
+```sql
+-- Already implicit in §5.3 PRIMARY KEY (task_id, loop_id). Reaffirmed here.
+-- loop_plans, loop_traces are PK (task_id, loop_id).
+
+-- New for v0.5b.0:
+ALTER TABLE worker_results ADD CONSTRAINT uq_worker_results
+    UNIQUE (task_id, loop_id, agent_id);
+
+ALTER TABLE validation_reports ADD CONSTRAINT uq_validation_reports_loop
+    UNIQUE (task_id, loop_id);
+```
+
+When a step would violate the constraint (mid-loop crash + retry on same `loop_id`), it must `INSERT … ON CONFLICT DO NOTHING` for evidence-shaped rows and `INSERT … ON CONFLICT DO UPDATE` for state-shaped rows. SQLiteRepository chooses per-method; protocol exposes it as a single `save_*` call.
+
+Evidence rows do **not** have UNIQUE constraints — duplicates are merely noisy, not corrupting.
+
+### 22.5 Cost-cap warnings and circuit breakers
+
+`HungerPolicy.max_total_cost_usd` is the hard ceiling. v0.5b.1 adds soft circuit breakers:
+
+```python
+class HungerPolicy(BaseModel):
+    ...
+    max_total_cost_usd: float
+    max_total_tokens: int
+
+    # Soft warnings (default 80% of hard ceiling):
+    soft_cost_warning_ratio: float = 0.80
+    soft_tokens_warning_ratio: float = 0.80
+
+    # Per-hour rolling cap (None = disabled):
+    max_cost_per_hour_usd: float | None = None
+```
+
+Behavior:
+
+- Crossing 80% of either hard ceiling → emit `system_event` evidence with `event_type="cost_warning"`; log at WARNING; `hungerloop status --watch` flags it.
+- `max_cost_per_hour_usd` is a runtime ceiling enforced by `CostGuard` over a rolling 60-minute window of `cost_usd` values from `evidence` table. Breach → `SafetyStopError`.
+
+Why a rolling window: hard ceilings catch runaway tasks but not stuck retry-loops on a high-priced model. A $5/hour cap on a 30-minute task ends a runaway long before the task ceiling.
+
+### 22.6 Secret redaction in evidence
+
+Evidence payloads may include API responses, error messages, request bodies. They must never persist:
+
+- `Authorization: Bearer …` headers
+- `api_key` field values
+- Anything matching `/(sk|pk)-[A-Za-z0-9_-]{16,}/`
+
+`OpenAIModelClient` and `ToolHarness` must call a single `redact_secrets(payload: dict) -> dict` helper before passing payload into `repo.save_evidence(...)`. The helper:
+
+1. Walks dict keys recursively. Keys matching `(?i)(api[_-]?key|authorization|secret|token|password)` → value replaced with `"<redacted>"`.
+2. Walks string values. Any substring matching the regex above → replaced with `"<redacted-key>"` (preserving the surrounding text).
+3. Returns a deep-copied dict; never mutates the input.
+
+Add a unit test asserting that a fake `Bearer sk-test-keymaterial` in an HTTP error message becomes `Bearer <redacted-key>` after `save_model_error_as_evidence`.
+
+### 22.7 Acceptance hooks per release
+
+| Capability | v0.5b.0 | v0.5b.1 | v0.5c.0 | v0.5c.1 |
+|---|---|---|---|---|
+| Structured logging (§22.1) | ✓ required | — | — | — |
+| Live status file (§22.2) | — | — | ✓ required | — |
+| `--watch` CLI command (§22.2) | — | — | ✓ required | — |
+| Filesystem manifest (§22.3) | ✓ required | — | manifest hash verify added | `repair-state --fix` |
+| Idempotency guards (§22.4) | ✓ required | — | — | — |
+| Cost-cap warnings (§22.5) | — | ✓ required | — | rolling-hour cap |
+| Secret redaction (§22.6) | — | ✓ required | — | — |
+
+---
+
+## 23. Acceptance criteria
 
 ### v0.5b.0
 
@@ -2040,6 +2472,20 @@ If these break, the implementation likely violated compatibility constraints.
    (tasks.lock_owner gate).
 8. Existing v0.5a unit tests remain green unless explicitly updated
    per §21.2.
+9. Repository Protocol split per §4.1.5 — services type-hint against
+   aggregate Protocols, not the composite. Mypy --strict clean.
+10. LoopOrchestrator implemented as LoopStep pipeline per §12.0.
+    Each canonical step has a unit test.
+11. SafetyStopError handling per §9.2 — mid-loop CostGuard breach
+    routes to StopReason.SAFETY_STOP, not ERROR.
+12. UNIQUE constraints on (task_id, loop_id) for loop_traces, loop_plans,
+    worker_results, validation_reports per §22.4.
+13. Filesystem manifest written on every BestState commit per §22.3;
+    `repair-state --check` detects manifest divergence.
+14. Reserved version columns on hunger_items, candidate_states,
+    best_states (per ADR-D, unused in v0.5b but reserved for v0.6).
+15. Structured JSON logging with task_id/loop_id/agent_id/step
+    correlation envelope per §22.1.
 ```
 
 ### v0.5b.1
@@ -2053,6 +2499,16 @@ If these break, the implementation likely violated compatibility constraints.
 6. retry exhausted preserves retryable flag.
 7. Unknown pricing defaults to 0.0 and appends event.
 8. Model errors are saved as evidence.
+9. Pricing data loadable from prices.default.yaml (ADR-E);
+   HUNGERLOOP_PRICES_PATH env override accepted.
+10. ModelClientRegistry interface defined; CliContext holds the
+    registry, not a single ModelClient (ADR-G). v0.5b.1 only
+    registers a default; per-agent dispatch is reserved for v0.6.
+11. ResolvedRetryPolicy.resolve(budget, config) is the single
+    source of truth for retry parameters (ADR-H).
+12. Cost-cap soft warnings emitted at 80% of hard ceilings per §22.5.
+13. Evidence rows pass through redact_secrets() per §22.6;
+    unit test asserts API key strings are scrubbed.
 ```
 
 ### v0.5c.0
@@ -2066,6 +2522,13 @@ If these break, the implementation likely violated compatibility constraints.
 6. demo_pytest_bug dummy path reaches DONE.
 7. HUNGER_EXPIRED demo works.
 8. BLOCKED demo works.
+9. Live status file ~/.hungerloop/runs/<task_id>.live.json updated
+   each loop boundary per §22.2.
+10. `hungerloop status --watch <task_id>` polls the live file
+    and re-renders until stop_reason is set.
+11. Stale-runner detection: status flags runners with last_heartbeat
+    older than 5x max_wall_clock_seconds and offers `unlock`.
+12. Filesystem manifest hash verification active on commit per §22.3.
 ```
 
 ### v0.5c.1
@@ -2075,11 +2538,13 @@ If these break, the implementation likely violated compatibility constraints.
 2. SkillCard candidate generated only when strict trigger data exists.
 3. MemoryCandidate generation does not promote automatically.
 4. README documents model config, accept-file and stop preflight.
+5. `repair-state --fix` interactive flow available per §22.3.
+6. Rolling-hour cost cap (max_cost_per_hour_usd) enforced when configured per §22.5.
 ```
 
 ---
 
-## 23. Non-goals
+## 24. Non-goals
 
 v0.5b/c will not implement:
 
@@ -2097,7 +2562,7 @@ v0.5b/c will not implement:
 
 ---
 
-## 24. Summary
+## 25. Summary
 
 The most important change in this rewrite is not new functionality. It is compatibility discipline.
 
