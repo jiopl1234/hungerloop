@@ -197,6 +197,30 @@ class WorkspaceManager:
             source_workspace_ref=f"candidates/loop_{loop_id:03d}",
         )
 
+    def write_manifest(
+        self,
+        *,
+        task_id: str,
+        path: Path,
+        status: WorkspaceStatus,
+        loop_id: int | None = None,
+        source_workspace_ref: str | None = None,
+    ) -> None:
+        """Write a canonical ``manifest.json`` next to ``path``.
+
+        Public entry point so other services (notably
+        :class:`hungerloop.services.repair_state.RepairStateService`)
+        can rebuild the manifest after detecting drift without
+        diverging from the production write shape.
+        """
+        self._write_manifest(
+            task_id=task_id,
+            loop_id=loop_id,
+            path=path,
+            status=status,
+            source_workspace_ref=source_workspace_ref,
+        )
+
     def _write_manifest(
         self,
         task_id: str,

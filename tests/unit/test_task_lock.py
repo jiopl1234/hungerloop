@@ -8,6 +8,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import pytest
 from click.testing import CliRunner
 
 from hungerloop.cli.context import CliContext
@@ -107,7 +108,10 @@ def test_steal_lock_replaces_owner_and_emits_event() -> None:
     assert isinstance(payload, dict)
     assert payload["prev_owner"] == "host-a:42:aaaa"
     assert payload["new_owner"] == "host-b:99:bbbb"
-    assert payload["prev_locked_at"] == prev_locked_at.isoformat()
+    # Z-suffix wire shape (matches events.created_at).
+    assert payload["prev_locked_at"] == (
+        prev_locked_at.isoformat().replace("+00:00", "Z")
+    )
 
 
 def test_steal_works_on_live_lock_too() -> None:
@@ -254,6 +258,31 @@ def test_cli_run_releases_lock_on_clean_shutdown(tmp_path: Path) -> None:
     result = runner.invoke(cli, ["run", "t1"], obj=ctx)
     assert result.exit_code == 0, result.output
     # Lock has been released; another caller can acquire freshly.
+    assert "t1" not in ctx.repo._task_locks
+
+
+def test_cli_run_releases_lock_on_orchestrator_crash(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A crash inside the orchestrator must NOT leave the lock held —
+    the ``finally`` clause in ``run_cmd.run`` is the only thing that
+    keeps a stuck task from looking like a stale-lock situation forever.
+    """
+    ctx = _ctx(tmp_path)
+
+    def _boom(*_args: object, **_kwargs: object) -> None:
+        raise RuntimeError("synthetic orchestrator failure")
+
+    # Replace the orchestrator factory so ``run`` raises after the lock
+    # is acquired but before any clean shutdown path runs.
+    import hungerloop.cli.run_cmd as run_cmd
+
+    monkeypatch.setattr(run_cmd, "build_orchestrator", _boom)
+
+    runner = CliRunner()
+    result = runner.invoke(cli, ["run", "t1"], obj=ctx)
+    assert result.exit_code != 0
+    # The lock must still be released even though the orchestrator blew up.
     assert "t1" not in ctx.repo._task_locks
 
 

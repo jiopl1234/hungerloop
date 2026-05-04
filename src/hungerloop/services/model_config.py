@@ -154,6 +154,7 @@ class PricingTable:
                     "model": model,
                     "input_tokens": input_tokens,
                     "output_tokens": output_tokens,
+                    "total_tokens": input_tokens + output_tokens,
                 },
             )
             return 0.0

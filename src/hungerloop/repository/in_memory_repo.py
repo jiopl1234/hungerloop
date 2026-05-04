@@ -495,7 +495,12 @@ class InMemoryRepository:
             EventType.LOCK_STOLEN,
             {
                 "prev_owner": prev_owner,
-                "prev_locked_at": prev_locked_at.isoformat(),
+                # Match the events.created_at Z-suffix shape so
+                # ``trace export`` sees consistent timestamps across
+                # the wire payload and the row-level field.
+                "prev_locked_at": (
+                    prev_locked_at.isoformat().replace("+00:00", "Z")
+                ),
                 "new_owner": owner,
             },
             task_id=task_id,

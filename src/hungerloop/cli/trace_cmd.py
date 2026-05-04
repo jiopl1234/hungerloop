@@ -8,6 +8,13 @@ PRD §22.8:
     {"task_id":"t1","loop_id":3,"event_type":"loop_committed",
      "payload":{...},"created_at":"2026-05-04T13:22:09Z"}
 
+Filter semantic: rows are emitted strictly when ``events.task_id =
+<task_id>``. Global events (``task_id IS NULL``, e.g. the
+``unknown_model_pricing`` row written by ``PricingTable``) are
+intentionally skipped — including them in every per-task export would
+double-count cross-task signals. A future ``trace export-global``
+sibling can surface those.
+
 JSONL is intentionally minimal — no envelope, no headers, easy to grep,
 easy to pipe. Future formats (`prometheus`, `otlp`) layer on top
 without changing this command's surface.
@@ -65,18 +72,25 @@ def trace_export(ctx: CliContext, task_id: str, fmt: str) -> None:
                 },
                 ensure_ascii=False,
                 separators=(",", ":"),
+                # Coerce datetimes / sets / unknown objects to ``str``
+                # rather than crashing mid-stream — a half-written JSONL
+                # file is harder to recover from than a stringified
+                # payload key.
+                default=_jsonl_default,
             )
         )
 
 
 def _events_for_task(ctx: CliContext, task_id: str) -> list[dict[str, Any]]:
-    """Read events in append order; filter by task_id (None == global).
+    """Read events in append order; emit only rows whose ``task_id``
+    matches ``task_id`` (``task_id IS NULL`` rows are global and
+    excluded — see module docstring).
 
     Reaches into ``InMemoryRepository._events`` to keep this command
     working before SQLiteRepository lands (same pattern as
     ``report_format._resolve_goal_status``). The SQLite implementation
-    will replace this with an indexed ``ORDER BY created_at, event_id``
-    query against the ``events`` table.
+    will replace this with ``SELECT * FROM events WHERE task_id = ?
+    ORDER BY created_at, event_id``.
     """
     raw_events: Any = getattr(ctx.repo, "_events", None)
     if not isinstance(raw_events, list):
@@ -85,10 +99,20 @@ def _events_for_task(ctx: CliContext, task_id: str) -> list[dict[str, Any]]:
     for row in raw_events:
         if not isinstance(row, dict):
             continue
-        row_task = row.get("task_id")
-        if row_task is None or row_task == task_id:
+        if row.get("task_id") == task_id:
             rows.append(row)
     return rows
+
+
+def _jsonl_default(value: object) -> str:
+    """JSON encoder fallback: stringify everything else.
+
+    Known callers only hand us primitives, but defensive serialization
+    avoids the case where a future event payload smuggles in a
+    ``datetime`` / ``set`` / custom object and crashes the export
+    mid-file.
+    """
+    return str(value)
 
 
 def _task_exists(ctx: CliContext, task_id: str) -> bool:

@@ -26,7 +26,6 @@ from typing import Any, Literal
 from pydantic import BaseModel
 
 from hungerloop.models.events import EventType
-from hungerloop.models.workspace import WorkspaceManifest
 from hungerloop.repository.protocol import RepositoryProtocol
 from hungerloop.services.workspace_manager import WorkspaceManager, _sha256_of_file
 
@@ -359,10 +358,15 @@ class RepairStateService:
         return self._refuse(divergence, summary="no fix path for this divergence")
 
     def _fix_d4(self, divergence: Divergence) -> FixOutcome:
-        """Rebuild the ``best/`` manifest from the live filesystem."""
-        # Resolve the best/files dir from the divergence target. The target
-        # may be the directory itself ("manifest missing") or a file under
-        # it ("file present, not in manifest").
+        """Rebuild the ``best/`` manifest from the live filesystem.
+
+        Routes through ``WorkspaceManager.write_manifest`` so the JSON
+        shape matches the production write path exactly. Pre-review the
+        repair path emitted a Pydantic ``model_dump`` shape that carried
+        extra fields (``workspace_ref``, ``artifact_ids``, ...) that
+        ``_write_manifest`` never writes — operators inspecting the file
+        would see schema drift between the two code paths.
+        """
         target_path = Path(divergence.target)
         task_id = self._task_id_from_path(target_path)
         if task_id is None:
@@ -377,33 +381,17 @@ class RepairStateService:
                 divergence, summary=f"best/ does not exist for task {task_id}"
             )
 
-        files_on_disk = sorted(p for p in best_dir.rglob("*") if p.is_file())
-        file_hashes = {
-            p.relative_to(best_dir).as_posix(): _sha256_of_file(p)
-            for p in files_on_disk
-        }
-        manifest = WorkspaceManifest(
+        self._workspace.write_manifest(
             task_id=task_id,
-            loop_id=None,
-            workspace_ref=str(best_dir),
-            path=str(best_dir),
+            path=best_dir,
             status="best",
-            file_count=len(files_on_disk),
-            total_bytes=sum(p.stat().st_size for p in files_on_disk),
-            files=file_hashes,
         )
-        manifest_path = best_dir.parent / "manifest.json"
-        # We dump the same JSON shape ``WorkspaceManager._write_manifest``
-        # writes so a subsequent ``--check`` run sees zero divergences.
-        manifest_blob = manifest.model_dump()
-        manifest_blob["created_at"] = self._now().isoformat()
-        manifest_path.write_text(
-            json.dumps(manifest_blob, indent=2, ensure_ascii=False),
-            encoding="utf-8",
-        )
+
+        files_on_disk = [p for p in best_dir.rglob("*") if p.is_file()]
+        total_bytes = sum(p.stat().st_size for p in files_on_disk)
         summary = (
             f"rebuilt manifest for {best_dir} "
-            f"({manifest.file_count} file(s), {manifest.total_bytes} bytes)"
+            f"({len(files_on_disk)} file(s), {total_bytes} bytes)"
         )
         self._emit_event(
             task_id=task_id,
@@ -426,14 +414,15 @@ class RepairStateService:
                     f"could not infer (task_id, loop_id) from {candidate_path}"
                 ),
             )
-        # ``WorkspaceManager.reject_candidate`` expects the ``files/`` dir to
-        # exist; if the candidate dir was created without ``files/`` (e.g.
-        # a hand-rolled stub) just move the whole candidate dir.
+        # ``WorkspaceManager.reject_candidate`` expects the ``files/`` dir
+        # to exist; if the candidate dir was created without ``files/``
+        # (e.g. a hand-rolled stub) move the whole tree manually and write
+        # the manifest with the same canonical shape so a follow-up
+        # --check doesn't see an empty rejected/ dir as a new D4.
         files_dir = candidate_path / "files"
         if files_dir.exists():
             self._workspace.reject_candidate(task_id, loop_id)
         else:
-            # Best-effort: rename the entire candidate dir under rejected/.
             rejected = (
                 self._workspace.task_root(task_id)
                 / "rejected"
@@ -441,6 +430,13 @@ class RepairStateService:
             )
             rejected.parent.mkdir(parents=True, exist_ok=True)
             candidate_path.rename(rejected)
+            self._workspace.write_manifest(
+                task_id=task_id,
+                path=rejected,
+                loop_id=loop_id,
+                status="rejected",
+                source_workspace_ref=f"candidates/loop_{loop_id:03d}",
+            )
         summary = (
             f"moved orphan candidate loop_{loop_id:03d} to rejected/"
         )

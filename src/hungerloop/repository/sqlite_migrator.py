@@ -23,6 +23,7 @@ from __future__ import annotations
 import re
 import shutil
 import sqlite3
+from contextlib import closing
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -113,7 +114,11 @@ class SQLiteMigrator:
         if not self.db_path.exists():
             # A fresh DB starts at user_version=0 by SQLite default.
             return 0
-        with sqlite3.connect(str(self.db_path)) as conn:
+        # ``sqlite3.Connection.__exit__`` only commits / rolls back; it does
+        # NOT close the connection. Across N migrations + per-process
+        # ensure_current calls that's a real file-handle leak — wrap every
+        # open in ``closing(...)``.
+        with closing(sqlite3.connect(str(self.db_path))) as conn:
             cur = conn.execute("PRAGMA user_version")
             row = cur.fetchone()
             return int(row[0]) if row else 0
@@ -175,16 +180,25 @@ class SQLiteMigrator:
         atomic-migration guarantee. Instead we split the file into
         individual statements and execute each via ``cursor.execute`` so
         the manual ``BEGIN IMMEDIATE`` / ``COMMIT`` actually wraps them.
+
+        Failure carries the offending statement (truncated) into
+        :class:`MigrationFailedError` so an operator reading the log
+        knows which line broke without having to grep the file.
         """
         statements = _split_sql_statements(
             sql_file.read_text(encoding="utf-8")
         )
+        failing_stmt: str | None = None
         try:
-            with sqlite3.connect(str(self.db_path), isolation_level=None) as conn:
+            with closing(
+                sqlite3.connect(str(self.db_path), isolation_level=None)
+            ) as conn:
                 conn.execute("BEGIN IMMEDIATE")
                 try:
                     for stmt in statements:
+                        failing_stmt = stmt
                         conn.execute(stmt)
+                    failing_stmt = None
                     # We trust the migration to set user_version itself
                     # (the convention in v1__initial.sql), but also defend
                     # against bad migrations that forget the trailer.
@@ -195,13 +209,21 @@ class SQLiteMigrator:
                         conn.execute(f"PRAGMA user_version = {version}")
                     conn.execute("COMMIT")
                 except BaseException:
-                    conn.execute("ROLLBACK")
+                    # If ROLLBACK itself fails (e.g. concurrent writer
+                    # holding the DB), prefer the original error — that's
+                    # what tells the operator what actually broke.
+                    try:
+                        conn.execute("ROLLBACK")
+                    except sqlite3.Error:
+                        pass
                     raise
         except sqlite3.Error as exc:
-            raise MigrationFailedError(version=version, cause=exc) from exc
+            raise MigrationFailedError(
+                version=version, cause=exc, statement=failing_stmt
+            ) from exc
 
     def _set_user_version(self, version: int) -> None:
-        with sqlite3.connect(str(self.db_path)) as conn:
+        with closing(sqlite3.connect(str(self.db_path))) as conn:
             conn.execute(f"PRAGMA user_version = {version}")
             conn.commit()
 
@@ -250,10 +272,13 @@ class ReadOnlyDbOutdatedError(RuntimeError):
 def _split_sql_statements(text: str) -> list[str]:
     """Split a SQL file into top-level statements.
 
-    Handles ``--`` line comments and respects single-quoted strings so
-    semicolons inside string literals don't terminate a statement. We do
-    NOT support BEGIN/END trigger bodies or nested compound statements;
-    none of HungerLoop's migrations use them.
+    Handles ``--`` line comments, ``/* ... */`` block comments, and
+    respects single-quoted strings so semicolons inside string literals
+    don't terminate a statement. We do NOT support BEGIN/END trigger
+    bodies or nested compound statements; the splitter would treat the
+    inner ``;`` as a statement terminator. None of HungerLoop's
+    migrations use triggers — see ``test_split_sql_does_not_support_*``
+    for the pinned regression cases.
     """
     statements: list[str] = []
     buf: list[str] = []
@@ -261,8 +286,17 @@ def _split_sql_statements(text: str) -> list[str]:
     i = 0
     while i < len(text):
         ch = text[i]
+        if not in_string and ch == "/" and text[i : i + 2] == "/*":
+            # Block comment runs to the next ``*/``. Unterminated blocks
+            # swallow the rest of the file — that's a malformed migration
+            # and the operator will see the resulting SQL syntax error.
+            end = text.find("*/", i + 2)
+            if end == -1:
+                break
+            i = end + 2
+            continue
         if not in_string and ch == "-" and text[i : i + 2] == "--":
-            # Comment to end of line.
+            # Line comment to end of line.
             newline = text.find("\n", i)
             if newline == -1:
                 break

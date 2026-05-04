@@ -7,7 +7,6 @@ codes (0 for empty/clean, 1 for unknown task).
 from __future__ import annotations
 
 import json
-import time
 from pathlib import Path
 
 import pytest
@@ -46,7 +45,6 @@ def _seed_events(ctx: CliContext) -> None:
         task_id="demo-1",
         loop_id=1,
     )
-    time.sleep(0.001)  # ensure created_at differs at second resolution? no — just append order.
     ctx.repo.append_event(
         EventType.LOOP_COMMITTED,
         {"newly_passed": ["H-001:0"]},
@@ -180,11 +178,11 @@ def test_export_default_format_is_jsonl(context: CliContext) -> None:
     assert result_default.output == result_explicit.output
 
 
-def test_export_global_events_included_when_task_id_matches(
-    context: CliContext,
-) -> None:
-    """Events with ``task_id=None`` (global) are NOT cross-attributed to
-    a specific task — only events whose task_id matches show up."""
+def test_export_excludes_global_events(context: CliContext) -> None:
+    """Global events (``task_id IS NULL``) are NOT included in a
+    per-task export — surfacing them in every task's stream would
+    double-count cross-task signals like ``unknown_model_pricing``.
+    """
     context.repo.append_event(
         EventType.UNKNOWN_MODEL_PRICING,
         {"model": "ghost"},
@@ -202,8 +200,35 @@ def test_export_global_events_included_when_task_id_matches(
     parsed = [
         json.loads(line) for line in result.output.split("\n") if line
     ]
-    # Both rows show up: the global one has task_id=None and our filter
-    # currently treats it as cross-task ambient (matches the §22.8 rule
-    # that global-pricing events apply to whatever task is being audited).
-    assert any(r.get("event_type") == "unknown_model_pricing" for r in parsed)
-    assert any(r.get("event_type") == "loop_started" for r in parsed)
+    types = {r.get("event_type") for r in parsed}
+    assert types == {"loop_started"}
+    assert "unknown_model_pricing" not in types
+
+
+def test_export_non_json_payload_handled_gracefully(
+    context: CliContext,
+) -> None:
+    """A payload smuggling a datetime / set / custom object must not
+    crash the exporter mid-stream — values get stringified instead."""
+    from datetime import datetime, timezone
+
+    context.repo.append_event(
+        EventType.LOOP_STARTED,
+        # ``datetime`` is the realistic case (skill-card emitter, future
+        # memory-promotion logs); ``object()`` is the worst case.
+        {
+            "started_at": datetime(2026, 5, 4, 12, 0, tzinfo=timezone.utc),
+            "marker": object(),
+        },
+        task_id="demo-1",
+        loop_id=1,
+    )
+    runner = CliRunner()
+    result = runner.invoke(cli, ["trace", "export", "demo-1"], obj=context)
+    assert result.exit_code == 0
+    [line] = [line for line in result.output.split("\n") if line]
+    parsed = json.loads(line)
+    # Date got stringified; opaque objects got their ``str()`` repr.
+    assert isinstance(parsed["payload"]["started_at"], str)
+    assert "2026-05-04" in parsed["payload"]["started_at"]
+    assert isinstance(parsed["payload"]["marker"], str)

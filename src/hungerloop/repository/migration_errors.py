@@ -18,15 +18,43 @@ class MigrationFailedError(MigrationError):
     """Raised when a migration file fails inside its ``BEGIN IMMEDIATE``
     transaction. The transaction rolls back; the sibling backup is
     preserved for forensic recovery.
+
+    ``statement`` carries the SQL statement that failed (truncated to
+    keep error messages readable). It is ``None`` for failures that
+    happen outside the per-statement loop (e.g. the trailing
+    ``PRAGMA user_version`` write).
     """
 
-    def __init__(self, *, version: int, cause: BaseException) -> None:
+    _STATEMENT_PREVIEW_CHARS = 240
+
+    def __init__(
+        self,
+        *,
+        version: int,
+        cause: BaseException,
+        statement: str | None = None,
+    ) -> None:
+        preview = _preview(statement, self._STATEMENT_PREVIEW_CHARS)
+        suffix = f" (failing statement: {preview!r})" if preview else ""
         super().__init__(
-            f"Migration v{version} failed; backup preserved. "
+            f"Migration v{version} failed; backup preserved.{suffix} "
             f"Underlying cause: {cause!r}"
         )
         self.version = version
         self.cause = cause
+        self.statement = statement
+
+
+def _preview(text: str | None, limit: int) -> str | None:
+    """Return ``text`` collapsed to a single line and trimmed to ``limit``.
+
+    Used for log lines / error messages so a 200-line CREATE TABLE doesn't
+    blow up the operator's terminal.
+    """
+    if not text:
+        return None
+    flat = " ".join(text.split())
+    return flat if len(flat) <= limit else flat[: limit - 1] + "…"
 
 
 class DownMigrationDisallowed(MigrationError):

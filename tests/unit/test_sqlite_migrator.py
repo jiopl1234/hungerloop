@@ -245,6 +245,76 @@ def test_backup_pruning_keeps_latest_plus_two_prior(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# Splitter behaviour pins
+# ---------------------------------------------------------------------------
+
+
+def test_split_sql_empty_returns_empty_list() -> None:
+    """An empty file produces no statements — the migrator's
+    no-pending branch relies on this contract."""
+    from hungerloop.repository.sqlite_migrator import _split_sql_statements
+
+    assert _split_sql_statements("") == []
+
+
+def test_split_sql_block_comment_swallows_internal_semicolons(
+    tmp_path: Path,
+) -> None:
+    """``/* ... */`` blocks must NOT split on inner ``;`` (regression net)."""
+    from hungerloop.repository.sqlite_migrator import _split_sql_statements
+
+    text = "/* a; b; */ CREATE TABLE x (i INTEGER);"
+    statements = _split_sql_statements(text)
+    assert statements == ["CREATE TABLE x (i INTEGER)"]
+
+
+def test_split_sql_does_not_support_trigger_bodies(tmp_path: Path) -> None:
+    """Documented limitation: ``BEGIN ... END;`` trigger bodies get
+    split on the inner ``;``. Pin the broken behavior so a future
+    contributor adding a trigger sees a loud test failure rather than a
+    silent half-applied migration.
+    """
+    from hungerloop.repository.sqlite_migrator import _split_sql_statements
+
+    text = (
+        "CREATE TRIGGER t AFTER INSERT ON x BEGIN "
+        "INSERT INTO y VALUES (NEW.i); "
+        "END;"
+    )
+    statements = _split_sql_statements(text)
+    # The trigger body got cut at the inner ``;`` — the splitter doesn't
+    # know about BEGIN/END, so the CREATE TRIGGER header lands as one
+    # statement and the trailing ``END`` lands as another. SQLite will
+    # reject either half on its own. If you need triggers, write a custom
+    # apply path that doesn't go through ``_split_sql_statements``.
+    assert len(statements) > 1
+    assert any("END" == s.strip() for s in statements)
+
+
+def test_failing_migration_records_offending_statement(tmp_path: Path) -> None:
+    """``MigrationFailedError.statement`` must carry the SQL that broke."""
+    db = tmp_path / "blackboard.sqlite"
+    migrations = tmp_path / "migrations"
+    _seed_db_at_version(db, 0)
+    _write_migration(
+        migrations,
+        1,
+        "broken",
+        "CREATE TABLE ok (i INTEGER); "
+        "ALTER TABLE missing ADD COLUMN x TEXT; "
+        "PRAGMA user_version = 1;",
+    )
+    with pytest.raises(MigrationFailedError) as excinfo:
+        SQLiteMigrator(db, migrations, latest_version=1).ensure_current(
+            write_capable=True
+        )
+    err = excinfo.value
+    assert err.version == 1
+    assert err.statement is not None
+    assert "ALTER TABLE missing" in err.statement
+
+
 def test_real_v1_initial_migration_runs_against_fresh_db(tmp_path: Path) -> None:
     """The actual ``migrations/v1__initial.sql`` shipped in the repo must
     apply cleanly against a fresh DB."""

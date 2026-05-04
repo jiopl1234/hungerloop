@@ -439,6 +439,29 @@ def test_cli_check_corruption_exit_2(context: CliContext) -> None:
     assert "D2" in result.output
 
 
+def test_cli_check_mixed_warning_and_corruption_exits_2(
+    context: CliContext,
+) -> None:
+    """When BOTH a warning and a corruption divergence are present,
+    --check must surface the corruption exit code (2), not silently
+    demote it to a warning (1) — corruption is the more dangerous
+    signal and CI pipelines hinge on the distinction.
+    """
+    ws = WorkspaceManager(context.workspace_root)
+    _seed_best(ws, "task-1", {"a.txt": "alpha"})
+    # D2 corruption: tamper with the file.
+    (ws.best_files_dir("task-1") / "a.txt").write_text(
+        "tampered", encoding="utf-8"
+    )
+    # D5 warning: orphan candidate dir.
+    ws.create_candidate_workspace("task-1", loop_id=7)
+    runner = CliRunner()
+    result = runner.invoke(cli, ["repair-state", "task-1", "--check"], obj=context)
+    assert result.exit_code == 2
+    assert "D2" in result.output
+    assert "D5" in result.output
+
+
 def test_cli_fix_corruption_exit_2(context: CliContext) -> None:
     ws = WorkspaceManager(context.workspace_root)
     _seed_best(ws, "task-1", {"a.txt": "alpha"})

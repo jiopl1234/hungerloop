@@ -79,6 +79,24 @@ def test_falsy_quiet_dummy_does_not_silence(
     assert "DummyModelClient" in capsys.readouterr().err
 
 
+@pytest.mark.parametrize("value", ["maybe", "truthy", "on", "enabled"])
+def test_garbage_quiet_dummy_does_not_silence(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    value: str,
+) -> None:
+    """The truthy set is closed-membership (``{"1","true","yes"}``).
+    Future "fixes" that treat any non-empty string as truthy would
+    silently silence warnings for misspelled values like ``"on"`` —
+    pin the conservative behavior so that doesn't slip in.
+    """
+    monkeypatch.setenv("HUNGERLOOP_QUIET_DUMMY", value)
+    yaml_path = _write_yaml(tmp_path, "provider: dummy\nmodel_name: dummy\n")
+    ModelConfigLoader().load(yaml_path)
+    assert "DummyModelClient" in capsys.readouterr().err
+
+
 # ---------------------------------------------------------------------------
 # Test-injection silence
 # ---------------------------------------------------------------------------
