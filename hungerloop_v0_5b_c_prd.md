@@ -46,6 +46,11 @@ v0.5b.0 只做：
 - LoopTrace / StopReport 持久化
 - stop reason preflight
 - DB WAL 和 task lock
+- `hungerloop report` 输出 schema (§18.3)
+- Schema migration framework (§5.5)
+- `repair-state --check` (§16.3)
+- Stale-lock detection + `--steal-lock` (§5.1.1)
+- `EventType` enum + typed `append_event` (§22.8)
 
 不做：
 
@@ -54,6 +59,23 @@ v0.5b.0 只做：
 - 新 ToolResult schema
 - 自动 memory promotion
 - SkillCard 严格触发
+
+#### 1.1.1 Day 1 — 协议清理（在写 SQLiteRepository 之前完成）
+
+v0.5a → v0.5b.0 之间有四个 breaking-by-design 的协议改动。SQLite 落地前先把它们扫掉，否则 `SQLiteRepository` 写到一半时会被多处调用方反咬。来源是 v0.5a reverse-spec U4/U6/U7/U8（`specs/hungerloop_v0.5a_reverse_spec.md` §6）。
+
+| 任务 | 改动 | 受影响调用方 | 验收 |
+|---|---|---|---|
+| **D1-A · save_hunger_clock 签名** (U7) | `RepositoryProtocol.save_hunger_clock(self, clock)` → `save_hunger_clock(self, task_id: str, clock: HungerClockState)`。同步更新 `InMemoryRepository`，删掉里面靠 `is`-identity 反查 task_id 的兼容路径 (`repository/in_memory_repo.py:96-110`)。 | `services/loop_orchestrator.py:135`、`cli/run_cmd.py`、`cli/hunger_cmd.py`，以及所有调用 `save_hunger_clock` 的测试 | mypy --strict 干净；测试全绿；`grep -rn "save_hunger_clock" src/` 不再出现单参数调用 |
+| **D1-B · StopReport 持久化迁移** (U4) | 把 `repo.save_stop_report(...)` 从 `cli/run_cmd.py` 删掉，改由 Orchestrator 在 §12.0 pipeline 的终止步骤里写（PRD §12.0 line 1677 已经这么画）。`tests/unit/test_cli_commands.py:242` 那条 "Per §28.16 / M4 the CLI persists the StopReport" 注释一并改成 "orchestrator persists per §12.0"。 | `cli/run_cmd.py`、`services/loop_orchestrator.py._emit_stop`（或 §12.0 step）、上述测试注释 | 7 个 integration test 仍走 `repo.get_last_stop_reason(...)` 断言，无回归；CLI 不再调用 `save_stop_report` |
+| **D1-C · set_hunger_policy 重命名** (U6) | `InMemoryRepository.set_hunger_policy` → `save_hunger_policy(task_id, policy)`，并加入 `RepositoryProtocol`（§4.1 line 696 已经声明这个名字）。`HungerPolicy` 不变。 | `tests/unit/test_cli_commands.py` fixture 等约 3 处 setup 代码 | `grep -rn "set_hunger_policy" src/ tests/` = 0 |
+| **D1-D · LLM_JUDGE 编译期拒绝** (U8) | `services/requirement_compiler.py` 在编译 ledger 时，遇到 `AcceptanceCheckType.LLM_JUDGE` 抛 `NotImplementedError("LLM_JUDGE deferred to v1.2; remove from acceptance spec")`。比当前在 validation 时才抛要早一个 loop。 | `requirement_compiler.py`、新增一条 `tests/unit/test_requirement_compiler.py::test_llm_judge_rejected_at_compile` | `pytest -k llm_judge` 含两条：v0.5a 的运行期 `NotImplementedError` 测试可保留作为深度防御；编译期那条新增 |
+
+不在 Day 1 做的：
+
+- `BestState.score` 加 deprecated 标记（U2，cosmetic，归到任意 model-touch 那天）。
+- v0.5a PRD §18.1 的 `events.jsonl` 残留（U5，纯文档，单独 PR）。
+- BudgetGuard 持久化（U3，§2.1 明令保留 v0.5a context-based API；ADR-002 是权威）。
 
 ### 1.2 v0.5b.1 scope
 
@@ -67,6 +89,8 @@ v0.5b.1 做：
 - 模型错误 evidence
 - `ModelAuthError` / `ModelCallError` 到 `WorkerResult` 的完整映射
 - CLI `--model-config`
+- Cost reconciliation event (§8.7.1)
+- `provider: dummy` first-class (§11.4)
 
 不做：
 
@@ -84,6 +108,7 @@ v0.5c.0 做：
 - `examples/demo_pytest_bug`
 - dummy deterministic patch demo
 - path safety + SandboxRunner 统一复用
+- MemoryCandidate forward-compat fields (§19.1)
 
 不做：
 
@@ -100,6 +125,8 @@ v0.5c.1 做：
 - SkillCard candidate
 - MemoryCandidate 生成规则固化
 - README / examples / troubleshooting
+- `hungerloop trace export --format jsonl` (§22.8)
+- Performance test for `report` / `status` (§9 NFR)
 
 不做：
 
@@ -982,6 +1009,61 @@ hungerloop run must acquire task lock before orchestrator starts.
 
 Task lock uses `tasks.lock_owner` and `tasks.locked_at`.
 
+### 5.1.1 Task lock fault recovery
+
+`§5.1` only covers the happy path (acquire and hold). Production must also handle stale locks (process crashed without release), explicit force-takeover, and atomic release on clean shutdown.
+
+**Owner string format**: `"{hostname}:{pid}:{uuid4_8}"`. Recorded in full so a human reading `hungerloop status` can identify which terminal/host owns the lock.
+
+**Stale threshold**: 30 minutes default, exposed via:
+
+- Env var `HUNGERLOOP_LOCK_STALE_SEC` (process-wide).
+- CLI flag `hungerloop run --lock-stale-sec N` (overrides env per invocation).
+
+The threshold is *not* a `HungerPolicy` field — locking is plumbing, not hunger semantics.
+
+**Acquisition flow** for `hungerloop run <task_id>`:
+
+```text
+1. BEGIN IMMEDIATE
+2. Read tasks.lock_owner / tasks.locked_at
+3. If lock_owner is null:
+     claim it; commit; proceed.                                  -> "acquired"
+4. Else if lock_owner.host == current.host AND lock_owner.pid == current.pid:
+     re-entrant; proceed.                                        -> "reentrant"
+5. Else if (now - locked_at) < stale_threshold:
+     exit code 3 with "Lock held by <owner> since <ts>"          -> "held_live"
+6. Else if (now - locked_at) >= stale_threshold AND not --steal-lock:
+     exit code 6 with "Lock is stale; pass --steal-lock"         -> "held_stale"
+7. Else if --steal-lock:
+     replace owner; emit lock_stolen event
+       payload = {prev_owner, prev_locked_at, new_owner};
+     commit; proceed.                                            -> "stolen"
+```
+
+**Release flow** on clean shutdown: `release_task_lock(task_id, owner)` runs in the *same* transaction that persists `StopReport` (per the v0.5b.0 Day-1 D1-B migration in §1.1.1). Either both writes commit or neither does — no partial state.
+
+**`--steal-lock` is the only force-takeover affordance**. Tooling that wraps `hungerloop run` (CI scripts, watchdog daemons) MUST NOT pass it implicitly. Stealing emits an audit event so post-mortems can identify what stole what.
+
+**Cross-link**: `hungerloop repair-state --check` (§16.3) reports stale locks as divergence type **D6** but does NOT auto-steal. `--fix` refuses D6 and directs the user to `--steal-lock`.
+
+**Repository protocol** (per §4.1):
+
+```python
+def acquire_task_lock(
+    self,
+    task_id: str,
+    owner: str,
+    *,
+    stale_threshold_seconds: int,
+    steal: bool = False,
+) -> Literal["acquired", "reentrant", "held_live", "held_stale", "stolen"]: ...
+
+def release_task_lock(self, task_id: str, owner: str) -> None: ...
+```
+
+`release_task_lock` is a no-op when `owner` doesn't match — defends against double-release after a steal.
+
 ### 5.2 Core tables
 
 ```sql
@@ -1176,6 +1258,57 @@ CREATE INDEX idx_validation_reports_task_loop ON validation_reports(task_id, loo
 CREATE INDEX idx_candidate_states_task_loop ON candidate_states(task_id, loop_id);
 ```
 
+### 5.5 Schema migrations
+
+The schema in §5.2/5.3 is v1. Every later additive change (new columns, new tables) must land through a forward-only migration. v0.5b.0 ships with the framework; the first real migration is v0.5c.0 (MemoryCandidate forward-compat fields, §19.1).
+
+**File layout**:
+
+```text
+src/hungerloop/repository/
+├── migrations/
+│   ├── __init__.py
+│   ├── v1__initial.sql        # current §5.2/5.3 schema, ends with PRAGMA user_version = 1
+│   └── v2__memory_candidate_lifecycle.sql   # lands in v0.5c.0
+└── sqlite_migrator.py
+```
+
+Naming rule: `v{N}__{slug}.sql`, `N` is a positive integer, slug is `[a-z0-9_]+`. Each file is one transaction (the migrator wraps it in `BEGIN IMMEDIATE` / `COMMIT`). Every migration ends with `PRAGMA user_version = N;`.
+
+**Migrations are forward-only**. Down-migration files (`down_v{N}*.sql`) are explicitly disallowed and the migrator refuses to load them. To revert: restore from a backup.
+
+**Open behavior** (`SQLiteRepository.__init__`):
+
+```text
+1. Open the DB.
+2. current = PRAGMA user_version
+3. If current > LATEST_VERSION: raise SchemaTooNewError → exit 5
+4. If current == LATEST_VERSION: proceed.
+5. If current < LATEST_VERSION:
+     If write_capable command (run / new / hunger refill / repair-state --fix):
+       Write sibling backup at <db>.bak.v{current}.{utc_iso8601}
+       For each pending vN file in order:
+         Run inside BEGIN IMMEDIATE; on failure raise MigrationFailedError, preserving backup
+       Prune backups: keep latest + 2 prior; archive older to <workspace>/.archive/
+     Else (read-only command — status / report / trace / repair-state --check):
+       Exit code 4 with "Database needs migration; run 'hungerloop run' or '--migrate' once"
+6. Acquire task lock per §5.1.1 (separate transaction).
+```
+
+**Backup retention**: latest + 2 prior versions in place; older ones move to `<workspace>/.archive/`. Backups are a few MB each; deletion is operator-grade pain when corruption hits.
+
+**Error mapping**:
+
+| Error | Cause | Exit |
+|---|---|---|
+| `SchemaTooNewError` | `user_version > LATEST_VERSION` | 5 |
+| Read-only on outdated DB | `user_version < LATEST_VERSION` and command is RO | 4 |
+| Migration SQL fails inside `BEGIN IMMEDIATE` | bad migration file | raise; backup preserved |
+| Backup write fails (disk full) | `OSError` before migration | refuse; raise; schema unmodified |
+| Down-migration file present | naming check at startup | refuse; "code/repo mismatch" |
+
+**LATEST_VERSION** is a module constant in `repository/sqlite_migrator.py`. v0.5b.0 ships with `LATEST_VERSION = 1`. Each subsequent migration bumps it.
+
 ---
 
 ## 6. ModelConfig v0.5b.1
@@ -1240,6 +1373,48 @@ retry_base_delay_seconds: 1.0
 retry_max_delay_seconds: 30.0
 fail_on_unknown_model_price: false
 ```
+
+### 6.4 DummyModelClient long-term contract
+
+`DummyModelClient` is treated by some readers as a v0.5a-only test fixture. It isn't. Tests, examples, CI smoke runs, and offline development all need a deterministic, network-free model. v0.5b makes this status explicit so the client doesn't drift.
+
+**Sanctioned use cases**:
+
+- Unit / integration tests (every release).
+- `examples/demo_task.yaml` — runs end-to-end with no API key.
+- CI smoke runs (no flakiness from rate limits / API outages).
+
+**Not sanctioned**: production user-facing tasks. The CLI emits a stderr warning to discourage accidental misuse, but does not refuse — refusing would force every offline workflow to thread `--allow-dummy` through wrappers, and the friction outweighs the safety gain.
+
+**ModelConfig integration**:
+
+- `provider: dummy` is a first-class enum value in `ModelProvider` (already declared in §6.1 — confirm no api_key_env is required when provider is dummy).
+- The loader skips the `api_key_env` requirement and allows `model_name` to default to `"dummy"`.
+
+**CLI warning policy**:
+
+- When `hungerloop run` loads a YAML config with `provider: dummy`:
+  - If `os.environ.get("HUNGERLOOP_QUIET_DUMMY")` is `"1" / "true" / "yes"`: silent.
+  - Else: stderr `Warning: using DummyModelClient — outputs are scripted and not from a real model.`
+- When tests inject a `DummyModelClient` via `CliContext(model_client=...)` without going through YAML: silent. The warning lives in the loader path, not the injection path.
+
+**Frozen action schema** (additive-only across v0.5b → v0.6):
+
+```python
+DummyModelClient.with_actions([
+    {
+        "tool_name": "write_file",       # required: matches a registered Tool
+        "args": {"path": "report.md",    # required: tool-specific dict
+                 "content": "ok"},
+        # Optional, additive across releases:
+        # "delay_ms": 50,                # for timing-related tests
+    },
+])
+```
+
+Adding new optional keys is allowed across minor releases. Removing or renaming any current key requires a major-version bump on the action schema and a coordinated test migration.
+
+**Cross-link**: `RELEASE_CHECKLIST.md` documents `HUNGERLOOP_QUIET_DUMMY=1` as the CI affordance. The v0.5a demo task (`examples/demo_task.yaml`) sets `provider: dummy` and is expected to emit the warning unless the CI runner sets the env.
 
 ---
 
@@ -1434,6 +1609,29 @@ Both rows must carry the threaded `loop_id` and `agent_id`; never use `loop_id=0
 **WorkerRuntime contract:** WorkerRuntime sees only the `ModelResponse` (success) or the bubbled-up exception (failure). It does not write `model_call` evidence and does not touch `cost_guard`. It maps the exception to `WorkerResult` per §9.2.
 
 **Pricing fallback:** When `PricingTable.estimate` returns `0.0` for an unknown model, the client still calls `cost_guard.record_llm_usage` (with `cost_usd=0.0`) and the caller (e.g. `WorkerRuntime` or the loop wiring) is responsible for emitting a single `unknown_model_pricing` event per task — this keeps `PricingTable` itself repository-free as stated in §7.
+
+### 8.7.1 Cost estimate vs actual reconciliation
+
+`PricingTable.estimate` runs pre-call against the prompt. The OpenAI API returns real `usage.total_tokens` post-call. Common divergence sources: prompt caching, vision tokens, completion-length surprise, model-side compression. v0.5b.1 makes the gap observable.
+
+**Threshold**: 20% by default, configurable via env `HUNGERLOOP_COST_DELTA_THRESHOLD`. Read once at client construction, stored on the instance.
+
+**Trigger**: after a successful API call, if `estimated_tokens > 0` AND `abs(actual - estimated) / estimated > threshold`, `OpenAIModelClient` appends a `cost_reconciliation` event:
+
+```python
+{
+    "task_id": "...", "loop_id": ..., "agent_id": "...", "model": "gpt-4o-mini",
+    "estimated_tokens": 1200, "actual_tokens": 1850,
+    "estimated_cost_usd": 0.0024, "actual_cost_usd": 0.0037,
+    "delta_ratio": 0.54
+}
+```
+
+Use `EventType.COST_RECONCILIATION` (§22.8).
+
+**Non-retroactive rule**: `cost_reconciliation` events do NOT rewrite `BudgetGuard` or `CostGuard` state. Pre-call estimates were honest at the time; post-call divergence is data, not enforcement. `BudgetGuard.record_llm_usage(actual, ...)` (already called) reflects reality going forward — that's enough.
+
+**No-estimate skip**: when `PricingTable` returns `0.0` (the `unknown_model_pricing` path), reconciliation is silent. The `unknown_model_pricing` event already covers this signal; firing both would be noise.
 
 ---
 
@@ -2027,20 +2225,37 @@ CLI records event human_requirement_resolved.
 
 ### 16.3 repair-state command
 
-Add the missing command:
-
 ```bash
 hungerloop repair-state <task_id> --check
 hungerloop repair-state <task_id> --fix
 ```
 
-Purpose:
+**Purpose**: detect and (selectively) repair divergence between SQLite state and on-disk workspace state. v0.5b.0 ships `--check` for all D1-D7 below and `--fix` for D4 and D5 only; the rest land later.
 
-```text
-Detect and repair divergence between SQLite state and workspace state.
-```
+**Core principle**: filesystem is truth, SQLite is auxiliary index. `--fix` never deletes files; never overwrites `best/`; never overwrites a hash. Risky directions are refused, not auto-applied.
 
-v0.5b.0 may implement only `--check`.
+**Divergence catalog**:
+
+| ID | Condition | `--check` reports | `--fix` does |
+|---|---|---|---|
+| **D1** | Manifest hash matches file | OK | nothing |
+| **D2** | Manifest hash mismatches file | **CORRUPTION** | refuse — exit 2 ("manual intervention required") |
+| **D3** | Manifest entry exists, file missing | **CORRUPTION** | refuse — exit 2 |
+| **D4** | File present in `best/`, no manifest entry | warn | rebuild manifest from filesystem hashes |
+| **D5** | Orphan candidate workspace (no LoopTrace, no candidate row) | warn | move to `rejected/loop_NNN/` |
+| **D6** | Stale task lock (`now - locked_at > stale_threshold`) | warn | refuse — direct user to `hungerloop run --steal-lock` (§5.1.1) |
+| **D7** | `accepted_checks` row references missing `validation_id` | warn | refuse (deferred to v0.5b.1) |
+
+**Exit codes**:
+
+| Command | 0 | 1 | 2 | 3 |
+|---|---|---|---|---|
+| `--check` | clean (D1 only) | warnings only (D4/D5/D6/D7) | corruption (D2/D3) | — |
+| `--fix` | repairs applied or nothing to fix | (unused) | corruption present | nothing repairable found |
+
+**Audit trail**: every `--fix` action — including refusals — appends a `repair_state_action` event (`EventType.REPAIR_STATE_ACTION`, §22.8) with `divergence_kind`, `target`, and `outcome`.
+
+**Relationship with the migrator (§5.5)**: `repair-state --check` runs before the migrator's `ensure_current()` because corruption detection should not require an up-to-date schema. `--fix` requires the schema to be at LATEST_VERSION (refuses with exit 4 otherwise — same code as the read-only migration refusal).
 
 ---
 
@@ -2118,6 +2333,70 @@ class StopReport(BaseModel):
     resume_hint: str | None = None
 ```
 
+### 18.3 `hungerloop report` output schema
+
+`hungerloop status` is the human-only view (terminal pretty-printing, drift-friendly). `hungerloop report` is the **machine-first contract**: stable JSON schema with `--format markdown` available for chat / PR-comment use. The two share underlying data but format independently — sharing byte-for-byte would lock both formats together forever.
+
+**Default output**: JSON v1 to stdout, exit 0 on success.
+
+```json
+{
+  "schema_version": "1",
+  "task_id": "demo-1",
+  "goal": "Create a small report and validate it.",
+  "stop": {
+    "reason": "done",
+    "goal_status": "completed",
+    "recommendation": ""
+  },
+  "ledger": {
+    "items_total": 3,
+    "items_satisfied": 2,
+    "items_blocked": 1,
+    "items_open": 0
+  },
+  "usage": {
+    "tokens": 1842,
+    "cost_usd": 0.0231,
+    "llm_calls": 4,
+    "tool_calls": 7
+  },
+  "loops": {
+    "total": 5,
+    "committed": 2,
+    "rejected": 3
+  },
+  "best_state_id": "STATE-demo-1-2",
+  "accepted_check_keys": ["H-001:0", "H-001:1"],
+  "last_loop": {
+    "loop_id": 5,
+    "phase": "EXPLOIT",
+    "delta_summary": "committed (newly_passed: H-001:1)"
+  }
+}
+```
+
+**Schema rules**:
+
+- `schema_version: "1"` is mandatory at the root.
+- All keys are always present; absence is encoded as `null` (e.g., `last_loop: null` for fresh tasks) or `[]` for empty lists.
+- Future field additions are backward-compatible (additive only). Removals or type changes require `schema_version: "2"` and a migration note.
+
+**`--format markdown`**: distinct template aimed at PR comments / chat. Sections: headline, Goal, Stop, Ledger, Usage, Loops, Last loop delta_summary. **Not** required to match `hungerloop status` byte-for-byte — they evolve independently.
+
+**Exit codes**:
+
+| Code | Condition |
+|---|---|
+| 0 | Task found; report emitted (regardless of stop_reason). |
+| 1 | Task not found; stderr `Task not found: <task_id>`; stdout empty. |
+
+**Running tasks**: when no `StopReport` exists yet (the task is still executing), `stop.reason = null` and `stop.goal_status = "in_progress"`. Caller code must tolerate this.
+
+**No YAML output**. JSON is the wire format; YAML is the input language for configs. Don't add `--format yaml`.
+
+**Performance budget**: `hungerloop report` and `hungerloop status` shall return in < 200 ms for tasks with ≤ 100 loops (warm cache). Test in v0.5c.1 (§22.8 perf test).
+
 ---
 
 ## 19. MemoryCandidate and SkillCard
@@ -2141,6 +2420,42 @@ non_volatile:
 traceable:
   all candidate.evidence_ids are subset of best.evidence_ids
 ```
+
+**Forward-compat fields (added in v0.5c.0)**. v0.5c only writes `state="proposed"`; everything else stays null/default. Adding these now means v0.6 promotion does not require a breaking schema migration.
+
+```python
+class MemoryCandidate(BaseModel):
+    candidate_id: str
+    task_id: str
+    loop_id: int
+    summary: str
+    evidence_ids: list[str]
+    predicates: dict[str, bool]   # action_verified, reusable, non_volatile, traceable
+
+    # Forward-compat lifecycle fields (v0.5c.0+)
+    state: Literal["proposed", "approved", "rejected", "expired", "superseded"] = "proposed"
+    decision_loop_id: int | None = None
+    decided_by: Literal["human", "auto", None] = None
+    decision_rationale: str = ""
+    replaces_candidate_id: str | None = None
+    expires_at: datetime | None = None  # ISO8601 UTC; v0.5c sets created_at + 90 days
+```
+
+**v0.5c rules**:
+
+- All emitted candidates have `state="proposed"`.
+- `decision_loop_id`, `decided_by`, `decision_rationale`, `replaces_candidate_id` remain null/default.
+- `expires_at = created_at + timedelta(days=90)` is set on emit, but the auto-expiry job is **v0.6 work** — v0.5c writes the field but never reads it for state transitions.
+
+**v0.6 will add**:
+
+- `hungerloop memory approve <candidate_id>` / `reject` / `supersede <new_id>` CLI.
+- Auto-promotion job that flips `state="approved"` when predicates remain true after `min_committed_refs` loops.
+- Auto-expiry job that flips `state="expired"` when `now > expires_at`.
+
+**`replaces_candidate_id`** is a one-way forward pointer (the new candidate references the predecessor it supersedes). The genealogy is queried by walking forward; there is no backward pointer to maintain.
+
+**SQLite migration**: lands in `migrations/v2__memory_candidate_lifecycle.sql` (the first real exercise of the §5.5 framework). Bumps `LATEST_VERSION` from 1 to 2.
 
 ### 19.2 SkillCard trigger
 
@@ -2452,6 +2767,83 @@ Add a unit test asserting that a fake `Bearer sk-test-keymaterial` in an HTTP er
 | Idempotency guards (§22.4) | ✓ required | — | — | — |
 | Cost-cap warnings (§22.5) | — | ✓ required | — | rolling-hour cap |
 | Secret redaction (§22.6) | — | ✓ required | — | — |
+| `EventType` enum (§22.8) | ✓ required | — | — | — |
+| `hungerloop trace export` (§22.8) | — | — | — | ✓ required |
+
+### 22.8 Event vocabulary and trace export
+
+**Goal**: stable, typed event vocabulary so future metrics / dashboards have a contract that doesn't drift. v0.5b ships the enum + JSONL export; embedded metrics (Prometheus, OpenTelemetry) are v0.6+ work that layers on top of this.
+
+**`EventType` enum** (`models/events.py`). Initial set, v0.5b.0:
+
+```python
+class EventType(str, Enum):
+    # Loop lifecycle
+    LOOP_STARTED = "loop_started"
+    LOOP_COMMITTED = "loop_committed"
+    LOOP_REJECTED = "loop_rejected"
+
+    # Hunger
+    HUNGER_RESUMED = "hunger_resumed"
+    HUNGER_FROZEN = "hunger_frozen"
+    HUNGER_REFILLED = "hunger_refilled"
+
+    # Stops
+    SAFETY_STOP = "safety_stop"
+    HUMAN_REQUIRED = "human_required"
+
+    # Cost / pricing
+    COST_RECONCILIATION = "cost_reconciliation"        # §8.7.1
+    UNKNOWN_MODEL_PRICING = "unknown_model_pricing"
+
+    # Locks / repair
+    LOCK_STOLEN = "lock_stolen"                        # §5.1.1
+    REPAIR_STATE_ACTION = "repair_state_action"        # §16.3
+
+    # Memory / skill
+    MEMORY_CANDIDATE_EMITTED = "memory_candidate_emitted"
+    SKILL_CARD_EMITTED = "skill_card_emitted"
+```
+
+**Protocol contract** (per §4.1):
+
+```python
+def append_event(
+    self,
+    event_type: EventType,            # NOT str — typed at the boundary
+    payload: dict[str, object],
+    *,
+    task_id: str | None = None,
+    loop_id: int | None = None,
+) -> None: ...
+```
+
+`InMemoryRepository` and `SQLiteRepository` store `event_type.value` (the string). This keeps the SQL column TEXT and avoids custom JSON encoders.
+
+**Stability rules**:
+
+- Adding new `EventType` members is **additive** and does not bump the schema.
+- Renaming or removing a member requires (a) a major version bump on the event vocabulary, (b) a SQLite migration if persisted rows reference the old name, (c) coordinated test rewrites.
+- Production code MUST NOT call `append_event` with a literal string. mypy --strict catches this at the boundary.
+
+**`hungerloop trace export <task_id> [--format jsonl]`** (v0.5c.1):
+
+```bash
+hungerloop trace export demo-1
+# emits one JSON object per line, chronological:
+{"task_id":"demo-1","loop_id":1,"event_type":"loop_started","payload":{},"created_at":"2026-05-04T13:22:09Z"}
+{"task_id":"demo-1","loop_id":1,"event_type":"loop_committed","payload":{"newly_passed":["H-001:0"]},"created_at":"2026-05-04T13:22:11Z"}
+...
+```
+
+JSONL is the operator-grade contract: line-buffered, `grep`-able, `jq`-pipeable. Future formats (`--format prometheus`, `--format otlp`) layer on this command without changing its shape. v0.5b does not run an embedded metrics server — aggregation is the operator's job.
+
+**Exit codes**:
+
+| Code | Condition |
+|---|---|
+| 0 | Task found (zero events is still success). |
+| 1 | Task not found. |
 
 ---
 
