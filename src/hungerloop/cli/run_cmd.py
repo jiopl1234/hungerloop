@@ -8,6 +8,7 @@ import click
 from hungerloop.cli.context import CliContext
 from hungerloop.cli.orchestrator_factory import build_orchestrator
 from hungerloop.cli.preflight import PreflightError, check_resume_preflight
+from hungerloop.models.events import EventType
 from hungerloop.services.skill_manager import SkillManager
 
 
@@ -143,7 +144,7 @@ def _apply_user_overrides(
         clock.loop_count = max(0, clock.loop_count - refill_loops)
         ctx.repo.save_hunger_clock(clock)
         ctx.repo.append_event(
-            "hunger_refilled",
+            EventType.HUNGER_REFILLED,
             {
                 "amount_loops": refill_loops,
                 "before": before,
@@ -163,7 +164,7 @@ def _apply_user_overrides(
                 item.last_progress_loop_id = None
                 ctx.repo.save_hunger_item(item)
                 ctx.repo.append_event(
-                    "human_unblocked_hunger_item",
+                    EventType.HUMAN_UNBLOCKED_HUNGER_ITEM,
                     {"item_id": item.id, "via": "--unblock-all"},
                     task_id=task_id,
                 )
@@ -175,7 +176,9 @@ def _apply_user_overrides(
             clock.frozen = False
             ctx.repo.save_hunger_clock(clock)
             ctx.repo.append_event(
-                "hunger_resumed", {"via": "run --resume"}, task_id=task_id
+                EventType.HUNGER_RESUMED,
+                {"via": "run --resume"},
+                task_id=task_id,
             )
 
     if raise_cost_ceiling is not None:
@@ -186,7 +189,7 @@ def _apply_user_overrides(
         if hasattr(ctx.repo, "set_hunger_policy"):
             ctx.repo.set_hunger_policy(task_id, policy)
         ctx.repo.append_event(
-            "cost_ceiling_raised",
+            EventType.COST_CEILING_RAISED,
             {"new_ceiling_usd": raise_cost_ceiling},
             task_id=task_id,
         )

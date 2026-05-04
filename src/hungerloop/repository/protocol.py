@@ -15,6 +15,7 @@ from typing import Any, Protocol
 
 from hungerloop.models.blackboard import Artifact, BestState, CandidateState
 from hungerloop.models.enums import EvidenceType, LoopPhase, StopReason
+from hungerloop.models.events import EventType
 from hungerloop.models.hunger import (
     HungerClockState,
     HungerItem,
@@ -201,14 +202,19 @@ class RepositoryProtocol(Protocol):
 
     def append_event(
         self,
-        event_type: str,
+        event_type: EventType,
         payload: dict[str, object],
         *,
         task_id: str | None = None,
         loop_id: int | None = None,
     ) -> None: ...
     """v0.5a (§28.14 / M15): ``task_id`` and ``loop_id`` are kwargs; pass
-    ``None`` for global events."""
+    ``None`` for global events.
+
+    v0.5b (PRD §22.8): ``event_type`` is an :class:`EventType` enum
+    member. Implementations store ``event_type.value`` so the SQL column
+    stays plain TEXT. Adding new enum members is additive; renaming or
+    removing requires a coordinated schema migration."""
 
     # =====================================================================
     # Section 7 — Memory / Skill

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from hungerloop.models.blackboard import Artifact
 from hungerloop.models.enums import EvidenceType, LoopPhase, StopReason
+from hungerloop.models.events import EventType
 from hungerloop.models.hunger import HungerLedger
 from hungerloop.models.memory import MemoryCandidate
 from hungerloop.models.planning import LoopPlan
@@ -158,10 +159,15 @@ def test_get_usage_snapshot_default() -> None:
 
 def test_append_event_with_task_and_loop() -> None:
     repo = InMemoryRepository()
-    repo.append_event("test_event", {"key": "val"}, task_id="t1", loop_id=1)
+    repo.append_event(
+        EventType.LOOP_STARTED, {"key": "val"}, task_id="t1", loop_id=1
+    )
     assert len(repo._events) == 1
     assert repo._events[0]["task_id"] == "t1"
     assert repo._events[0]["loop_id"] == 1
+    # Stored representation is the string value so SQL columns and JSON
+    # serialization stay clean (PRD §22.8).
+    assert repo._events[0]["event_type"] == "loop_started"
 
 
 def test_memory_candidate_round_trip() -> None:

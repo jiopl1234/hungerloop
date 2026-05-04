@@ -14,6 +14,7 @@ from typing import Any
 
 from hungerloop.models.blackboard import Artifact, BestState, CandidateState
 from hungerloop.models.enums import EvidenceType, LoopPhase, StopReason
+from hungerloop.models.events import EventType
 from hungerloop.models.hunger import (
     HungerClockState,
     HungerItem,
@@ -367,15 +368,18 @@ class InMemoryRepository:
 
     def append_event(
         self,
-        event_type: str,
+        event_type: EventType,
         payload: dict[str, object],
         *,
         task_id: str | None = None,
         loop_id: int | None = None,
     ) -> None:
+        # Store the string ``.value`` so existing tests asserting on
+        # ``event_type == "hunger_resumed"`` keep working and SQLiteRepo's
+        # eventual TEXT column stays plain.
         self._events.append(
             {
-                "event_type": event_type,
+                "event_type": event_type.value,
                 "payload": payload,
                 "task_id": task_id,
                 "loop_id": loop_id,

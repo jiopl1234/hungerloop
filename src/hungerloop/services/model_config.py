@@ -22,6 +22,7 @@ from typing import Any
 import yaml
 from pydantic import BaseModel, Field
 
+from hungerloop.models.events import EventType
 from hungerloop.repository.protocol import RepositoryProtocol
 from hungerloop.services.model_client import ModelAuthError
 
@@ -113,7 +114,7 @@ class PricingTable:
         """Return cost in USD for the given token split."""
         if model not in self.PRICES:
             self.repo.append_event(
-                "unknown_model_pricing",
+                EventType.UNKNOWN_MODEL_PRICING,
                 {
                     "model": model,
                     "input_tokens": input_tokens,

@@ -19,6 +19,7 @@ import click
 
 from hungerloop.cli.context import CliContext
 from hungerloop.models.enums import HungerItemStatus
+from hungerloop.models.events import EventType
 
 
 @click.group("hunger")
@@ -45,7 +46,7 @@ def hunger_refill(ctx: CliContext, task_id: str, loops: int) -> None:
     clock.loop_count = max(0, clock.loop_count - loops)
     ctx.repo.save_hunger_clock(clock)
     ctx.repo.append_event(
-        "hunger_refilled",
+        EventType.HUNGER_REFILLED,
         {"amount_loops": loops, "before": before, "after": clock.loop_count},
         task_id=task_id,
     )
@@ -74,7 +75,7 @@ def hunger_unblock(ctx: CliContext, task_id: str, item_id: str) -> None:
     item.last_progress_loop_id = None
     ctx.repo.save_hunger_item(item)
     ctx.repo.append_event(
-        "human_unblocked_hunger_item",
+        EventType.HUMAN_UNBLOCKED_HUNGER_ITEM,
         {"item_id": item_id, "via": "hunger unblock"},
         task_id=task_id,
     )
@@ -95,7 +96,7 @@ def hunger_unblock_all(ctx: CliContext, task_id: str) -> None:
             item.last_progress_loop_id = None
             ctx.repo.save_hunger_item(item)
             ctx.repo.append_event(
-                "human_unblocked_hunger_item",
+                EventType.HUMAN_UNBLOCKED_HUNGER_ITEM,
                 {"item_id": item.id, "via": "hunger unblock-all"},
                 task_id=task_id,
             )
@@ -112,7 +113,7 @@ def hunger_freeze(ctx: CliContext, task_id: str) -> None:
     clock = ctx.repo.get_hunger_clock(task_id)
     clock.frozen = True
     ctx.repo.save_hunger_clock(clock)
-    ctx.repo.append_event("hunger_frozen", {}, task_id=task_id)
+    ctx.repo.append_event(EventType.HUNGER_FROZEN, {}, task_id=task_id)
     click.echo(f"froze hunger clock on {task_id}")
 
 
@@ -124,5 +125,5 @@ def hunger_resume(ctx: CliContext, task_id: str) -> None:
     clock = ctx.repo.get_hunger_clock(task_id)
     clock.frozen = False
     ctx.repo.save_hunger_clock(clock)
-    ctx.repo.append_event("hunger_resumed", {}, task_id=task_id)
+    ctx.repo.append_event(EventType.HUNGER_RESUMED, {}, task_id=task_id)
     click.echo(f"resumed hunger clock on {task_id}")
