@@ -28,6 +28,7 @@ from typing import Any
 
 import httpx
 
+from hungerloop.models.events import EventType
 from hungerloop.models.usage import ModelUsage
 from hungerloop.repository.protocol import RepositoryProtocol
 from hungerloop.services.cost_guard import CostGuard
@@ -38,6 +39,18 @@ from hungerloop.services.model_client import (
     ModelResponse,
 )
 from hungerloop.services.model_config import ModelConfig, PricingTable
+
+# Default ratio for the "actual usage diverged from estimate" alarm
+# (PRD §8.7.1). Operators can tighten via env var per deployment; the
+# 0.20 default is loose enough that gpt-4o-mini noise won't spam events
+# but tight enough that a 50% under-count of long prompts shows up.
+_COST_DELTA_THRESHOLD_DEFAULT = 0.20
+
+# Crude character → token heuristic used for the pre-call estimate. Real
+# tokenisation needs tiktoken (heavy dep); 4 chars/token is the well-known
+# rule-of-thumb for English-heavy chat. The reconciliation event exists
+# precisely so ops can see when this heuristic is wrong.
+_CHARS_PER_TOKEN = 4
 
 
 class OpenAIModelClient:
@@ -70,6 +83,19 @@ class OpenAIModelClient:
         self._client_factory = client_factory or (
             lambda: httpx.AsyncClient(timeout=self.config.timeout_seconds)
         )
+        # Resolved once per client instance (PRD §8.7.1) so a single call
+        # never sees a half-changed env. Bad parses fall back to the
+        # default rather than crashing — the operator's env is observable
+        # via the emitted event payload anyway.
+        try:
+            self._cost_delta_threshold = float(
+                os.environ.get(
+                    "HUNGERLOOP_COST_DELTA_THRESHOLD",
+                    str(_COST_DELTA_THRESHOLD_DEFAULT),
+                )
+            )
+        except ValueError:
+            self._cost_delta_threshold = _COST_DELTA_THRESHOLD_DEFAULT
 
     async def complete_json(
         self,
@@ -218,7 +244,19 @@ class OpenAIModelClient:
             output_tokens=output_tokens,
             cost_usd=cost_usd,
         )
+        # BudgetGuard.record_llm_usage already accepts the actual numbers.
+        # Reconciliation does NOT rewrite history — the pre-call check
+        # was honest at the time; post-call divergence is data, not a bug.
         self.cost_guard.record_llm_usage(task_id, usage)
+        self._maybe_emit_reconciliation(
+            task_id=task_id,
+            loop_id=loop_id,
+            messages=messages,
+            max_tokens=max_tokens,
+            actual_input_tokens=input_tokens,
+            actual_output_tokens=output_tokens,
+            actual_cost_usd=cost_usd,
+        )
 
         evidence_id = self.repo.save_model_call_as_evidence(
             task_id=task_id,
@@ -261,6 +299,76 @@ class OpenAIModelClient:
             usage=usage,
             evidence_id=evidence_id,
         )
+
+    def _maybe_emit_reconciliation(
+        self,
+        *,
+        task_id: str,
+        loop_id: int,
+        messages: list[dict[str, str]],
+        max_tokens: int,
+        actual_input_tokens: int,
+        actual_output_tokens: int,
+        actual_cost_usd: float,
+    ) -> None:
+        """Emit a ``cost_reconciliation`` event when usage drifts past
+        the configured threshold (PRD §8.7.1).
+
+        Skipped when the model is unknown to PricingTable: that case is
+        already covered by the ``unknown_model_pricing`` event and a
+        second warning would just be noise.
+        """
+        if self.config.model_name not in PricingTable.PRICES:
+            return
+
+        estimated_input_tokens = self._estimate_prompt_tokens(messages)
+        # The output cap is the only honest pre-call upper bound we have
+        # without a real tokenizer. Real outputs are usually well below
+        # this; ops who care can run a tiktoken-aware variant downstream.
+        estimated_output_tokens = max_tokens
+        estimated_total = estimated_input_tokens + estimated_output_tokens
+        actual_total = actual_input_tokens + actual_output_tokens
+        if estimated_total <= 0:
+            return
+        delta_ratio = abs(actual_total - estimated_total) / estimated_total
+        if delta_ratio <= self._cost_delta_threshold:
+            return
+
+        estimated_cost_usd = self.pricing.estimate(
+            self.config.model_name,
+            input_tokens=estimated_input_tokens,
+            output_tokens=estimated_output_tokens,
+        )
+        self.repo.append_event(
+            EventType.COST_RECONCILIATION,
+            {
+                "task_id": task_id,
+                "loop_id": loop_id,
+                "model": self.config.model_name,
+                "estimated_tokens": estimated_total,
+                "actual_tokens": actual_total,
+                "estimated_cost_usd": round(estimated_cost_usd, 6),
+                "actual_cost_usd": round(actual_cost_usd, 6),
+                "delta_ratio": round(delta_ratio, 3),
+            },
+            task_id=task_id,
+            loop_id=loop_id,
+        )
+
+    @staticmethod
+    def _estimate_prompt_tokens(messages: list[dict[str, str]]) -> int:
+        """Crude pre-call token estimate (4 chars/token rule of thumb).
+
+        Real tokenisation requires tiktoken; we deliberately keep the
+        runtime dependency-free. The reconciliation event surfaces cases
+        where this heuristic is far off, which is the whole point.
+        """
+        total_chars = 0
+        for message in messages:
+            content = message.get("content", "")
+            if isinstance(content, str):
+                total_chars += len(content)
+        return max(1, total_chars // _CHARS_PER_TOKEN)
 
     @staticmethod
     def _delay_for_rate_limit(
