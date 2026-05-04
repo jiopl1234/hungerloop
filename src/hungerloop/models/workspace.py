@@ -30,3 +30,10 @@ class WorkspaceManifest(BaseModel):
     total_bytes: int = 0
     artifact_ids: list[str] = Field(default_factory=list)
     evidence_ids: list[str] = Field(default_factory=list)
+
+    # Per-file sha256 hex digests keyed by POSIX path relative to the
+    # ``files/`` directory. Populated by :class:`WorkspaceManager` on
+    # write; consumed by ``hungerloop repair-state`` to detect filesystem
+    # drift (PRD §16.3 D1/D2/D3). Defaults to ``{}`` so manifests written
+    # by older code still load.
+    files: dict[str, str] = Field(default_factory=dict)

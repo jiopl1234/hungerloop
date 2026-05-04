@@ -18,6 +18,7 @@ Layout under ``root``::
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import shutil
@@ -26,6 +27,25 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from hungerloop.models.workspace import WorkspaceStatus
+
+_HASH_BUFFER_BYTES = 64 * 1024
+
+
+def _sha256_of_file(path: Path) -> str:
+    """Return the lowercase hex sha256 digest of ``path``.
+
+    Streamed in 64 KiB blocks so we don't load multi-MB workspace files
+    into memory; ``repair-state --check`` calls this once per file in
+    ``best/files/``.
+    """
+    digest = hashlib.sha256()
+    with path.open("rb") as fh:
+        while True:
+            chunk = fh.read(_HASH_BUFFER_BYTES)
+            if not chunk:
+                break
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 class WorkspaceManager:
@@ -186,6 +206,12 @@ class WorkspaceManager:
         source_workspace_ref: str | None,
     ) -> None:
         files = [p for p in path.rglob("*") if p.is_file()]
+        # Hash every file under ``path`` so ``repair-state`` can detect
+        # filesystem drift (PRD §16.3 D1/D2/D3). Keys are POSIX-style
+        # relative paths so manifests round-trip across platforms.
+        file_hashes: dict[str, str] = {
+            p.relative_to(path).as_posix(): _sha256_of_file(p) for p in files
+        }
         manifest = {
             "task_id": task_id,
             "loop_id": loop_id,
@@ -195,6 +221,7 @@ class WorkspaceManager:
             "created_at": datetime.now(timezone.utc).isoformat(),
             "file_count": len(files),
             "total_bytes": sum(p.stat().st_size for p in files),
+            "files": file_hashes,
         }
         (path.parent / "manifest.json").write_text(
             json.dumps(manifest, indent=2, ensure_ascii=False),
