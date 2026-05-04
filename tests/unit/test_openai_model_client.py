@@ -332,6 +332,49 @@ def test_delay_for_rate_limit_falls_back_on_garbage() -> None:
     assert 0.0 <= delay <= 0.5
 
 
+# ---- RFC1123 HTTP-date Retry-After parsing (audit-surfaced gap) ----
+
+
+def test_delay_for_rate_limit_rfc1123_future_returns_positive_delay() -> None:
+    """Real OpenAI 429 sometimes returns Retry-After as an HTTP-date.
+    The fallback parser must decode it and yield a delay close to the
+    actual wait time, capped at `cap`."""
+    from datetime import datetime, timedelta, timezone
+    from email.utils import format_datetime
+
+    future = datetime.now(timezone.utc) + timedelta(seconds=5)
+    http_date = format_datetime(future)
+    delay = OpenAIModelClient._delay_for_rate_limit(
+        retry_after=http_date, attempt=0, base=10.0, cap=30.0
+    )
+    assert 1.0 < delay <= 30.0
+
+
+def test_delay_for_rate_limit_rfc1123_past_returns_zero() -> None:
+    """If the server gave us a Retry-After in the past (clock skew or
+    server-side bug), we should not sleep — clamp to 0.0."""
+    from datetime import datetime, timedelta, timezone
+    from email.utils import format_datetime
+
+    past = datetime.now(timezone.utc) - timedelta(hours=1)
+    delay = OpenAIModelClient._delay_for_rate_limit(
+        retry_after=format_datetime(past), attempt=0, base=10.0, cap=30.0
+    )
+    assert delay == 0.0
+
+
+def test_delay_for_rate_limit_rfc1123_far_future_capped() -> None:
+    """A pathological Retry-After date far in the future is capped."""
+    from datetime import datetime, timedelta, timezone
+    from email.utils import format_datetime
+
+    far = datetime.now(timezone.utc) + timedelta(days=1)
+    delay = OpenAIModelClient._delay_for_rate_limit(
+        retry_after=format_datetime(far), attempt=0, base=10.0, cap=30.0
+    )
+    assert delay == 30.0
+
+
 def test_constructor_requires_api_key_env(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

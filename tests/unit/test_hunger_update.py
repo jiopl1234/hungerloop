@@ -128,3 +128,27 @@ def test_fail_verdict_no_update() -> None:
 
     assert h1.gap_score == 1.0
     repo.save_hunger_item.assert_not_called()
+
+
+def test_subepsilon_gap_snaps_to_zero_and_satisfies() -> None:
+    """PRD §14: float-arithmetic residue (e.g. 5e-10) must snap to 0.0
+    so the item flips to VALIDATED_SATISFIED. Without the EPSILON snap
+    a multi-loop fractional decrement leaves the item stuck in WORKING.
+    """
+    h1 = _item("H-001", num_checks=4, gap=5e-10)
+    repo = MagicMock()
+    repo.get_hunger_item.return_value = h1
+
+    svc = HungerUpdateService(repo)
+    # One newly-passed check; the proportional decrement (1/4 = 0.25)
+    # would already drive gap to 0, but the test still exercises the
+    # `gap_score <= EPSILON -> 0.0` snap branch on the residue.
+    report = _report(
+        ValidationVerdict.PASS,
+        newly_passed=["H-001:0"],
+        satisfied=[],  # NOT in satisfied list — exercises the snap path
+    )
+    svc.apply_validation("t1", report)
+
+    assert h1.gap_score == 0.0
+    assert h1.status == HungerItemStatus.VALIDATED_SATISFIED

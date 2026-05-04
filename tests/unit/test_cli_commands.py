@@ -320,3 +320,58 @@ def test_run_raise_cost_ceiling_updates_policy(context: CliContext) -> None:
     # must apply the ceiling raise *before* preflight.
     assert result.exit_code == 0, result.output
     assert context.repo.get_hunger_policy("t1").max_total_cost_usd == 100.0
+
+
+def test_run_resume_unfreezes_clock_and_emits_event(
+    context: CliContext,
+) -> None:
+    """`run --resume` on a HUMAN_PAUSED task must flip clock.frozen
+    back to False and append a hunger_resumed event so the orchestrator
+    sees an unblocked clock on the next tick."""
+    context.repo.save_hunger_ledger("t1", HungerLedger(task_id="t1", items=[]))
+    context.repo.save_stop_report(
+        StopReport(
+            task_id="t1",
+            stop_reason=StopReason.HUMAN_PAUSED,
+            goal_status="paused",
+        )
+    )
+    clock = context.repo.get_hunger_clock("t1")
+    clock.frozen = True
+    context.repo.save_hunger_clock(clock)
+
+    runner = CliRunner()
+    result = runner.invoke(
+        cli, ["run", "t1", "--resume", "--max-loops", "1"], obj=context
+    )
+    assert result.exit_code == 0, result.output
+    assert context.repo.get_hunger_clock("t1").frozen is False
+    events = [
+        e for e in context.repo._events if e["event_type"] == "hunger_resumed"
+    ]
+    assert len(events) == 1
+    assert events[0]["payload"] == {"via": "run --resume"}
+
+
+def test_run_resume_on_unfrozen_clock_is_idempotent(
+    context: CliContext,
+) -> None:
+    """`--resume` on an already-unfrozen clock must not emit a
+    redundant hunger_resumed event (the flag is no-op when there's
+    nothing to resume)."""
+    context.repo.save_hunger_ledger("t1", HungerLedger(task_id="t1", items=[]))
+    context.repo.save_stop_report(
+        StopReport(
+            task_id="t1",
+            stop_reason=StopReason.HUMAN_PAUSED,
+            goal_status="paused",
+        )
+    )
+    # Clock starts unfrozen by default.
+
+    runner = CliRunner()
+    runner.invoke(cli, ["run", "t1", "--resume", "--max-loops", "1"], obj=context)
+    events = [
+        e for e in context.repo._events if e["event_type"] == "hunger_resumed"
+    ]
+    assert events == []
