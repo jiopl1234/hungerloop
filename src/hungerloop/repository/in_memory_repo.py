@@ -386,13 +386,21 @@ class InMemoryRepository:
     ) -> None:
         # Store the string ``.value`` so existing tests asserting on
         # ``event_type == "hunger_resumed"`` keep working and SQLiteRepo's
-        # eventual TEXT column stays plain.
+        # eventual TEXT column stays plain. ``created_at`` mirrors the v1
+        # ``events.created_at`` column shape (ISO8601 UTC with the 'Z'
+        # suffix) so ``hungerloop trace export`` can stream rows directly.
         self._events.append(
             {
                 "event_type": event_type.value,
                 "payload": payload,
                 "task_id": task_id,
                 "loop_id": loop_id,
+                "created_at": (
+                    datetime.now(timezone.utc)
+                    .replace(microsecond=0)
+                    .isoformat()
+                    .replace("+00:00", "Z")
+                ),
             }
         )
 

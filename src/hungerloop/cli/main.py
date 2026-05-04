@@ -31,6 +31,7 @@ from hungerloop.cli.report_cmd import report
 from hungerloop.cli.run_cmd import run
 from hungerloop.cli.skill_cmd import skill
 from hungerloop.cli.status_cmd import status
+from hungerloop.cli.trace_cmd import trace
 from hungerloop.cli.workspace_cmd import workspace
 
 try:
@@ -73,5 +74,6 @@ cli.add_command(repair_state)
 cli.add_command(hunger)
 cli.add_command(memory)
 cli.add_command(skill)
+cli.add_command(trace)
 cli.add_command(workspace)
 cli.add_command(checks)
