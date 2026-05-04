@@ -173,3 +173,44 @@ def test_propose_handles_missing_best_state() -> None:
     cand = candidates[0]
     assert cand.action_verified is False
     assert cand.traceable is False
+
+
+# ---- v0.5c.0 lifecycle fields (PRD §19.1) ---------------------------------
+
+
+def test_emitted_candidate_has_state_proposed() -> None:
+    """v0.5c only ever writes ``state="proposed"``; promotion lands later."""
+    repo = InMemoryRepository()
+    mgr = MemoryManager(repo)
+    candidates = mgr.propose_from_loop(
+        "t1", 1, _validation(newly_passed=["H-001:0"])
+    )
+    assert candidates[0].state == "proposed"
+
+
+def test_emitted_candidate_has_expires_at_90_days_out() -> None:
+    """``expires_at`` lands now (pure data) so v0.6's expiry sweep can be
+    a pure read-and-flip without a schema migration."""
+    from datetime import datetime, timedelta, timezone
+
+    repo = InMemoryRepository()
+    mgr = MemoryManager(repo)
+    pinned = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
+    candidates = mgr.propose_from_loop(
+        "t1", 1, _validation(newly_passed=["H-001:0"]), now=pinned
+    )
+    assert candidates[0].expires_at == pinned + timedelta(days=90)
+
+
+def test_decision_fields_default_null() -> None:
+    """``decision_*`` columns are reserved for v0.6 promotion; v0.5c
+    leaves them at their default ``None`` / ``""``."""
+    repo = InMemoryRepository()
+    mgr = MemoryManager(repo)
+    [cand] = mgr.propose_from_loop(
+        "t1", 1, _validation(newly_passed=["H-001:0"])
+    )
+    assert cand.decision_loop_id is None
+    assert cand.decided_by is None
+    assert cand.decision_rationale == ""
+    assert cand.replaces_candidate_id is None

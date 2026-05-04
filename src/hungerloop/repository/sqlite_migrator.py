@@ -32,9 +32,10 @@ from hungerloop.repository.migration_errors import (
     SchemaTooNewError,
 )
 
-# Bump per migration. v0.5b.0 ships at 1; v0.5c.0 will bump to 2 when
-# `migrations/v2__memory_candidate_lifecycle.sql` lands (PRD §19.1).
-LATEST_VERSION: int = 1
+# Bump per migration. v0.5b.0 shipped at 1; v0.5c.0 ships at 2 with
+# `migrations/v2__memory_candidate_lifecycle.sql` adding the
+# MemoryCandidate lifecycle columns (PRD §19.1).
+LATEST_VERSION: int = 2
 
 # Migration files: ``v{N}__{slug}.sql`` where N is a positive int and
 # slug is ``[a-z0-9_]+``. Anything else is rejected at startup.

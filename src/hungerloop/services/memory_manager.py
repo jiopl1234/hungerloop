@@ -19,12 +19,18 @@ from __future__ import annotations
 
 import re
 import uuid
+from datetime import datetime, timedelta, timezone
 
 from hungerloop.models.memory import MemoryCandidate
 from hungerloop.models.validation import ValidationReport
 from hungerloop.repository.protocol import RepositoryProtocol
 
 _LOOP_TOKEN = re.compile(r"loop[_\s-]?\d+", re.IGNORECASE)
+
+# Default lifetime for an emitted candidate (PRD §19.1 + decision §11.4):
+# 90 days from creation. Pure data in v0.5c — no auto-job acts on this
+# until v0.6's expiry sweep lands.
+_CANDIDATE_TTL = timedelta(days=90)
 
 
 def action_verified(candidate: MemoryCandidate, best_evidence_ids: list[str]) -> bool:
@@ -74,6 +80,8 @@ class MemoryManager:
         task_id: str,
         loop_id: int,
         validation: ValidationReport,
+        *,
+        now: datetime | None = None,
     ) -> list[MemoryCandidate]:
         """Emit one candidate per newly-passed check.
 
@@ -81,9 +89,15 @@ class MemoryManager:
         Predicates are evaluated against the current ``best_state`` so the
         candidate's flags are stable at write time even if later commits
         change the picture; CLI ``memory list`` re-reads the persisted row.
+
+        ``now`` is plumbing for tests so the 90-day ``expires_at`` value is
+        deterministic; production callers leave it ``None`` to use UTC now.
         """
         if not validation.newly_passed_check_keys:
             return []
+
+        created_at = now or datetime.now(timezone.utc)
+        expires_at = created_at + _CANDIDATE_TTL
 
         best = self.repo.get_best_state(task_id)
         best_evidence_ids = list(best.evidence_ids) if best is not None else []
@@ -99,6 +113,12 @@ class MemoryManager:
                 evidence_ids=list(validation.evidence_ids),
                 referenced_check_keys=[check_key],
                 source_loop_ids=[loop_id],
+                # v0.5c.0: only "proposed" is emitted. Promotion to
+                # "approved"/"rejected"/"expired"/"superseded" lands in
+                # v0.6 — it'll be a pure repo write against the row we
+                # already persist here.
+                state="proposed",
+                expires_at=expires_at,
             )
             candidate.action_verified = action_verified(
                 candidate, best_evidence_ids

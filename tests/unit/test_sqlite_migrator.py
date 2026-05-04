@@ -262,3 +262,28 @@ def test_real_v1_initial_migration_runs_against_fresh_db(tmp_path: Path) -> None
             "SELECT name FROM sqlite_master WHERE type='table'"
         )}
     assert "tasks" in names
+
+
+def test_real_migration_chain_v0_to_latest_runs_against_fresh_db(
+    tmp_path: Path,
+) -> None:
+    """Whole shipped chain (v1 + v2 lifecycle columns) applies on a fresh DB."""
+    from hungerloop.repository import migrations as _migrations_pkg
+    from hungerloop.repository.sqlite_migrator import LATEST_VERSION
+
+    real_dir = Path(_migrations_pkg.__file__).parent
+    db = tmp_path / "blackboard.sqlite"
+    SQLiteMigrator(db, real_dir).ensure_current(write_capable=True)
+    assert _read_user_version(db) == LATEST_VERSION
+    # v2 columns and the lifecycle index must exist.
+    with sqlite3.connect(str(db)) as conn:
+        cols = {r[1] for r in conn.execute(
+            "PRAGMA table_info(memory_candidates)"
+        )}
+        indexes = {r[0] for r in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='index'"
+        )}
+    assert {"state", "decision_loop_id", "decided_by",
+            "decision_rationale", "replaces_candidate_id",
+            "expires_at"} <= cols
+    assert "idx_memory_state" in indexes
