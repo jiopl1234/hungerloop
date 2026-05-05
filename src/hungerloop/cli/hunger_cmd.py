@@ -62,7 +62,8 @@ def hunger_refill(ctx: CliContext, task_id: str, loops: int) -> None:
 @click.pass_obj
 def hunger_unblock(ctx: CliContext, task_id: str, item_id: str) -> None:
     """Flip a single BLOCKED item to OPEN (PRD §15.2)."""
-    item = ctx.repo.get_hunger_item(item_id)
+    ledger = ctx.repo.get_hunger_ledger(task_id)
+    item = next((candidate for candidate in ledger.items if candidate.id == item_id), None)
     if item is None:
         raise click.UsageError(f"hunger item not found: {item_id}")
     if item.status != HungerItemStatus.BLOCKED:

@@ -29,6 +29,7 @@ from typing import Protocol, runtime_checkable
 
 from hungerloop.models.context import ContextPack
 from hungerloop.models.enums import StopReason
+from hungerloop.models.events import EventType
 from hungerloop.models.hunger import HungerSnapshot
 from hungerloop.models.planning import BudgetAllocation, LoopPlan
 from hungerloop.models.tracing import LoopTrace, StopReport
@@ -137,6 +138,17 @@ class LoopOrchestrator:
         candidate_root = self.workspace_manager.create_candidate_workspace(
             task_id, loop_id
         )
+        self.repo.append_event(
+            EventType.LOOP_STARTED,
+            {
+                "loop_id": loop_id,
+                "phase": snapshot.phase.value,
+                "drive_budget": snapshot.drive_budget,
+                "active_hunger": snapshot.active_hunger,
+            },
+            task_id=task_id,
+            loop_id=loop_id,
+        )
         # Copy: InMemoryRepository returns the live counter object, so without
         # an immutable snapshot here the "delta this loop" math collapses to 0
         # once tools start writing evidence.
@@ -164,10 +176,25 @@ class LoopOrchestrator:
             )
         except SafetyStopError:
             self.workspace_manager.reject_candidate(task_id, loop_id)
+            self.repo.append_event(
+                EventType.SAFETY_STOP,
+                {"loop_id": loop_id},
+                task_id=task_id,
+                loop_id=loop_id,
+            )
             return self._emit_stop(task_id, StopReason.SAFETY_STOP)
 
         if any(r.requires_human for r in worker_results):
             self.workspace_manager.reject_candidate(task_id, loop_id)
+            self.repo.append_event(
+                EventType.HUMAN_REQUIRED,
+                {
+                    "loop_id": loop_id,
+                    "agent_ids": [r.agent_id for r in worker_results if r.requires_human],
+                },
+                task_id=task_id,
+                loop_id=loop_id,
+            )
             return self._emit_stop(task_id, StopReason.HUMAN_REQUIRED)
 
         candidate = self.integrator.integrate(task_id, loop_id, worker_results)
@@ -220,6 +247,29 @@ class LoopOrchestrator:
             next_action="continue",
         )
         self.repo.save_loop_trace(trace)
+        if commit_decision["committed"]:
+            self.repo.append_event(
+                EventType.LOOP_COMMITTED,
+                {
+                    "candidate_state_id": candidate.id,
+                    "validation_report_id": validation.id,
+                    "newly_passed_check_keys": list(validation.newly_passed_check_keys),
+                },
+                task_id=task_id,
+                loop_id=loop_id,
+            )
+        else:
+            self.repo.append_event(
+                EventType.LOOP_REJECTED,
+                {
+                    "candidate_state_id": candidate.id,
+                    "validation_report_id": validation.id,
+                    "reason": commit_decision["reason"],
+                    "regressed_check_keys": list(validation.regressed_check_keys),
+                },
+                task_id=task_id,
+                loop_id=loop_id,
+            )
 
         if stagnation["global_blocked"]:
             return self._emit_stop(task_id, StopReason.BLOCKED)
@@ -287,6 +337,12 @@ class LoopOrchestrator:
         """No assignments — bump the streak; only stop when the threshold trips."""
         self.workspace_manager.reject_candidate(task_id, loop_id)
         streak = self.repo.increment_no_progress_streak(task_id)
+        self.repo.append_event(
+            EventType.LOOP_REJECTED,
+            {"reason": "empty_plan", "streak": streak},
+            task_id=task_id,
+            loop_id=loop_id,
+        )
 
         trace = LoopTrace(
             task_id=task_id,
@@ -329,5 +385,4 @@ class LoopOrchestrator:
             stop_reason,
             recommendation=recommendation,
         )
-
 

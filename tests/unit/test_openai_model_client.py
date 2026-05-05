@@ -7,8 +7,9 @@ from typing import Any
 import httpx
 import pytest
 
+from hungerloop.models.hunger import HungerPolicy
 from hungerloop.repository.in_memory_repo import InMemoryRepository
-from hungerloop.services.cost_guard import CostGuard
+from hungerloop.services.cost_guard import CostGuard, SafetyStopError
 from hungerloop.services.model_client import (
     ModelAuthError,
     ModelCallError,
@@ -267,6 +268,30 @@ async def test_invalid_json_response_not_retryable(
         )
     # Invalid JSON is non-retryable; only one HTTP call.
     assert calls["n"] == 1
+
+
+@pytest.mark.asyncio
+async def test_successful_call_persists_evidence_before_post_call_safety_stop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return _ok_response({"action": "noop"})
+
+    client, repo = _make_client(monkeypatch, handler)
+    repo.set_hunger_policy("t1", HungerPolicy(max_total_cost_usd=0.000001))
+    with pytest.raises(SafetyStopError):
+        await client.complete_json(
+            task_id="t1",
+            loop_id=1,
+            agent_id="execution_worker_v1",
+            messages=[{"role": "user", "content": "hi"}],
+            max_tokens=64,
+        )
+    call_evidence = [
+        e for e in repo._evidence.values() if e.get("type") == "model_call"
+    ]
+    assert len(call_evidence) == 1
+    assert call_evidence[0]["loop_id"] == 1
 
 
 @pytest.mark.asyncio

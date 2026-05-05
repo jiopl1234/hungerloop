@@ -244,20 +244,6 @@ class OpenAIModelClient:
             output_tokens=output_tokens,
             cost_usd=cost_usd,
         )
-        # BudgetGuard.record_llm_usage already accepts the actual numbers.
-        # Reconciliation does NOT rewrite history — the pre-call check
-        # was honest at the time; post-call divergence is data, not a bug.
-        self.cost_guard.record_llm_usage(task_id, usage)
-        self._maybe_emit_reconciliation(
-            task_id=task_id,
-            loop_id=loop_id,
-            messages=messages,
-            max_tokens=max_tokens,
-            actual_input_tokens=input_tokens,
-            actual_output_tokens=output_tokens,
-            actual_cost_usd=cost_usd,
-        )
-
         evidence_id = self.repo.save_model_call_as_evidence(
             task_id=task_id,
             loop_id=loop_id,
@@ -268,6 +254,19 @@ class OpenAIModelClient:
             output_tokens=output_tokens,
             cost_usd=cost_usd,
             response_preview=str(data)[:5000],
+        )
+        # Persist successful-call evidence before the post-call budget
+        # check. If actual usage trips SAFETY_STOP, the stop report and
+        # trace still have the model_call row for forensics.
+        self.cost_guard.record_llm_usage(task_id, usage)
+        self._maybe_emit_reconciliation(
+            task_id=task_id,
+            loop_id=loop_id,
+            messages=messages,
+            max_tokens=max_tokens,
+            actual_input_tokens=input_tokens,
+            actual_output_tokens=output_tokens,
+            actual_cost_usd=cost_usd,
         )
 
         choices = data.get("choices") or []

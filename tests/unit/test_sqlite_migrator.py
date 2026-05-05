@@ -181,6 +181,21 @@ def test_failing_migration_rolls_back_and_keeps_backup(tmp_path: Path) -> None:
     assert len(backups) == 1
 
 
+def test_missing_pending_migration_does_not_silent_bump(
+    tmp_path: Path,
+) -> None:
+    db = tmp_path / "blackboard.sqlite"
+    migrations = tmp_path / "migrations"
+    _seed_db_at_version(db, 1)
+    migrations.mkdir()
+
+    with pytest.raises(MigrationFailedError, match="No migration files found"):
+        SQLiteMigrator(db, migrations, latest_version=3).ensure_current(
+            write_capable=True
+        )
+    assert _read_user_version(db) == 1
+
+
 def test_no_down_migration_files_loaded(tmp_path: Path) -> None:
     db = tmp_path / "blackboard.sqlite"
     migrations = tmp_path / "migrations"
@@ -345,15 +360,28 @@ def test_real_migration_chain_v0_to_latest_runs_against_fresh_db(
     db = tmp_path / "blackboard.sqlite"
     SQLiteMigrator(db, real_dir).ensure_current(write_capable=True)
     assert _read_user_version(db) == LATEST_VERSION
-    # v2 columns and the lifecycle index must exist.
+    # v2/v4 memory columns and runtime tables must exist.
     with sqlite3.connect(str(db)) as conn:
         cols = {r[1] for r in conn.execute(
             "PRAGMA table_info(memory_candidates)"
         )}
+        tables = {r[0] for r in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        )}
         indexes = {r[0] for r in conn.execute(
             "SELECT name FROM sqlite_master WHERE type='index'"
         )}
-    assert {"state", "decision_loop_id", "decided_by",
-            "decision_rationale", "replaces_candidate_id",
-            "expires_at"} <= cols
+    assert {
+        "state",
+        "decision_loop_id",
+        "decided_by",
+        "decision_rationale",
+        "replaces_candidate_id",
+        "expires_at",
+        "source_candidate_state_id",
+        "source_validation_id",
+        "source_best_state_id",
+    } <= cols
+    assert {"usage_snapshots", "task_locks"} <= tables
     assert "idx_memory_state" in indexes
+    assert "idx_memory_source_best" in indexes

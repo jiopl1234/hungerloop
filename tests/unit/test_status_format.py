@@ -3,8 +3,8 @@ from __future__ import annotations
 
 from hungerloop.cli.status_format import format_status
 from hungerloop.models.blackboard import BestState
-from hungerloop.models.enums import HungerItemStatus, StopReason
-from hungerloop.models.hunger import HungerItem, HungerLedger
+from hungerloop.models.enums import HungerItemStatus, LoopPhase, StopReason
+from hungerloop.models.hunger import HungerItem, HungerLedger, HungerSnapshot
 from hungerloop.models.tracing import StopReport
 from hungerloop.repository.in_memory_repo import InMemoryRepository
 
@@ -74,3 +74,24 @@ def test_status_shows_clock_frozen_state() -> None:
     repo.save_hunger_clock(clock)
     out = format_status(repo, "t1")
     assert "frozen: True" in out
+
+
+def test_status_shows_latest_hunger_snapshot() -> None:
+    repo = InMemoryRepository()
+    repo.save_hunger_ledger("t1", HungerLedger(task_id="t1", items=[]))
+    repo.save_hunger_snapshot(
+        "t1",
+        HungerSnapshot(
+            drive_budget=42.5,
+            work_pressure=3.0,
+            active_hunger=3.0,
+            drive_ratio=0.4,
+            phase=LoopPhase.EXPLOIT,
+            should_stop=False,
+        ),
+    )
+    out = format_status(repo, "t1")
+    assert "current_drive_budget: 42.50" in out
+    assert "phase: exploit" in out
+    assert "active_hunger: 3.00" in out
+    assert "work_pressure: 3.00" in out

@@ -55,11 +55,15 @@ def harness_setup(tmp_path: Path) -> tuple[ToolHarness, InMemoryRepository, Budg
 async def test_unknown_tool_returns_error_result(
     harness_setup: tuple[ToolHarness, InMemoryRepository, BudgetGuard, Path],
 ) -> None:
-    harness, _, _, workspace = harness_setup
+    harness, repo, _, workspace = harness_setup
     result = await harness.execute(_ctx(), "missing_tool", {}, workspace)
     assert result.success is False
     assert result.error_type == "unknown_tool"
-    assert result.evidence_ids == []
+    assert len(result.evidence_ids) == 1
+    evidence = repo._evidence[result.evidence_ids[0]]
+    assert evidence["type"] == EvidenceType.TOOL_CALL.value
+    assert evidence["success"] is False
+    assert repo.get_usage_snapshot("t1").tool_calls == 1
 
 
 async def test_write_file_records_evidence_and_artifact(

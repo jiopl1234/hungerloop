@@ -26,6 +26,7 @@ from hungerloop.models.hunger import (
 from hungerloop.models.memory import MemoryCandidate
 from hungerloop.models.planning import LoopPlan
 from hungerloop.models.skill import SkillCard
+from hungerloop.models.task import TaskRecord
 from hungerloop.models.tracing import LoopTrace, StopReport
 from hungerloop.models.usage import UsageSnapshot
 from hungerloop.models.validation import ValidationReport
@@ -37,6 +38,7 @@ class InMemoryRepository:
 
     def __init__(self) -> None:
         # Hunger
+        self._tasks: dict[str, TaskRecord] = {}
         self._policies: dict[str, HungerPolicy] = {}
         self._clocks: dict[str, HungerClockState] = {}
         self._ledgers: dict[str, HungerLedger] = {}
@@ -81,6 +83,41 @@ class InMemoryRepository:
         self._events: list[dict[str, object]] = []
         # Task locks: task_id -> {"owner": str, "locked_at": datetime}
         self._task_locks: dict[str, dict[str, Any]] = {}
+
+    # =====================================================================
+    # Section 0 — Task metadata
+    # =====================================================================
+    def create_task(self, task_id: str, raw_goal: str) -> None:
+        now = (
+            datetime.now(timezone.utc)
+            .replace(microsecond=0)
+            .isoformat()
+            .replace("+00:00", "Z")
+        )
+        self._tasks[task_id] = TaskRecord(
+            task_id=task_id,
+            raw_goal=raw_goal,
+            status="pending",
+            created_at=now,
+            updated_at=now,
+        )
+
+    def get_task(self, task_id: str) -> TaskRecord | None:
+        return self._tasks.get(task_id)
+
+    def task_exists(self, task_id: str) -> bool:
+        if task_id in self._tasks:
+            return True
+        if task_id in self._policies or task_id in self._ledgers:
+            return True
+        if task_id in self._best_states or task_id in self._stop_reports_history:
+            return True
+        if any(tid == task_id for tid, _ in self._loop_traces):
+            return True
+        return any(
+            isinstance(row, dict) and row.get("task_id") == task_id
+            for row in self._events
+        )
 
     # =====================================================================
     # Section 1 — Hunger
@@ -144,6 +181,9 @@ class InMemoryRepository:
 
     def get_last_phase(self, task_id: str) -> LoopPhase | None:
         return self._last_phase.get(task_id)
+
+    def get_latest_hunger_snapshot(self, task_id: str) -> HungerSnapshot | None:
+        return self._snapshots.get(task_id)
 
     # =====================================================================
     # Section 2 — Workspace state
@@ -368,10 +408,29 @@ class InMemoryRepository:
 
     def save_stop_report(self, report: StopReport) -> None:
         self._stop_reports_history.setdefault(report.task_id, []).append(report)
+        task = self._tasks.get(report.task_id)
+        if task is not None:
+            now = (
+                datetime.now(timezone.utc)
+                .replace(microsecond=0)
+                .isoformat()
+                .replace("+00:00", "Z")
+            )
+            self._tasks[report.task_id] = task.model_copy(
+                update={
+                    "status": "stopped",
+                    "last_stop_reason": report.stop_reason,
+                    "updated_at": now,
+                }
+            )
+
+    def get_last_stop_report(self, task_id: str) -> StopReport | None:
+        history = self._stop_reports_history.get(task_id)
+        return history[-1] if history else None
 
     def get_last_stop_reason(self, task_id: str) -> StopReason | None:
-        history = self._stop_reports_history.get(task_id)
-        return history[-1].stop_reason if history else None
+        report = self.get_last_stop_report(task_id)
+        return report.stop_reason if report else None
 
     def get_usage_snapshot(self, task_id: str) -> UsageSnapshot:
         return self._usage.setdefault(task_id, UsageSnapshot(task_id=task_id))
@@ -403,6 +462,13 @@ class InMemoryRepository:
                 ),
             }
         )
+
+    def list_events(self, task_id: str) -> list[dict[str, object]]:
+        return [
+            row
+            for row in self._events
+            if isinstance(row, dict) and row.get("task_id") == task_id
+        ]
 
     # =====================================================================
     # Section 7 — Memory / Skill

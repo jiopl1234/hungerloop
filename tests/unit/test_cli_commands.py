@@ -23,6 +23,7 @@ from hungerloop.models.hunger import (
 from hungerloop.models.tracing import StopReport
 from hungerloop.repository.in_memory_repo import InMemoryRepository
 from hungerloop.services.model_client import DummyModelClient
+from hungerloop.services.openai_model_client import OpenAIModelClient
 
 
 @pytest.fixture
@@ -42,11 +43,12 @@ def context(tmp_path: Path) -> CliContext:
 
 
 def test_default_main_without_context_raises_clear_error() -> None:
-    """Production entry point fails loudly until SQLiteRepository ships."""
+    """Production entry point opens a SQLite-backed context by default."""
     runner = CliRunner()
-    result = runner.invoke(cli, ["status", "t1"])
-    assert result.exit_code != 0
-    assert "SQLiteRepository" in result.output
+    with runner.isolated_filesystem():
+        result = runner.invoke(cli, ["status", "t1"])
+    assert result.exit_code == 0
+    assert "task_id: t1" in result.output
 
 
 # ---- new ----
@@ -94,11 +96,44 @@ def test_new_rejects_invalid_json(context: CliContext) -> None:
     assert "valid JSON" in result.output
 
 
-def test_new_requires_at_least_one_accept(context: CliContext) -> None:
+def test_new_accept_file_yaml(context: CliContext, tmp_path: Path) -> None:
+    accept_file = tmp_path / "accept.yaml"
+    accept_file.write_text(
+        """
+core_acceptance_mode: any
+core_acceptance_checks:
+  - check_type: file_exists
+    params:
+      path: report.md
+    description: report exists
+""",
+        encoding="utf-8",
+    )
+    runner = CliRunner()
+    result = runner.invoke(
+        cli,
+        [
+            "new",
+            "Build from file",
+            "--accept-file",
+            str(accept_file),
+            "--task-id",
+            "demo-file",
+        ],
+        obj=context,
+    )
+    assert result.exit_code == 0, result.output
+    ledger = context.repo.get_hunger_ledger("demo-file")
+    assert ledger.items[0].acceptance_mode == "any"
+    assert ledger.items[0].acceptance_checks[0].params == {"path": "report.md"}
+    assert context.repo.get_task("demo-file").raw_goal == "Build from file"  # type: ignore[union-attr]
+
+
+def test_new_requires_accept_or_accept_file(context: CliContext) -> None:
     runner = CliRunner()
     result = runner.invoke(cli, ["new", "Goal"], obj=context)
     assert result.exit_code != 0
-    assert "--accept" in result.output
+    assert "--accept JSON spec or --accept-file" in result.output
 
 
 # ---- status ----
@@ -375,3 +410,48 @@ def test_run_resume_on_unfrozen_clock_is_idempotent(
         e for e in context.repo._events if e["event_type"] == "hunger_resumed"
     ]
     assert events == []
+
+
+def test_run_model_config_dummy_resolves_client(
+    context: CliContext, tmp_path: Path
+) -> None:
+    from hungerloop.cli.run_cmd import _resolve_model_client
+
+    path = tmp_path / "model.yaml"
+    path.write_text("provider: dummy\nmodel_name: dummy\n", encoding="utf-8")
+    client = _resolve_model_client(context, path)
+    assert isinstance(client, DummyModelClient)
+
+
+def test_run_model_config_openai_resolves_client(
+    context: CliContext, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from hungerloop.cli.run_cmd import _resolve_model_client
+
+    monkeypatch.setenv("HL_TEST_API_KEY", "sk-test")
+    path = tmp_path / "model.yaml"
+    path.write_text(
+        (
+            "provider: openai\n"
+            "model_name: gpt-4o-mini\n"
+            "api_key_env: HL_TEST_API_KEY\n"
+        ),
+        encoding="utf-8",
+    )
+    client = _resolve_model_client(context, path)
+    assert isinstance(client, OpenAIModelClient)
+
+
+def test_run_model_config_azure_fails_clearly(
+    context: CliContext, tmp_path: Path
+) -> None:
+    path = tmp_path / "model.yaml"
+    path.write_text("provider: azure_openai\nmodel_name: gpt-4o\n", encoding="utf-8")
+    runner = CliRunner()
+    result = runner.invoke(
+        cli,
+        ["run", "t1", "--model-config", str(path), "--max-loops", "1"],
+        obj=context,
+    )
+    assert result.exit_code != 0
+    assert "Azure runtime" in result.output

@@ -99,10 +99,19 @@ def test_reusable_accepts_clean_content() -> None:
 def test_non_volatile_threshold_two() -> None:
     repo = InMemoryRepository()
     cand = _candidate(candidate_id="mem-1")
-    repo._committed_refs["mem-1"] = 1
+    cand.source_best_state_id = "best-1"
     assert non_volatile(cand, repo) is False
-    repo._committed_refs["mem-1"] = 2
+    repo._committed_refs["best-1"] = 1
+    assert non_volatile(cand, repo) is False
+    repo._committed_refs["best-1"] = 2
     assert non_volatile(cand, repo) is True
+
+
+def test_non_volatile_does_not_compare_memory_candidate_id() -> None:
+    repo = InMemoryRepository()
+    cand = _candidate(candidate_id="mem-1")
+    repo._committed_refs["mem-1"] = 2
+    assert non_volatile(cand, repo) is False
 
 
 def test_traceable_subset_only() -> None:
@@ -146,6 +155,7 @@ def test_propose_emits_one_candidate_per_check(
         "t1",
         2,
         _validation(
+            loop_id=2,
             newly_passed=["H-001:0", "H-001:1"],
             evidence_ids=["ev-1"],
         ),
@@ -161,6 +171,9 @@ def test_propose_emits_one_candidate_per_check(
     assert all(c.reusable for c in candidates)
     # non_volatile: count_committed_references defaults to 0 → False
     assert all(not c.non_volatile for c in candidates)
+    assert all(c.source_best_state_id == "best-1" for c in candidates)
+    assert all(c.source_candidate_state_id == "CAND-t1-2" for c in candidates)
+    assert all(c.source_validation_id == "VAL-t1-2" for c in candidates)
 
 
 def test_propose_handles_missing_best_state() -> None:

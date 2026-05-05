@@ -86,22 +86,10 @@ def _events_for_task(ctx: CliContext, task_id: str) -> list[dict[str, Any]]:
     matches ``task_id`` (``task_id IS NULL`` rows are global and
     excluded — see module docstring).
 
-    Reaches into ``InMemoryRepository._events`` to keep this command
-    working before SQLiteRepository lands (same pattern as
-    ``report_format._resolve_goal_status``). The SQLite implementation
-    will replace this with ``SELECT * FROM events WHERE task_id = ?
-    ORDER BY created_at, event_id``.
+    Reads through the repository protocol so InMemory and SQLite share
+    the same CLI behavior.
     """
-    raw_events: Any = getattr(ctx.repo, "_events", None)
-    if not isinstance(raw_events, list):
-        return []
-    rows: list[dict[str, Any]] = []
-    for row in raw_events:
-        if not isinstance(row, dict):
-            continue
-        if row.get("task_id") == task_id:
-            rows.append(row)
-    return rows
+    return ctx.repo.list_events(task_id)
 
 
 def _jsonl_default(value: object) -> str:
@@ -117,25 +105,4 @@ def _jsonl_default(value: object) -> str:
 
 def _task_exists(ctx: CliContext, task_id: str) -> bool:
     """Same heuristic as ``report``/``status`` — any state row counts."""
-    repo = ctx.repo
-    for attr in (
-        "_policies",
-        "_ledgers",
-        "_loop_traces",
-        "_stop_reports_history",
-    ):
-        store: Any = getattr(repo, attr, None)
-        if isinstance(store, dict) and task_id in store:
-            return True
-        if isinstance(store, dict):
-            # Tracked as composite keys (task_id, loop_id) for loop_traces.
-            for key in store:
-                if isinstance(key, tuple) and key and key[0] == task_id:
-                    return True
-    # Last resort: any event already attached to the task.
-    raw_events: Any = getattr(repo, "_events", None)
-    if isinstance(raw_events, list):
-        for row in raw_events:
-            if isinstance(row, dict) and row.get("task_id") == task_id:
-                return True
-    return False
+    return ctx.repo.task_exists(task_id)

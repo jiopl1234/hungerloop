@@ -34,9 +34,8 @@ def format_status(repo: RepositoryProtocol, task_id: str) -> str:
 
     accepted_count = len(best.accepted_check_keys) if best else 0
     best_id = best.state_id if best else None
-    drive_budget = "n/a (no snapshot yet)"
-    snapshot = repo.get_last_phase(task_id)
-    del snapshot  # phase only; drive_budget itself isn't persisted distinctly
+    snapshot = repo.get_latest_hunger_snapshot(task_id)
+    drive_budget = f"{snapshot.drive_budget:.2f}" if snapshot else "n/a (no snapshot yet)"
 
     lines = [
         f"task_id: {task_id}",
@@ -44,6 +43,9 @@ def format_status(repo: RepositoryProtocol, task_id: str) -> str:
         f"loop_count: {clock.loop_count}",
         f"frozen: {clock.frozen}",
         f"current_drive_budget: {drive_budget}",
+        f"phase: {snapshot.phase.value if snapshot else '(none)'}",
+        f"active_hunger: {snapshot.active_hunger:.2f}" if snapshot else "active_hunger: n/a",
+        f"work_pressure: {snapshot.work_pressure:.2f}" if snapshot else "work_pressure: n/a",
         f"total_cost_usd: {usage.cost_usd:.4f}",
         f"total_tokens: {usage.tokens}",
         f"llm_calls: {usage.llm_calls}",

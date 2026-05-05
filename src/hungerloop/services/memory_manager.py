@@ -8,7 +8,9 @@ pure helpers so they can be unit-tested independently:
   ``best.evidence_ids``.
 * ``reusable`` — content is free of task-specific identifiers (``task_id``,
   ``candidate_id``, ``loop_id`` token).
-* ``non_volatile`` — ``repo.count_committed_references(candidate_id) >= 2``.
+* ``non_volatile`` — the validated source best/candidate state has been
+  observed in committed state history, rather than comparing the memory
+  candidate's own id to a best-state id.
 * ``traceable`` — ``set(evidence_ids) ⊆ set(best.evidence_ids)``.
 
 :class:`MemoryManager.propose_from_loop` produces one candidate per
@@ -55,8 +57,15 @@ def reusable(candidate: MemoryCandidate, *, task_id: str) -> bool:
 def non_volatile(
     candidate: MemoryCandidate, repo: RepositoryProtocol
 ) -> bool:
-    """True if the candidate is referenced by >= 2 commits (§19.2)."""
-    return repo.count_committed_references(candidate.candidate_id) >= 2
+    """True if the source state is referenced by committed state history."""
+    source_ids = [
+        candidate.source_best_state_id,
+        candidate.source_candidate_state_id,
+    ]
+    return any(
+        source_id is not None and repo.count_committed_references(source_id) >= 2
+        for source_id in source_ids
+    )
 
 
 def traceable(
@@ -113,6 +122,9 @@ class MemoryManager:
                 evidence_ids=list(validation.evidence_ids),
                 referenced_check_keys=[check_key],
                 source_loop_ids=[loop_id],
+                source_candidate_state_id=validation.candidate_state_id,
+                source_validation_id=validation.id,
+                source_best_state_id=best.state_id if best is not None else None,
                 # v0.5c.0: only "proposed" is emitted. Promotion to
                 # "approved"/"rejected"/"expired"/"superseded" lands in
                 # v0.6 — it'll be a pure repo write against the row we

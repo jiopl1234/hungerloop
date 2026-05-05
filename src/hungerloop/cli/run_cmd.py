@@ -5,6 +5,7 @@ import asyncio
 import os
 import socket
 import uuid
+from pathlib import Path
 
 import click
 
@@ -12,6 +13,14 @@ from hungerloop.cli.context import CliContext
 from hungerloop.cli.orchestrator_factory import build_orchestrator
 from hungerloop.cli.preflight import PreflightError, check_resume_preflight
 from hungerloop.models.events import EventType
+from hungerloop.services.cost_guard import CostGuard
+from hungerloop.services.model_client import DummyModelClient, ModelAuthError, ModelClient
+from hungerloop.services.model_config import (
+    ModelConfigLoader,
+    ModelProvider,
+    PricingTable,
+)
+from hungerloop.services.openai_model_client import OpenAIModelClient
 from hungerloop.services.skill_manager import SkillManager
 
 DEFAULT_LOCK_STALE_SEC = 30 * 60  # 30 minutes
@@ -98,6 +107,13 @@ def _resolve_stale_threshold(cli_value: int | None) -> int:
         "HUNGERLOOP_LOCK_STALE_SEC; default 1800 = 30 min)."
     ),
 )
+@click.option(
+    "--model-config",
+    "model_config_path",
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    default=None,
+    help="YAML model config. Supports provider: dummy or openai.",
+)
 @click.pass_obj
 def run(
     ctx: CliContext,
@@ -109,6 +125,7 @@ def run(
     raise_cost_ceiling: float | None,
     steal_lock: bool,
     lock_stale_sec: int | None,
+    model_config_path: Path | None,
 ) -> None:
     """Drive ``task_id`` through the orchestrator until a StopReport.
 
@@ -140,6 +157,11 @@ def run(
         raise_cost_ceiling=raise_cost_ceiling,
     )
 
+    try:
+        model_client = _resolve_model_client(ctx, model_config_path)
+    except (ValueError, NotImplementedError, ModelAuthError) as exc:
+        raise click.ClickException(str(exc)) from exc
+
     # Acquire the task lock (PRD §5.1.1) before invoking the orchestrator.
     owner = _build_lock_owner()
     stale_threshold = _resolve_stale_threshold(lock_stale_sec)
@@ -170,7 +192,7 @@ def run(
         orchestrator = build_orchestrator(
             repo=ctx.repo,
             workspace_root=ctx.workspace_root,
-            model_client=ctx.model_client,
+            model_client=model_client,
             max_loops_safety_cap=max_loops,
         )
         orchestrator.workspace_manager.ensure_task_workspace(task_id)
@@ -272,3 +294,22 @@ def _apply_user_overrides(
             {"new_ceiling_usd": raise_cost_ceiling},
             task_id=task_id,
         )
+
+
+def _resolve_model_client(
+    ctx: CliContext, model_config_path: Path | None
+) -> ModelClient | None:
+    if model_config_path is None:
+        return ctx.model_client
+
+    config = ModelConfigLoader().load(model_config_path)
+    if config.provider == ModelProvider.DUMMY:
+        return DummyModelClient()
+    if config.provider == ModelProvider.OPENAI:
+        return OpenAIModelClient(
+            config,
+            CostGuard(ctx.repo),
+            PricingTable(ctx.repo),
+            ctx.repo,
+        )
+    raise NotImplementedError(f"Unsupported provider: {config.provider.value}")

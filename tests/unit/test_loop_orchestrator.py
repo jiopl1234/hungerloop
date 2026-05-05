@@ -204,6 +204,9 @@ async def test_step_returns_loop_trace_when_progress_made(tmp_path: Path) -> Non
     assert outcome.committed is True
     assert outcome.newly_passed_check_keys == ["H-001:0"]
     assert outcome.tool_calls >= 1
+    event_types = [event["event_type"] for event in repo._events]
+    assert "loop_started" in event_types
+    assert "loop_committed" in event_types
 
 
 # ---- empty plan -> BLOCKED via stagnation streak ----
@@ -288,6 +291,7 @@ async def test_empty_plan_streak_triggers_blocked(tmp_path: Path) -> None:
     assert isinstance(outcome, StopReport)
     assert outcome.stop_reason is StopReason.BLOCKED
     assert outcome.goal_status == "blocked"
+    assert any(event["event_type"] == "loop_rejected" for event in repo._events)
     del orchestrator  # unused
 
 
@@ -349,6 +353,7 @@ async def test_safety_stop_propagates(tmp_path: Path) -> None:
     assert isinstance(outcome, StopReport)
     assert outcome.stop_reason is StopReason.SAFETY_STOP
     assert outcome.goal_status == "abandoned"
+    assert any(event["event_type"] == "safety_stop" for event in repo._events)
 
 
 async def test_requires_human_short_circuits(tmp_path: Path) -> None:
@@ -377,6 +382,7 @@ async def test_requires_human_short_circuits(tmp_path: Path) -> None:
     assert isinstance(outcome, StopReport)
     assert outcome.stop_reason is StopReason.HUMAN_REQUIRED
     assert outcome.goal_status == "paused"
+    assert any(event["event_type"] == "human_required" for event in repo._events)
 
 
 async def test_human_paused_via_frozen_clock(tmp_path: Path) -> None:
@@ -438,5 +444,4 @@ async def test_safety_cap_emits_error_after_excessive_loops(tmp_path: Path) -> N
     assert isinstance(outcome, StopReport)
     assert outcome.stop_reason is StopReason.ERROR
     assert "max_loops_safety_cap=3" in outcome.recommendation
-
 

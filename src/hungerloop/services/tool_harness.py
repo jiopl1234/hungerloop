@@ -96,10 +96,21 @@ class ToolHarness:
         """
         tool = self.tool_registry.get(tool_name)
         if tool is None:
+            evidence_id = self.repo.save_tool_call_as_evidence(
+                task_id=context.task_id,
+                loop_id=context.loop_id,
+                agent_id=context.agent_id,
+                tool_name=tool_name,
+                args_summary=self._summarize_args(args),
+                result_summary=f"unknown tool: {tool_name}",
+                success=False,
+                elapsed_ms=0,
+            )
             return ToolResult(
                 tool_name=tool_name,
                 success=False,
                 summary=f"unknown tool: {tool_name}",
+                evidence_ids=[evidence_id],
                 error=f"unknown_tool:{tool_name}",
                 error_type="unknown_tool",
             )

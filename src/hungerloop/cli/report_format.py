@@ -187,40 +187,26 @@ def format_markdown(report: dict[str, Any]) -> str:
 
 
 def _resolve_goal(repo: RepositoryProtocol, task_id: str) -> str | None:
-    """v0.5b.0: TaskRecord lands with SQLiteRepository (PRD §3.4); until
-    then the goal isn't persisted. Return null and let consumers tolerate."""
-    get_task = getattr(repo, "get_task", None)
-    if callable(get_task):
-        record = get_task(task_id)
-        if record is not None and getattr(record, "raw_goal", None):
-            goal = record.raw_goal
-            return goal if isinstance(goal, str) else None
+    """Return persisted task goal when available."""
+    record = repo.get_task(task_id)
+    if record is not None and record.raw_goal:
+        return record.raw_goal
     return None
 
 
 def _resolve_goal_status(repo: RepositoryProtocol, task_id: str) -> str:
     """Read the persisted StopReport's goal_status if available; default
     to ``unknown`` so callers always have a string to switch on."""
-    history = getattr(repo, "_stop_reports_history", None)
-    if isinstance(history, dict):
-        reports = history.get(task_id) or []
-        if reports:
-            last: Any = reports[-1]
-            status = getattr(last, "goal_status", None)
-            if isinstance(status, str):
-                return status
+    report = repo.get_last_stop_report(task_id)
+    if report is not None:
+        return report.goal_status
     return "unknown"
 
 
 def _resolve_recommendation(repo: RepositoryProtocol, task_id: str) -> str:
-    history = getattr(repo, "_stop_reports_history", None)
-    if isinstance(history, dict):
-        reports = history.get(task_id) or []
-        if reports:
-            last: Any = reports[-1]
-            rec = getattr(last, "recommendation", None)
-            if isinstance(rec, str):
-                return rec
+    report = repo.get_last_stop_report(task_id)
+    if report is not None:
+        return report.recommendation
     return ""
 
 

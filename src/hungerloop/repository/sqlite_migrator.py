@@ -33,10 +33,11 @@ from hungerloop.repository.migration_errors import (
     SchemaTooNewError,
 )
 
-# Bump per migration. v0.5b.0 shipped at 1; v0.5c.0 ships at 2 with
-# `migrations/v2__memory_candidate_lifecycle.sql` adding the
-# MemoryCandidate lifecycle columns (PRD §19.1).
-LATEST_VERSION: int = 2
+# Bump per migration. v0.5b.0 shipped at 1; v0.5c.0 shipped at 2 with
+# `migrations/v2__memory_candidate_lifecycle.sql`; v3 adds the runtime
+# tables/constraints needed by SQLiteRepository; v4 adds source links for
+# MemoryCandidate predicates.
+LATEST_VERSION: int = 4
 
 # Migration files: ``v{N}__{slug}.sql`` where N is a positive int and
 # slug is ``[a-z0-9_]+``. Anything else is rejected at startup.
@@ -157,10 +158,13 @@ class SQLiteMigrator:
     def _migrate_to_latest(self, current_version: int) -> None:
         pending = self._list_pending_migrations(current_version)
         if not pending:
-            # Nothing scheduled but version pointer is behind — bump it
-            # so the DB stops triggering ensure_current() on every open.
-            self._set_user_version(self.latest_version)
-            return
+            raise MigrationFailedError(
+                version=self.latest_version,
+                cause=RuntimeError(
+                    "No migration files found from "
+                    f"v{current_version + 1} to v{self.latest_version}"
+                ),
+            )
 
         backup_path = self._write_backup(current_version)
         try:

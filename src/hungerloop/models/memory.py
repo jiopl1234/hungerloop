@@ -35,6 +35,9 @@ class MemoryCandidate(BaseModel):
     evidence_ids: list[str] = Field(default_factory=list)
     referenced_check_keys: list[str] = Field(default_factory=list)
     source_loop_ids: list[int] = Field(default_factory=list)
+    source_candidate_state_id: str | None = None
+    source_validation_id: str | None = None
+    source_best_state_id: str | None = None
 
     # Promotion predicates (PRD §19.2)
     action_verified: bool = False

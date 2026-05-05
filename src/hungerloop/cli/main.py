@@ -10,14 +10,14 @@ v0.5a CLI surface (PRD §18):
 * ``hungerloop workspace`` / ``hungerloop checks`` — pre-existing
   inspection helpers (v0.4.1).
 
-Production users currently cannot invoke the v0.5a commands: there is no
-``SQLiteRepository`` yet, so the default context factory raises with a
-clear message. Tests inject a :class:`CliContext` carrying an
-:class:`InMemoryRepository`.
+Production invocations create/open ``hungerloop.sqlite`` in the current
+workspace. Tests can still inject a :class:`CliContext` carrying any
+``RepositoryProtocol`` implementation.
 """
 from __future__ import annotations
 
 from importlib.metadata import PackageNotFoundError, version
+from pathlib import Path
 
 import click
 
@@ -33,6 +33,7 @@ from hungerloop.cli.skill_cmd import skill
 from hungerloop.cli.status_cmd import status
 from hungerloop.cli.trace_cmd import trace
 from hungerloop.cli.workspace_cmd import workspace
+from hungerloop.repository.sqlite_repo import SQLiteRepository
 
 try:
     _PACKAGE_VERSION = version("hungerloop")
@@ -44,16 +45,12 @@ except PackageNotFoundError:
 def _default_context() -> CliContext:
     """Build the default :class:`CliContext` for production use.
 
-    Raises:
-        click.ClickException: v0.5a does not ship :class:`SQLiteRepository`
-            yet; the CLI cannot create a persistence-backed context outside
-            of tests. Wire SQLiteRepository here when it lands.
+    The workspace is the invoking process' current directory. State is
+    persisted in ``hungerloop.sqlite`` next to the workspace directories.
     """
-    raise click.ClickException(
-        "v0.5a CLI cannot run without SQLiteRepository yet. "
-        "Tests inject CliContext with InMemoryRepository via runner.invoke(obj=...). "
-        "SQLiteRepository ships in v0.5b; until then the CLI is library-only."
-    )
+    workspace_root = Path.cwd()
+    repo = SQLiteRepository.open(workspace_root / "hungerloop.sqlite")
+    return CliContext(repo=repo, workspace_root=workspace_root)
 
 
 @click.group()

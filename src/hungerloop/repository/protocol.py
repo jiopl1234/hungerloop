@@ -26,6 +26,7 @@ from hungerloop.models.hunger import (
 from hungerloop.models.memory import MemoryCandidate
 from hungerloop.models.planning import LoopPlan
 from hungerloop.models.skill import SkillCard
+from hungerloop.models.task import TaskRecord
 from hungerloop.models.tracing import LoopTrace, StopReport
 from hungerloop.models.usage import UsageSnapshot
 from hungerloop.models.validation import ValidationReport
@@ -34,6 +35,14 @@ from hungerloop.models.worker import AgentSpec, WorkerResult
 
 class RepositoryProtocol(Protocol):
     """Single persistence protocol for all HungerLoop services (ADR-006)."""
+
+    # =====================================================================
+    # Section 0 — Task metadata
+    # =====================================================================
+    def create_task(self, task_id: str, raw_goal: str) -> None: ...
+    def get_task(self, task_id: str) -> TaskRecord | None: ...
+    def task_exists(self, task_id: str) -> bool: ...
+    def set_hunger_policy(self, task_id: str, policy: HungerPolicy) -> None: ...
 
     # =====================================================================
     # Section 1 — Hunger (policy / clock / ledger / items / snapshots)
@@ -56,6 +65,7 @@ class RepositoryProtocol(Protocol):
 
     def save_hunger_snapshot(self, task_id: str, snapshot: HungerSnapshot) -> None: ...
     def get_last_phase(self, task_id: str) -> LoopPhase | None: ...
+    def get_latest_hunger_snapshot(self, task_id: str) -> HungerSnapshot | None: ...
 
     # =====================================================================
     # Section 2 — Workspace state (best / candidates)
@@ -196,6 +206,7 @@ class RepositoryProtocol(Protocol):
     def save_stop_report(self, report: StopReport) -> None: ...
     """New in v0.5a (§28.15): implementations keep a history list."""
 
+    def get_last_stop_report(self, task_id: str) -> StopReport | None: ...
     def get_last_stop_reason(self, task_id: str) -> StopReason | None: ...
     """New in v0.5a (§18.3): CLI resume preflight calls this before
     invoking the Orchestrator."""
@@ -220,6 +231,11 @@ class RepositoryProtocol(Protocol):
     member. Implementations store ``event_type.value`` so the SQL column
     stays plain TEXT. Adding new enum members is additive; renaming or
     removing requires a coordinated schema migration."""
+
+    def list_events(self, task_id: str) -> list[dict[str, object]]: ...
+    """Per-task event rows in append order. Global events are intentionally
+    excluded from this query so ``trace export <task_id>`` remains a
+    strict per-task projection."""
 
     # =====================================================================
     # Section 7 — Memory / Skill

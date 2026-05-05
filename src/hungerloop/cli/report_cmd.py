@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import json
 import sys
-from typing import Any
 
 import click
 
@@ -55,20 +54,4 @@ def _task_exists(ctx: CliContext, task_id: str) -> bool:
     not None`` once TaskRecord lands (PRD §3.4); the helper keeps v0.5a
     InMemory tests green in the meantime.
     """
-    repo: Any = ctx.repo
-    if hasattr(repo, "get_task"):
-        record = repo.get_task(task_id)
-        if record is not None:
-            return True
-
-    policies = getattr(repo, "_policies", {}) or {}
-    if task_id in policies:
-        return True
-    ledgers = getattr(repo, "_ledgers", {}) or {}
-    if task_id in ledgers:
-        return True
-    history = getattr(repo, "_stop_reports_history", {}) or {}
-    if task_id in history:
-        return True
-    loop_traces = getattr(repo, "_loop_traces", {}) or {}
-    return any(tid == task_id for (tid, _loop_id) in loop_traces.keys())
+    return ctx.repo.task_exists(task_id)
