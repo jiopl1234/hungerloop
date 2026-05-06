@@ -57,6 +57,14 @@ class ValidationReport(BaseModel):
     regressed_check_keys: list[str] = Field(default_factory=list)
     """Check keys (``"{item_id}:{index}"``) that passed in baseline but fail now."""
 
+    attempted_check_keys: list[str] = Field(default_factory=list)
+    """v0.5e.0 (PRD §14.4 / FR-5): every check key the validator tried
+    this run, regardless of outcome. ``MemoryManager`` populates
+    ``MemoryCandidate.referenced_check_keys`` from this list and uses
+    ``newly_passed_check_keys`` for the strict ``accepted_check_keys``
+    subset. When empty (legacy rows / non-targeted validation), callers
+    fall back to ``newly_passed_check_keys`` for the referenced list."""
+
     satisfied_hunger_item_ids: list[str] = Field(default_factory=list)
     unsatisfied_hunger_item_ids: list[str] = Field(default_factory=list)
 

@@ -74,44 +74,73 @@ def test_action_verified_false_when_either_empty() -> None:
 
 
 def test_reusable_rejects_task_id_in_content() -> None:
-    cand = _candidate(content="Configured task t1 with extra step")
-    assert reusable(cand, task_id="t1") is False
-
-
-def test_reusable_rejects_candidate_id_in_content() -> None:
+    """v0.5e.0 (FR-8): ``task_<UUID>`` is the anchored task pattern; a
+    bare ``"task t1"`` is fine — substring matching is no longer used."""
     cand = _candidate(
-        candidate_id="mem-deadbeef",
-        content="Saw mem-deadbeef in context",
+        content="Configured task task_550e8400-e29b-41d4-a716-446655440000"
     )
-    assert reusable(cand, task_id="t1") is False
+    assert reusable(cand) is False
 
 
-def test_reusable_rejects_loop_token() -> None:
+def test_reusable_rejects_loop_dir_token() -> None:
+    """v0.5e.0 (FR-8): ``loop_NNN`` (3-digit) is the anchored token."""
     cand = _candidate(content="Best result reached at loop_007")
-    assert reusable(cand, task_id="t1") is False
+    assert reusable(cand) is False
 
 
 def test_reusable_accepts_clean_content() -> None:
     cand = _candidate(content="Verified acceptance check H-001:0")
-    assert reusable(cand, task_id="t1") is True
+    assert reusable(cand) is True
 
 
-def test_non_volatile_threshold_two() -> None:
+def test_non_volatile_requires_done_stop_report(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """v0.5e.0 (FR-7): non_volatile flips True only when the source
+    best-state matches the StopReport's final_best_state_id and the
+    stop_reason is DONE."""
+    from hungerloop.models.enums import StopReason
+    from hungerloop.models.tracing import StopReport
+
     repo = InMemoryRepository()
     cand = _candidate(candidate_id="mem-1")
     cand.source_best_state_id = "best-1"
+
+    # No StopReport yet → False.
     assert non_volatile(cand, repo) is False
-    repo._committed_refs["best-1"] = 1
+
+    # StopReport with non-DONE stop_reason → False even if ids match.
+    repo.save_stop_report(
+        StopReport(
+            task_id=cand.task_id,
+            stop_reason=StopReason.HUNGER_EXPIRED,
+            goal_status="abandoned",
+            final_best_state_id="best-1",
+        )
+    )
     assert non_volatile(cand, repo) is False
-    repo._committed_refs["best-1"] = 2
+
+    # DONE StopReport but ids don't match → False.
+    repo.save_stop_report(
+        StopReport(
+            task_id=cand.task_id,
+            stop_reason=StopReason.DONE,
+            goal_status="completed",
+            final_best_state_id="best-other",
+        )
+    )
+    assert non_volatile(cand, repo) is False
+
+    # DONE StopReport + matching id → True.
+    repo.save_stop_report(
+        StopReport(
+            task_id=cand.task_id,
+            stop_reason=StopReason.DONE,
+            goal_status="completed",
+            final_best_state_id="best-1",
+        )
+    )
     assert non_volatile(cand, repo) is True
-
-
-def test_non_volatile_does_not_compare_memory_candidate_id() -> None:
-    repo = InMemoryRepository()
-    cand = _candidate(candidate_id="mem-1")
-    repo._committed_refs["mem-1"] = 2
-    assert non_volatile(cand, repo) is False
 
 
 def test_traceable_subset_only() -> None:

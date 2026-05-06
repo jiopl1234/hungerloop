@@ -1,16 +1,17 @@
-"""MemoryManager + promotion predicates (PRD §19).
+"""MemoryManager + promotion predicates (PRD §15 / §19).
 
-v0.5c only generates :class:`MemoryCandidate` rows; promotion to long-term
-memory is a v0.5d concern. The four predicates from §19.2 are implemented as
-pure helpers so they can be unit-tested independently:
+The four predicates from §19.2 are implemented as pure helpers so they
+can be unit-tested independently:
 
 * ``action_verified`` — at least one ``evidence_id`` is present in
   ``best.evidence_ids``.
-* ``reusable`` — content is free of task-specific identifiers (``task_id``,
-  ``candidate_id``, ``loop_id`` token).
-* ``non_volatile`` — the validated source best/candidate state has been
-  observed in committed state history, rather than comparing the memory
-  candidate's own id to a best-state id.
+* ``reusable`` — content is free of task-specific identifiers; uses
+  the anchored regex set from PRD §15 / FR-8 (``is_reusable``) so a
+  substring like ``"taskid"`` doesn't false-positive on
+  ``"task_<uuid>"``.
+* ``non_volatile`` — the validated source best-state was the *final*
+  best-state of a DONE-stopped task. Mid-task or non-DONE stops never
+  flip this True (PRD §19.2 / §15 / FR-7).
 * ``traceable`` — ``set(evidence_ids) ⊆ set(best.evidence_ids)``.
 
 :class:`MemoryManager.propose_from_loop` produces one candidate per
@@ -23,16 +24,32 @@ import re
 import uuid
 from datetime import datetime, timedelta, timezone
 
+from hungerloop.models.enums import StopReason
 from hungerloop.models.memory import MemoryCandidate
 from hungerloop.models.validation import ValidationReport
 from hungerloop.repository.protocol import RepositoryProtocol
-
-_LOOP_TOKEN = re.compile(r"loop[_\s-]?\d+", re.IGNORECASE)
 
 # Default lifetime for an emitted candidate (PRD §19.1 + decision §11.4):
 # 90 days from creation. Pure data in v0.5c — no auto-job acts on this
 # until v0.6's expiry sweep lands.
 _CANDIDATE_TTL = timedelta(days=90)
+
+# PRD §15 / FR-8: anchored regex patterns identifying task-specific
+# tokens. Anchored, NOT substring matches. Compiled once at module
+# import so per-candidate evaluation is sub-millisecond (NFR-3).
+TASK_SPECIFIC_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"\btask_[0-9a-fA-F-]+\b"),
+    re.compile(r"\bloop_\d{3}\b"),
+    re.compile(r"^/tmp/", re.MULTILINE),
+    re.compile(r"workspace/tasks/[a-zA-Z0-9_-]+"),
+    re.compile(r"\bCAND-[a-zA-Z0-9_-]+\b"),
+    re.compile(r"\bVAL-[a-zA-Z0-9_-]+\b"),
+)
+
+
+def is_reusable(content: str) -> bool:
+    """True iff ``content`` avoids the FR-8 task-specific patterns."""
+    return not any(pattern.search(content) for pattern in TASK_SPECIFIC_PATTERNS)
 
 
 def action_verified(candidate: MemoryCandidate, best_evidence_ids: list[str]) -> bool:
@@ -42,30 +59,28 @@ def action_verified(candidate: MemoryCandidate, best_evidence_ids: list[str]) ->
     return any(eid in best_evidence_ids for eid in candidate.evidence_ids)
 
 
-def reusable(candidate: MemoryCandidate, *, task_id: str) -> bool:
-    """True if content avoids task-specific tokens (§19.2)."""
-    content = candidate.content
-    if task_id and task_id in content:
-        return False
-    if candidate.candidate_id in content:
-        return False
-    if _LOOP_TOKEN.search(content):
-        return False
-    return True
+def reusable(candidate: MemoryCandidate) -> bool:
+    """True if content avoids the FR-8 task-specific patterns (§19.2)."""
+    return is_reusable(candidate.content)
 
 
 def non_volatile(
     candidate: MemoryCandidate, repo: RepositoryProtocol
 ) -> bool:
-    """True if the source state is referenced by committed state history."""
-    source_ids = [
-        candidate.source_best_state_id,
-        candidate.source_candidate_state_id,
-    ]
-    return any(
-        source_id is not None and repo.count_committed_references(source_id) >= 2
-        for source_id in source_ids
-    )
+    """True iff this candidate's source is the final best-state of a
+    DONE-stopped task (PRD §15 / FR-7).
+
+    Mid-task or non-DONE stops never flip this True. Returns False
+    when no StopReport exists yet.
+    """
+    if candidate.source_best_state_id is None:
+        return False
+    last_report = repo.get_last_stop_report(candidate.task_id)
+    if last_report is None:
+        return False
+    if last_report.stop_reason is not StopReason.DONE:
+        return False
+    return candidate.source_best_state_id == last_report.final_best_state_id
 
 
 def traceable(
@@ -111,6 +126,13 @@ class MemoryManager:
         best = self.repo.get_best_state(task_id)
         best_evidence_ids = list(best.evidence_ids) if best is not None else []
 
+        # PRD §14.4 / FR-5: referenced vs accepted distinction.
+        attempted = (
+            validation.attempted_check_keys
+            or validation.newly_passed_check_keys
+        )
+        accepted_set = set(validation.newly_passed_check_keys)
+
         candidates: list[MemoryCandidate] = []
         for check_key in validation.newly_passed_check_keys:
             candidate_id = f"mem-{uuid.uuid4().hex[:8]}"
@@ -120,22 +142,21 @@ class MemoryManager:
                 content=f"Verified acceptance check {check_key}",
                 memory_type="fact",
                 evidence_ids=list(validation.evidence_ids),
-                referenced_check_keys=[check_key],
+                referenced_check_keys=list(attempted),
+                accepted_check_keys=[
+                    key for key in attempted if key in accepted_set
+                ],
                 source_loop_ids=[loop_id],
                 source_candidate_state_id=validation.candidate_state_id,
                 source_validation_id=validation.id,
                 source_best_state_id=best.state_id if best is not None else None,
-                # v0.5c.0: only "proposed" is emitted. Promotion to
-                # "approved"/"rejected"/"expired"/"superseded" lands in
-                # v0.6 — it'll be a pure repo write against the row we
-                # already persist here.
                 state="proposed",
                 expires_at=expires_at,
             )
             candidate.action_verified = action_verified(
                 candidate, best_evidence_ids
             )
-            candidate.reusable = reusable(candidate, task_id=task_id)
+            candidate.reusable = reusable(candidate)
             candidate.non_volatile = non_volatile(candidate, self.repo)
             candidate.traceable = traceable(candidate, best_evidence_ids)
 
