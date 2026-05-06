@@ -513,3 +513,245 @@ def test_cli_fix_d4_succeeds(context: CliContext) -> None:
         cli, ["repair-state", "task-1", "--check"], obj=context
     )
     assert result2.exit_code == 0
+
+
+# ---------------------------------------------------------------------------
+# D8-D13 detectors (PRD §13 / D1-04..09)
+# ---------------------------------------------------------------------------
+
+
+def test_detect_d8_accepted_check_missing_validation(
+    context: CliContext, service: RepairStateService
+) -> None:
+    """D8 — accepted_checks references a validation_id that was never
+    persisted. Same predicate as D7 but tagged corruption so --check
+    exits 2."""
+    repo = context.repo
+    repo.create_task("task-1", "Goal")
+    repo.save_accepted_check(
+        task_id="task-1",
+        check_key="H-001:0",
+        hunger_item_id="H-001",
+        check_index=0,
+        accepted_at_loop=1,
+        validation_id="VAL-missing",
+        evidence_id=None,
+    )
+    divs = service.detect("task-1")
+    d8 = [d for d in divs if d.kind == "D8"]
+    assert d8, "expected a D8 row when validation_id is dangling"
+    assert d8[0].corruption is True
+
+
+def test_detect_d9_best_state_missing_validation(
+    context: CliContext, service: RepairStateService
+) -> None:
+    """D9 — best_state.validation_id references a missing validation row."""
+    from hungerloop.models.blackboard import BestState
+
+    repo = context.repo
+    repo.create_task("task-1", "Goal")
+    repo.save_best_state(
+        BestState(
+            task_id="task-1",
+            state_id="STATE-1",
+            summary="seed",
+            validation_id="VAL-gone",
+        )
+    )
+    divs = service.detect("task-1")
+    d9 = [d for d in divs if d.kind == "D9"]
+    assert d9
+    assert d9[0].corruption is True
+
+
+def test_detect_d10_stopped_no_stop_report(
+    context: CliContext, service: RepairStateService
+) -> None:
+    """D10 — task row marked stopped but no StopReport persisted.
+
+    Construct the divergent state directly: create the task and
+    manually flip its status to ``stopped`` without a StopReport.
+    """
+    repo = context.repo
+    repo.create_task("task-1", "Goal")
+    # Directly mutate the in-memory TaskRecord to mark stopped.
+    task = repo.get_task("task-1")
+    assert task is not None
+    repo._tasks["task-1"] = task.model_copy(update={"status": "stopped"})  # type: ignore[attr-defined]
+
+    divs = service.detect("task-1")
+    d10 = [d for d in divs if d.kind == "D10"]
+    assert d10
+    assert d10[0].corruption is False
+
+
+def test_detect_d11_usage_drift_above_threshold(
+    context: CliContext, service: RepairStateService
+) -> None:
+    """D11 — usage_snapshot diverges from evidence sum by more than 5%."""
+    repo = context.repo
+    repo.create_task("task-1", "Goal")
+    repo.save_model_call_as_evidence(
+        task_id="task-1",
+        loop_id=1,
+        agent_id="a1",
+        provider="openai",
+        model="gpt-4o-mini",
+        input_tokens=100,
+        output_tokens=200,
+        cost_usd=0.10,
+        response_preview="{}",
+    )
+    # Stomp the snapshot with a wildly-wrong number to trigger drift.
+    from hungerloop.models.usage import UsageSnapshot
+
+    repo.save_usage_snapshot(
+        UsageSnapshot(
+            task_id="task-1",
+            tokens=10,  # evidence sum is 300
+            cost_usd=0.01,  # evidence sum is 0.10
+            llm_calls=1,
+            tool_calls=0,
+        )
+    )
+    divs = service.detect("task-1")
+    d11 = [d for d in divs if d.kind == "D11"]
+    assert d11
+
+
+def test_detect_d11_usage_in_tolerance(
+    context: CliContext, service: RepairStateService
+) -> None:
+    """D11 — within-5% drift does not fire."""
+    repo = context.repo
+    repo.create_task("task-1", "Goal")
+    repo.save_model_call_as_evidence(
+        task_id="task-1",
+        loop_id=1,
+        agent_id="a1",
+        provider="openai",
+        model="gpt-4o-mini",
+        input_tokens=100,
+        output_tokens=100,
+        cost_usd=0.10,
+        response_preview="{}",
+    )
+    # save_model_call_as_evidence already bumped the snapshot to the
+    # canonical totals. Detection should be clean.
+    divs = service.detect("task-1")
+    assert not [d for d in divs if d.kind == "D11"]
+
+
+def test_detect_d12_terminal_candidate_with_workspace(
+    context: CliContext, service: RepairStateService
+) -> None:
+    """D12 — candidate row marked rejected but workspace dir still in
+    candidates/ (real moves go to rejected/)."""
+    ws = WorkspaceManager(context.workspace_root)
+    repo = context.repo
+    repo.create_task("task-1", "Goal")
+    candidate_path = ws.create_candidate_workspace("task-1", loop_id=1)
+    cand = CandidateState(
+        id="cand-1",
+        task_id="task-1",
+        loop_id=1,
+        summary="x",
+        workspace_ref=str(candidate_path),
+    )
+    repo.save_candidate(cand)
+    repo.mark_candidate_rejected("cand-1")
+
+    divs = service.detect("task-1")
+    d12 = [d for d in divs if d.kind == "D12"]
+    assert d12
+
+
+def test_detect_d13_event_with_no_loop_trace(
+    context: CliContext, service: RepairStateService
+) -> None:
+    """D13 — event references loop_id with no LoopTrace row."""
+    from hungerloop.models.events import EventType
+
+    repo = context.repo
+    repo.create_task("task-1", "Goal")
+    repo.append_event(
+        EventType.LOOP_STARTED, {}, task_id="task-1", loop_id=42
+    )
+    # No LoopTrace saved for loop 42 → orphan.
+    divs = service.detect("task-1")
+    d13 = [d for d in divs if d.kind == "D13"]
+    assert d13
+
+
+# ---------------------------------------------------------------------------
+# D10 / D11 fixes (PRD §13 / FR-12)
+# ---------------------------------------------------------------------------
+
+
+def test_apply_fix_d10_synthesises_stop_report(
+    context: CliContext, service: RepairStateService
+) -> None:
+    repo = context.repo
+    repo.create_task("task-1", "Goal")
+    repo.save_loop_trace(
+        LoopTrace(
+            task_id="task-1",
+            loop_id=7,
+            phase="explore",
+            active_hunger=10.0,
+            drive_budget=10.0,
+            work_pressure=5.0,
+            committed=False,
+        )
+    )
+    task = repo.get_task("task-1")
+    assert task is not None
+    repo._tasks["task-1"] = task.model_copy(update={"status": "stopped"})  # type: ignore[attr-defined]
+
+    divs = [d for d in service.detect("task-1") if d.kind == "D10"]
+    assert divs
+    outcome = service.apply_fix(divs[0])
+    assert outcome.fixed is True
+    last = repo.get_last_stop_report("task-1")
+    assert last is not None
+    assert last.last_loop_id == 7
+    assert "auto-recovered" in last.recommendation
+
+
+def test_apply_fix_d11_recomputes_usage(
+    context: CliContext, service: RepairStateService
+) -> None:
+    repo = context.repo
+    repo.create_task("task-1", "Goal")
+    repo.save_model_call_as_evidence(
+        task_id="task-1",
+        loop_id=1,
+        agent_id="a1",
+        provider="openai",
+        model="gpt-4o-mini",
+        input_tokens=100,
+        output_tokens=200,
+        cost_usd=0.10,
+        response_preview="{}",
+    )
+    from hungerloop.models.usage import UsageSnapshot
+
+    repo.save_usage_snapshot(
+        UsageSnapshot(
+            task_id="task-1",
+            tokens=10,
+            cost_usd=0.01,
+            llm_calls=1,
+            tool_calls=0,
+        )
+    )
+    divs = [d for d in service.detect("task-1") if d.kind == "D11"]
+    assert divs
+    outcome = service.apply_fix(divs[0])
+    assert outcome.fixed is True
+    snap = repo.get_usage_snapshot("task-1")
+    # Recomputed totals match the evidence row.
+    assert snap.tokens == 300
+    assert abs(snap.cost_usd - 0.10) < 1e-6
+    assert snap.llm_calls == 1

@@ -86,6 +86,15 @@ class RepositoryProtocol(Protocol):
     """New in v0.5d.0 (D0-01 / FR-1): single-candidate lookup; returns
     None when the id is unknown."""
 
+    def candidate_status(
+        self, candidate_id: str
+    ) -> Literal["pending", "committed", "rejected", "missing"]: ...
+    """New in v0.5d.1 (D1-08 / FR-1): expose the candidate-row status so
+    the D12 detector can cross-reference workspace dirs against
+    terminal rows without reaching into ``InMemoryRepository`` private
+    sets. Returns ``"missing"`` for unknown ids so callers don't need a
+    second null check."""
+
     # =====================================================================
     # Section 3 — Validation
     # =====================================================================
@@ -232,6 +241,20 @@ class RepositoryProtocol(Protocol):
     task; used by ``hungerloop report`` to surface the last loop's
     delta_summary and by ``hungerloop trace export`` (v0.5c.1)."""
     """New in v0.5a (§28 / N2)."""
+
+    def get_loop_trace(self, task_id: str, loop_id: int) -> LoopTrace | None: ...
+    """New in v0.5d.1 (D0-01 / FR-1): single-trace lookup keyed by
+    ``(task_id, loop_id)``. Returns ``None`` when the trace is missing
+    — used by the repair-state D13 detector to flag orphaned event
+    rows that reference a non-existent loop."""
+
+    def aggregate_evidence_usage(self, task_id: str) -> UsageSnapshot: ...
+    """New in v0.5d.1 (D1-07): recompute usage totals by walking the
+    evidence rows for ``task_id``. Used by the D11 detector to
+    cross-check ``usage_snapshots`` against the source-of-truth
+    evidence rows; the returned :class:`UsageSnapshot` is *not*
+    persisted unless the caller (``repair-state --apply``) explicitly
+    writes it back."""
 
     def save_stop_report(self, report: StopReport) -> None: ...
     """New in v0.5a (§28.15): implementations keep a history list."""

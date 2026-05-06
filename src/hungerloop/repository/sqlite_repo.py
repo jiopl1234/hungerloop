@@ -408,6 +408,20 @@ class SQLiteRepository:
             return None
         return CandidateState.model_validate(_loads(str(row["payload_json"])))
 
+    def candidate_status(
+        self, candidate_id: str
+    ) -> Literal["pending", "committed", "rejected", "missing"]:
+        row = self.conn.execute(
+            "SELECT status FROM candidates WHERE candidate_id = ?",
+            (candidate_id,),
+        ).fetchone()
+        if row is None:
+            return "missing"
+        status = str(row["status"])
+        if status in {"pending", "committed", "rejected"}:
+            return status  # type: ignore[return-value]
+        return "missing"
+
     # =====================================================================
     # Section 3 — Validation
     # =====================================================================
@@ -805,6 +819,18 @@ class SQLiteRepository:
             for row in rows
         ]
 
+    def get_loop_trace(self, task_id: str, loop_id: int) -> LoopTrace | None:
+        row = self.conn.execute(
+            """
+            SELECT payload_json FROM loop_traces
+            WHERE task_id = ? AND loop_id = ?
+            """,
+            (task_id, loop_id),
+        ).fetchone()
+        if row is None:
+            return None
+        return LoopTrace.model_validate(_loads(str(row["payload_json"])))
+
     def save_stop_report(self, report: StopReport) -> None:
         self._ensure_task(report.task_id)
         now = _utc_now()
@@ -876,6 +902,42 @@ class SQLiteRepository:
 
     def save_usage_snapshot(self, snapshot: UsageSnapshot) -> None:
         self._upsert_usage(snapshot)
+
+    def aggregate_evidence_usage(self, task_id: str) -> UsageSnapshot:
+        rows = self.conn.execute(
+            """
+            SELECT evidence_type, payload_json
+            FROM evidence
+            WHERE task_id = ?
+              AND evidence_type IN (?, ?)
+            """,
+            (
+                task_id,
+                EvidenceType.MODEL_CALL.value,
+                EvidenceType.TOOL_CALL.value,
+            ),
+        ).fetchall()
+        tokens = 0
+        cost = 0.0
+        llm = 0
+        tool = 0
+        for row in rows:
+            payload = _loads(str(row["payload_json"]))
+            if row["evidence_type"] == EvidenceType.MODEL_CALL.value:
+                tokens += int(payload.get("input_tokens", 0)) + int(
+                    payload.get("output_tokens", 0)
+                )
+                cost += float(payload.get("cost_usd", 0.0))
+                llm += 1
+            else:
+                tool += 1
+        return UsageSnapshot(
+            task_id=task_id,
+            tokens=tokens,
+            cost_usd=cost,
+            llm_calls=llm,
+            tool_calls=tool,
+        )
 
     def append_event(
         self,

@@ -25,11 +25,27 @@ from typing import Literal
 
 from pydantic import BaseModel
 
+from hungerloop.models.enums import StopReason
 from hungerloop.models.events import EventType
+from hungerloop.models.tracing import StopReport
 from hungerloop.repository.protocol import RepositoryProtocol
 from hungerloop.services.workspace_manager import WorkspaceManager, _sha256_of_file
 
-DivergenceKind = Literal["D1", "D2", "D3", "D4", "D5", "D6", "D7"]
+DivergenceKind = Literal[
+    "D1",
+    "D2",
+    "D3",
+    "D4",
+    "D5",
+    "D6",
+    "D7",
+    "D8",
+    "D9",
+    "D10",
+    "D11",
+    "D12",
+    "D13",
+]
 
 
 class Divergence(BaseModel):
@@ -90,15 +106,27 @@ class RepairStateService:
     def detect(self, task_id: str) -> list[Divergence]:
         """Return every divergence row we find for ``task_id``.
 
-        Empty list = clean (D1 across the board). Order is stable: D2 →
-        D3 → D4 → D5 → D6 → D7 so the CLI's stdout summary is easy to
-        diff between runs.
+        Empty list = clean (D1 across the board). Order is stable so the
+        CLI's stdout summary is easy to diff between runs:
+
+        D2 → D3 → D4 (manifest) → D5 (orphan candidates) → D6 (stale
+        lock) → D7 (dangling validation, deferred fix) → D8 (accepted
+        checks → missing validation, corruption) → D9 (best_state →
+        missing validation, corruption) → D10 (stopped task with no
+        StopReport) → D11 (usage snapshot drift) → D12 (workspace ↔
+        candidate row mismatch) → D13 (event references missing trace).
         """
         divergences: list[Divergence] = []
         divergences.extend(self._detect_best_manifest(task_id))
         divergences.extend(self._detect_orphan_candidates(task_id))
         divergences.extend(self._detect_stale_lock(task_id))
         divergences.extend(self._detect_dangling_accepted_checks(task_id))
+        divergences.extend(self._detect_d8_accepted_missing_validation(task_id))
+        divergences.extend(self._detect_d9_best_state_missing_validation(task_id))
+        divergences.extend(self._detect_d10_stopped_no_report(task_id))
+        divergences.extend(self._detect_d11_usage_drift(task_id))
+        divergences.extend(self._detect_d12_candidate_workspace_mismatch(task_id))
+        divergences.extend(self._detect_d13_event_orphans(task_id))
         return divergences
 
     def _detect_best_manifest(self, task_id: str) -> list[Divergence]:
@@ -303,6 +331,175 @@ class RepairStateService:
                 )
         return divergences
 
+    def _detect_d8_accepted_missing_validation(
+        self, task_id: str
+    ) -> list[Divergence]:
+        """D8 — same predicate as D7, but tagged corruption.
+
+        D7 was the v0.5b.0 detection-only flavour (warning-only); D8
+        re-classifies the *exact same* dangling row as corruption per
+        PRD §13 (FR-9) so ``--check`` exits 2 and operators are forced
+        to restore from backup or re-run validation. Both rows fire on
+        the same divergence so v0.5b.1 audit trails surface either form
+        depending on the operator's --apply path.
+        """
+        divergences: list[Divergence] = []
+        for record in self.repo.iter_accepted_checks(task_id):
+            validation_id = record.get("validation_id")
+            check_key = record.get("check_key")
+            if not isinstance(validation_id, str) or not isinstance(check_key, str):
+                continue
+            if not self.repo.validation_exists(validation_id):
+                divergences.append(
+                    Divergence(
+                        kind="D8",
+                        target=f"{task_id}:{check_key}",
+                        detail=(
+                            f"accepted_checks references missing "
+                            f"validation_id={validation_id!r} (corruption)"
+                        ),
+                        corruption=True,
+                    )
+                )
+        return divergences
+
+    def _detect_d9_best_state_missing_validation(
+        self, task_id: str
+    ) -> list[Divergence]:
+        """D9 — ``best_state.validation_id`` references a missing validation row."""
+        best = self.repo.get_best_state(task_id)
+        if best is None or best.validation_id is None:
+            return []
+        if self.repo.validation_exists(best.validation_id):
+            return []
+        return [
+            Divergence(
+                kind="D9",
+                target=f"{task_id}:{best.state_id}",
+                detail=(
+                    f"best_state.validation_id={best.validation_id!r} not "
+                    "present in validation_reports"
+                ),
+                corruption=True,
+            )
+        ]
+
+    def _detect_d10_stopped_no_report(self, task_id: str) -> list[Divergence]:
+        """D10 — task row marked stopped but no StopReport persisted."""
+        task = self.repo.get_task(task_id)
+        if task is None or task.status != "stopped":
+            return []
+        if self.repo.get_last_stop_report(task_id) is not None:
+            return []
+        return [
+            Divergence(
+                kind="D10",
+                target=task_id,
+                detail=(
+                    "task.status='stopped' but no StopReport row exists; "
+                    "auto-recoverable via --apply"
+                ),
+                corruption=False,
+            )
+        ]
+
+    def _detect_d11_usage_drift(self, task_id: str) -> list[Divergence]:
+        """D11 — ``usage_snapshot`` differs from sum of evidence rows by >5%
+        on either tokens or cost (whichever is larger)."""
+        recomputed = self.repo.aggregate_evidence_usage(task_id)
+        snapshot = self.repo.get_usage_snapshot(task_id)
+        # Missing snapshot when evidence exists is a divergence; but a
+        # truly-empty task (no evidence rows, no snapshot) is clean.
+        if (
+            recomputed.tokens == 0
+            and recomputed.cost_usd == 0.0
+            and recomputed.llm_calls == 0
+            and recomputed.tool_calls == 0
+            and snapshot.tokens == 0
+            and snapshot.cost_usd == 0.0
+            and snapshot.llm_calls == 0
+            and snapshot.tool_calls == 0
+        ):
+            return []
+
+        tokens_drift = _ratio(snapshot.tokens, recomputed.tokens)
+        cost_drift = _ratio(snapshot.cost_usd, recomputed.cost_usd)
+        worst = max(tokens_drift, cost_drift)
+        if worst <= 0.05:
+            return []
+        return [
+            Divergence(
+                kind="D11",
+                target=task_id,
+                detail=(
+                    f"usage_snapshot drifted from evidence sum by "
+                    f"{worst * 100:.1f}% "
+                    f"(snapshot: tokens={snapshot.tokens}, "
+                    f"cost=${snapshot.cost_usd:.4f}; "
+                    f"evidence: tokens={recomputed.tokens}, "
+                    f"cost=${recomputed.cost_usd:.4f})"
+                ),
+                corruption=False,
+            )
+        ]
+
+    def _detect_d12_candidate_workspace_mismatch(
+        self, task_id: str
+    ) -> list[Divergence]:
+        """D12 — candidate workspace dir exists but row marks loop terminal."""
+        candidates_root = self._workspace.task_root(task_id) / "candidates"
+        if not candidates_root.exists():
+            return []
+        terminal_ids: set[int] = set()
+        for cand in self.repo.list_candidates_for_task(task_id):
+            if self.repo.candidate_status(cand.id) in {"committed", "rejected"}:
+                terminal_ids.add(cand.loop_id)
+
+        divergences: list[Divergence] = []
+        for entry in sorted(candidates_root.iterdir()):
+            if not entry.is_dir():
+                continue
+            loop_id = _parse_loop_dir(entry.name)
+            if loop_id is None or loop_id not in terminal_ids:
+                continue
+            divergences.append(
+                Divergence(
+                    kind="D12",
+                    target=str(entry),
+                    detail=(
+                        f"candidate row for loop_{loop_id:03d} is marked "
+                        "committed/rejected but the candidate workspace "
+                        "still lives in candidates/"
+                    ),
+                    corruption=False,
+                )
+            )
+        return divergences
+
+    def _detect_d13_event_orphans(self, task_id: str) -> list[Divergence]:
+        """D13 — event references a loop_id with no LoopTrace row."""
+        events = self.repo.list_events(task_id)
+        seen_loops: set[int] = set()
+        divergences: list[Divergence] = []
+        for ev in events:
+            loop_id = ev.get("loop_id")
+            if not isinstance(loop_id, int) or loop_id in seen_loops:
+                continue
+            if self.repo.get_loop_trace(task_id, loop_id) is None:
+                divergences.append(
+                    Divergence(
+                        kind="D13",
+                        target=f"{task_id}:loop_{loop_id:03d}",
+                        detail=(
+                            f"event log references loop_id={loop_id} "
+                            "but no LoopTrace row exists"
+                        ),
+                        corruption=False,
+                    )
+                )
+            seen_loops.add(loop_id)
+        return divergences
+
     # -----------------------------------------------------------------
     # Repair
     # -----------------------------------------------------------------
@@ -341,7 +538,20 @@ class RepairStateService:
                     "or restore from backup"
                 ),
             )
-        # D1/D2/D3 are not user-fixable (D1 is clean; D2/D3 returned above).
+        if divergence.kind == "D10":
+            return self._fix_d10(divergence)
+        if divergence.kind == "D11":
+            return self._fix_d11(divergence)
+        if divergence.kind in {"D12", "D13"}:
+            return self._refuse(
+                divergence,
+                summary=(
+                    f"{divergence.kind} is detection-only; restore from "
+                    "backup or re-run validation manually"
+                ),
+            )
+        # D1/D2/D3/D8/D9 are not user-fixable (D1 is clean; the rest are
+        # corruption that returned above before this dispatch).
         return self._refuse(divergence, summary="no fix path for this divergence")
 
     def _fix_d4(self, divergence: Divergence) -> FixOutcome:
@@ -436,6 +646,60 @@ class RepairStateService:
         )
         return FixOutcome(fixed=True, summary=summary)
 
+    def _fix_d10(self, divergence: Divergence) -> FixOutcome:
+        """Synthesise a StopReport from the latest LoopTrace (PRD §13 / FR-12)."""
+        task_id = divergence.target
+        traces = self.repo.list_loop_traces(task_id)
+        if not traces:
+            return self._refuse(
+                divergence,
+                summary=(
+                    f"no LoopTrace rows for task {task_id}; cannot synthesise "
+                    "a StopReport — restore from backup or re-run the task"
+                ),
+            )
+        latest = traces[-1]
+        report = StopReport(
+            task_id=task_id,
+            stop_reason=StopReason.ERROR,
+            goal_status="abandoned",
+            last_loop_id=latest.loop_id,
+            recommendation="auto-recovered by repair-state --apply (D10)",
+        )
+        self.repo.save_stop_report(report)
+        summary = (
+            f"synthesised StopReport(stop_reason=ERROR) for task {task_id} "
+            f"from loop {latest.loop_id} trace"
+        )
+        self._emit_event(
+            task_id=task_id,
+            kind="D10",
+            action="fix",
+            target=task_id,
+            summary=summary,
+        )
+        return FixOutcome(fixed=True, summary=summary)
+
+    def _fix_d11(self, divergence: Divergence) -> FixOutcome:
+        """Recompute usage_snapshot from evidence rows; persist (PRD §13 / FR-12)."""
+        task_id = divergence.target
+        recomputed = self.repo.aggregate_evidence_usage(task_id)
+        self.repo.save_usage_snapshot(recomputed)
+        summary = (
+            f"rewrote usage_snapshot for task {task_id} from evidence "
+            f"(tokens={recomputed.tokens}, cost=${recomputed.cost_usd:.4f}, "
+            f"llm_calls={recomputed.llm_calls}, "
+            f"tool_calls={recomputed.tool_calls})"
+        )
+        self._emit_event(
+            task_id=task_id,
+            kind="D11",
+            action="fix",
+            target=task_id,
+            summary=summary,
+        )
+        return FixOutcome(fixed=True, summary=summary)
+
     def _refuse(
         self, divergence: Divergence, *, summary: str
     ) -> FixOutcome:
@@ -496,3 +760,18 @@ def _parse_loop_dir(name: str) -> int | None:
     if not suffix.isdigit():
         return None
     return int(suffix)
+
+
+def _ratio(actual: float | int, expected: float | int) -> float:
+    """Return the absolute relative drift between two scalars.
+
+    ``ratio(0, 0) == 0`` (no drift on a fully-empty pair); when
+    ``expected`` is zero but ``actual`` is not, the divergence is
+    treated as 100% (``1.0``) so the D11 detector flags an orphan
+    snapshot. Otherwise ``abs(actual - expected) / abs(expected)``.
+    """
+    if expected == 0 and actual == 0:
+        return 0.0
+    if expected == 0:
+        return 1.0
+    return abs(float(actual) - float(expected)) / abs(float(expected))

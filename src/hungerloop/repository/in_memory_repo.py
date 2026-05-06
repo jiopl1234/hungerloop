@@ -216,6 +216,17 @@ class InMemoryRepository:
     def get_candidate(self, candidate_id: str) -> CandidateState | None:
         return self._candidates.get(candidate_id)
 
+    def candidate_status(
+        self, candidate_id: str
+    ) -> Literal["pending", "committed", "rejected", "missing"]:
+        if candidate_id not in self._candidates:
+            return "missing"
+        if candidate_id in self._committed:
+            return "committed"
+        if candidate_id in self._rejected:
+            return "rejected"
+        return "pending"
+
     # =====================================================================
     # Section 3 — Validation
     # =====================================================================
@@ -457,6 +468,9 @@ class InMemoryRepository:
             if tid == task_id
         ]
 
+    def get_loop_trace(self, task_id: str, loop_id: int) -> LoopTrace | None:
+        return self._loop_traces.get((task_id, loop_id))
+
     def save_stop_report(self, report: StopReport) -> None:
         self._stop_reports_history.setdefault(report.task_id, []).append(report)
         task = self._tasks.get(report.task_id)
@@ -488,6 +502,36 @@ class InMemoryRepository:
 
     def save_usage_snapshot(self, snapshot: UsageSnapshot) -> None:
         self._usage[snapshot.task_id] = snapshot.model_copy()
+
+    def aggregate_evidence_usage(self, task_id: str) -> UsageSnapshot:
+        tokens = 0
+        cost = 0.0
+        llm = 0
+        tool = 0
+        for row in self._evidence.values():
+            if row.get("task_id") != task_id:
+                continue
+            ev_type = row.get("type")
+            if ev_type == EvidenceType.MODEL_CALL.value:
+                input_tokens = row.get("input_tokens", 0)
+                output_tokens = row.get("output_tokens", 0)
+                cost_usd = row.get("cost_usd", 0.0)
+                if isinstance(input_tokens, int):
+                    tokens += input_tokens
+                if isinstance(output_tokens, int):
+                    tokens += output_tokens
+                if isinstance(cost_usd, (int, float)):
+                    cost += float(cost_usd)
+                llm += 1
+            elif ev_type == EvidenceType.TOOL_CALL.value:
+                tool += 1
+        return UsageSnapshot(
+            task_id=task_id,
+            tokens=tokens,
+            cost_usd=cost,
+            llm_calls=llm,
+            tool_calls=tool,
+        )
 
     def append_event(
         self,
