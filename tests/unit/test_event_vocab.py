@@ -59,6 +59,75 @@ def test_v0_5b_additions_present() -> None:
     assert expected <= actual
 
 
+def test_v0_5d_additions_present() -> None:
+    """v0.5d.0 (PRD §7.3) extends the lifecycle vocabulary with the
+    fine-grained per-loop event names emitted by the orchestrator,
+    worker runtime, model client, tool harness, and validation gate.
+    All additive — no shipped value renamed.
+    """
+    expected = {
+        # Loop / worker
+        "loop_planned",
+        "worker_started",
+        "worker_finished",
+        "worker_failed",
+        # Model calls
+        "model_call_started",
+        "model_call_succeeded",
+        "model_call_failed",
+        "model_auth_required",
+        "model_rate_limited",
+        # Tool calls
+        "tool_call_started",
+        "tool_call_succeeded",
+        "tool_call_failed",
+        # Validation
+        "validation_started",
+        "validation_finished",
+        "check_passed",
+        "check_failed",
+        "check_regressed",
+        # Candidate lifecycle
+        "candidate_created",
+        "candidate_committed",
+        "candidate_rejected",
+        # Stop
+        "stop_report_created",
+        "error",
+    }
+    actual = {m.value for m in EventType}
+    assert expected <= actual
+
+
+def test_no_shipped_event_value_renamed() -> None:
+    """Wire-contract regression net (PRD §7.2) — every value that ever
+    shipped to operators must remain in the enum. Adding to this set
+    when a new release ships is a one-line change; removing from it is
+    forbidden without a coordinated migration.
+    """
+    shipped_values_through_v0_5b_c = {
+        "loop_started",
+        "loop_committed",
+        "loop_rejected",
+        "hunger_resumed",
+        "hunger_frozen",
+        "hunger_refilled",
+        "human_unblocked_hunger_item",
+        "cost_ceiling_raised",
+        "safety_stop",
+        "human_required",
+        "cost_reconciliation",
+        "unknown_model_pricing",
+        "lock_stolen",
+        "repair_state_action",
+        "memory_candidate_emitted",
+        "skill_card_emitted",
+    }
+    actual = {m.value for m in EventType}
+    missing = shipped_values_through_v0_5b_c - actual
+    assert not missing, f"Shipped event values dropped: {missing}"
+
+
 def test_append_event_stores_string_value_not_enum() -> None:
     """Storage uses ``.value`` so SQL TEXT columns stay plain."""
     repo = InMemoryRepository()

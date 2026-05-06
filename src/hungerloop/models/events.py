@@ -27,8 +27,38 @@ class EventType(str, Enum):
 
     # ----- Loop lifecycle ------------------------------------------------
     LOOP_STARTED = "loop_started"
+    LOOP_PLANNED = "loop_planned"  # v0.5d.0 (PRD §7.3)
     LOOP_COMMITTED = "loop_committed"
     LOOP_REJECTED = "loop_rejected"
+
+    # ----- Worker invocations (v0.5d.0) ---------------------------------
+    WORKER_STARTED = "worker_started"
+    WORKER_FINISHED = "worker_finished"
+    WORKER_FAILED = "worker_failed"
+
+    # ----- Model calls (v0.5d.0) ----------------------------------------
+    MODEL_CALL_STARTED = "model_call_started"
+    MODEL_CALL_SUCCEEDED = "model_call_succeeded"
+    MODEL_CALL_FAILED = "model_call_failed"
+    MODEL_AUTH_REQUIRED = "model_auth_required"
+    MODEL_RATE_LIMITED = "model_rate_limited"
+
+    # ----- Tool calls (v0.5d.0) -----------------------------------------
+    TOOL_CALL_STARTED = "tool_call_started"
+    TOOL_CALL_SUCCEEDED = "tool_call_succeeded"
+    TOOL_CALL_FAILED = "tool_call_failed"
+
+    # ----- Validation + check-level verdicts (v0.5d.0) ------------------
+    VALIDATION_STARTED = "validation_started"
+    VALIDATION_FINISHED = "validation_finished"
+    CHECK_PASSED = "check_passed"
+    CHECK_FAILED = "check_failed"
+    CHECK_REGRESSED = "check_regressed"
+
+    # ----- Candidate decisions (v0.5d.0) --------------------------------
+    CANDIDATE_CREATED = "candidate_created"
+    CANDIDATE_COMMITTED = "candidate_committed"
+    CANDIDATE_REJECTED = "candidate_rejected"
 
     # ----- Hunger -------------------------------------------------------
     HUNGER_RESUMED = "hunger_resumed"
@@ -40,6 +70,8 @@ class EventType(str, Enum):
     # ----- Stops --------------------------------------------------------
     SAFETY_STOP = "safety_stop"
     HUMAN_REQUIRED = "human_required"
+    STOP_REPORT_CREATED = "stop_report_created"  # v0.5d.0 (PRD §7.3)
+    ERROR = "error"  # v0.5d.0 — orchestrator caught a non-stop exception
 
     # ----- Cost / pricing -----------------------------------------------
     COST_RECONCILIATION = "cost_reconciliation"  # PRD §8.7.1
