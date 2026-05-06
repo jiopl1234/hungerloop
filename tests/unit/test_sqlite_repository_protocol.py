@@ -12,6 +12,7 @@ from hungerloop.models.memory import MemoryCandidate
 from hungerloop.models.planning import LoopPlan
 from hungerloop.models.skill import SkillCard
 from hungerloop.models.tracing import LoopTrace, StopReport
+from hungerloop.models.usage import UsageSnapshot
 from hungerloop.models.worker import AgentSpec, WorkerResult
 from hungerloop.repository.sqlite_repo import SQLiteRepository
 
@@ -86,6 +87,43 @@ def test_sqlite_repository_evidence_usage_events_and_artifacts(
     assert repo.list_events("t1")[0]["event_type"] == "loop_started"
     assert len(repo.list_events("t1")) == 1
     assert repo.get_artifacts_by_ids(["art-1"])[0].artifact_type == "file"
+
+
+def test_save_usage_snapshot_upserts_and_survives_restart(tmp_path: Path) -> None:
+    """D0-08: explicit ``save_usage_snapshot`` upserts and persists across
+    restart, regardless of whether evidence rows were ever written."""
+    db = tmp_path / "hungerloop.sqlite"
+    repo = SQLiteRepository.open(db)
+    repo.create_task("t1", "Goal")
+
+    # First write: insert path.
+    repo.save_usage_snapshot(
+        UsageSnapshot(
+            task_id="t1",
+            tokens=100,
+            cost_usd=0.25,
+            llm_calls=2,
+            tool_calls=5,
+        )
+    )
+
+    # Second write: upsert path — overwrites, does not double-count.
+    repo.save_usage_snapshot(
+        UsageSnapshot(
+            task_id="t1",
+            tokens=200,
+            cost_usd=0.50,
+            llm_calls=4,
+            tool_calls=10,
+        )
+    )
+
+    reopened = SQLiteRepository.open(db)
+    snap = reopened.get_usage_snapshot("t1")
+    assert snap.tokens == 200
+    assert snap.cost_usd == 0.50
+    assert snap.llm_calls == 4
+    assert snap.tool_calls == 10
 
 
 def test_sqlite_repository_successful_only_evidence_count(tmp_path: Path) -> None:

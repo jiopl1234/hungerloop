@@ -459,6 +459,9 @@ class InMemoryRepository:
     def get_usage_snapshot(self, task_id: str) -> UsageSnapshot:
         return self._usage.setdefault(task_id, UsageSnapshot(task_id=task_id))
 
+    def save_usage_snapshot(self, snapshot: UsageSnapshot) -> None:
+        self._usage[snapshot.task_id] = snapshot.model_copy()
+
     def append_event(
         self,
         event_type: EventType,

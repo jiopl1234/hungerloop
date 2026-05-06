@@ -806,6 +806,9 @@ class SQLiteRepository:
             tool_calls=int(row["tool_calls"]),
         )
 
+    def save_usage_snapshot(self, snapshot: UsageSnapshot) -> None:
+        self._upsert_usage(snapshot)
+
     def append_event(
         self,
         event_type: EventType,

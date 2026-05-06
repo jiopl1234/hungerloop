@@ -219,6 +219,15 @@ class RepositoryProtocol(Protocol):
     counters. Read by Orchestrator before and after each loop to compute
     per-loop deltas for LoopTrace."""
 
+    def save_usage_snapshot(self, snapshot: UsageSnapshot) -> None: ...
+    """New in v0.5d.0 (D0-08 / PRD §8.7): explicit upsert path so callers
+    can persist a recomputed snapshot atomically (e.g. BudgetGuard's
+    per-loop reconciliation, tests, and CLI repair flows). The shipped
+    evidence-write paths (``save_model_call_as_evidence`` and
+    ``save_tool_call_as_evidence``) continue to bump usage as a
+    side-effect; this method exists for callers that already hold a
+    fully-formed :class:`UsageSnapshot`."""
+
     def append_event(
         self,
         event_type: EventType,
