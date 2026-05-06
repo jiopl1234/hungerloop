@@ -517,12 +517,40 @@ class InMemoryRepository:
             }
         )
 
-    def list_events(self, task_id: str) -> list[dict[str, object]]:
-        return [
-            row
-            for row in self._events
-            if isinstance(row, dict) and row.get("task_id") == task_id
-        ]
+    def list_events(
+        self,
+        task_id: str,
+        *,
+        since_loop: int | None = None,
+        until_loop: int | None = None,
+        event_types: list[str] | None = None,
+        include_global: bool = False,
+    ) -> list[dict[str, object]]:
+        wanted_types: set[str] | None = (
+            set(event_types) if event_types is not None else None
+        )
+        out: list[dict[str, object]] = []
+        for row in self._events:
+            if not isinstance(row, dict):
+                continue
+            row_task = row.get("task_id")
+            if row_task == task_id:
+                pass
+            elif row_task is None and include_global:
+                pass
+            else:
+                continue
+            row_loop = row.get("loop_id")
+            if since_loop is not None:
+                if not isinstance(row_loop, int) or row_loop < since_loop:
+                    continue
+            if until_loop is not None:
+                if not isinstance(row_loop, int) or row_loop > until_loop:
+                    continue
+            if wanted_types is not None and row.get("event_type") not in wanted_types:
+                continue
+            out.append(row)
+        return out
 
     # =====================================================================
     # Section 7 — Memory / Skill

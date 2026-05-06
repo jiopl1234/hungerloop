@@ -348,7 +348,7 @@ def test_run_raise_cost_ceiling_updates_policy(context: CliContext) -> None:
     runner = CliRunner()
     result = runner.invoke(
         cli,
-        ["run", "t1", "--raise-cost-ceiling", "100.0"],
+        ["run", "t1", "--raise-cost-ceiling", "100.0", "--resume"],
         obj=context,
     )
     # Even though ledger is empty (HungerEngine -> DONE quickly), the CLI

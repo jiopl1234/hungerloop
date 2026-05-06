@@ -271,10 +271,29 @@ class RepositoryProtocol(Protocol):
     stays plain TEXT. Adding new enum members is additive; renaming or
     removing requires a coordinated schema migration."""
 
-    def list_events(self, task_id: str) -> list[dict[str, object]]: ...
-    """Per-task event rows in append order. Global events are intentionally
-    excluded from this query so ``trace export <task_id>`` remains a
-    strict per-task projection."""
+    def list_events(
+        self,
+        task_id: str,
+        *,
+        since_loop: int | None = None,
+        until_loop: int | None = None,
+        event_types: list[str] | None = None,
+        include_global: bool = False,
+    ) -> list[dict[str, object]]: ...
+    """Per-task event rows in append order.
+
+    The shipped behaviour (no kwargs) is unchanged: global events are
+    excluded so ``trace export <task_id>`` stays a strict per-task
+    projection.
+
+    v0.5d.1 (D0-01 / FR-1) adds optional filtering:
+
+    * ``since_loop`` / ``until_loop`` — inclusive ``loop_id`` bounds.
+    * ``event_types`` — restrict to rows whose ``event_type`` is in
+      this list (raw ``EventType.value`` strings).
+    * ``include_global`` — when ``True``, also include rows with
+      ``task_id IS NULL`` so ``hungerloop trace export --include-global``
+      can surface unknown_model_pricing and similar global events."""
 
     # =====================================================================
     # Section 7 — Memory / Skill

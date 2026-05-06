@@ -895,16 +895,40 @@ class SQLiteRepository:
             (task_id, loop_id, event_type.value, json.dumps(payload), _utc_now()),
         )
 
-    def list_events(self, task_id: str) -> list[dict[str, object]]:
-        rows = self.conn.execute(
-            """
+    def list_events(
+        self,
+        task_id: str,
+        *,
+        since_loop: int | None = None,
+        until_loop: int | None = None,
+        event_types: list[str] | None = None,
+        include_global: bool = False,
+    ) -> list[dict[str, object]]:
+        clauses: list[str] = []
+        params: list[object] = []
+        if include_global:
+            clauses.append("(task_id = ? OR task_id IS NULL)")
+            params.append(task_id)
+        else:
+            clauses.append("task_id = ?")
+            params.append(task_id)
+        if since_loop is not None:
+            clauses.append("loop_id >= ?")
+            params.append(since_loop)
+        if until_loop is not None:
+            clauses.append("loop_id <= ?")
+            params.append(until_loop)
+        if event_types:
+            placeholders = ",".join("?" for _ in event_types)
+            clauses.append(f"event_type IN ({placeholders})")
+            params.extend(event_types)
+        sql = f"""
             SELECT task_id, loop_id, event_type, payload_json, created_at
             FROM events
-            WHERE task_id = ?
+            WHERE {" AND ".join(clauses)}
             ORDER BY event_id ASC
-            """,
-            (task_id,),
-        ).fetchall()
+        """
+        rows = self.conn.execute(sql, tuple(params)).fetchall()
         return [
             {
                 "task_id": row["task_id"],

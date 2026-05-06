@@ -123,6 +123,25 @@ def _resolve_stale_threshold(cli_value: int | None) -> int:
         "Cost will be recorded as 0.0 except for token ceilings."
     ),
 )
+@click.option(
+    "--reset",
+    is_flag=True,
+    default=False,
+    help=(
+        "Required to start a new run after a DONE stop_reason. "
+        "Wipes the prior best_state references for this task."
+    ),
+)
+@click.option(
+    "--skip-repair-check",
+    is_flag=True,
+    default=False,
+    help=(
+        "Bypass the ERROR-recovery gate. Audit-logged via "
+        "repair_state_action with action=\"skipped\". Use only after "
+        "repair-state surfaces no fixable divergences."
+    ),
+)
 @click.pass_obj
 def run(
     ctx: CliContext,
@@ -136,6 +155,8 @@ def run(
     lock_stale_sec: int | None,
     model_config_path: Path | None,
     accept_unknown_pricing: bool,
+    reset: bool,
+    skip_repair_check: bool,
 ) -> None:
     """Drive ``task_id`` through the orchestrator until a StopReport.
 
@@ -143,6 +164,18 @@ def run(
     applies any requested refill / unblock / cost-ceiling raises *before*
     preflight, then persists the resulting StopReport per §28.16 / M4.
     """
+    # FR-3 audit: write the override event *before* the preflight so the
+    # gate query sees it and accepts the resume.
+    if skip_repair_check:
+        ctx.repo.append_event(
+            EventType.REPAIR_STATE_ACTION,
+            {
+                "action": "skipped",
+                "reason": "operator override (--skip-repair-check)",
+            },
+            task_id=task_id,
+        )
+
     # Preflight runs *before* overrides so its comparisons (e.g.
     # raise_cost_ceiling vs. current ceiling) see the pre-resume policy.
     try:
@@ -153,6 +186,8 @@ def run(
             unblock_all=unblock_all,
             resume_human=resume_human,
             raise_cost_ceiling=raise_cost_ceiling,
+            reset=reset,
+            skip_repair_check=skip_repair_check,
         )
     except PreflightError as exc:
         click.echo(f"Preflight error: {exc}", err=True)
