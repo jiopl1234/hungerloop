@@ -163,9 +163,12 @@ class RepositoryProtocol(Protocol):
         task_id: str,
         evidence_ids: list[str],
         evidence_type: EvidenceType | str,
+        *,
+        successful_only: bool = False,
     ) -> int: ...
     """Accepts ``EvidenceType`` enum or raw string for backward compatibility
-    (``"any"`` still means "don't filter by type")."""
+    (``"any"`` still means "don't filter by type"). ``successful_only`` counts
+    only evidence rows that prove a successful action or call."""
 
     def get_artifacts_by_ids(self, artifact_ids: list[str]) -> list[Artifact]: ...
 

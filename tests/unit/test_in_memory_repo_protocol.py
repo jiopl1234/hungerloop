@@ -112,6 +112,52 @@ def test_count_evidence_by_type_enum() -> None:
     assert repo.count_evidence_by_type("t1", [e1, e2], "any") == 2
 
 
+def test_count_evidence_by_type_successful_only_filters_failures() -> None:
+    repo = InMemoryRepository()
+    failed_tool = repo.save_tool_call_as_evidence(
+        task_id="t1",
+        loop_id=1,
+        agent_id="a1",
+        tool_name="run_shell",
+        args_summary="argv=<missing>",
+        result_summary="bad_args",
+        success=False,
+        elapsed_ms=1,
+    )
+    failed_shell = repo.save_shell_output_as_evidence(
+        task_id="t1",
+        loop_id=1,
+        label="run_shell",
+        argv=["false"],
+        cwd="/tmp",
+        exit_code=1,
+        stdout="",
+        stderr="",
+        timed_out=False,
+    )
+    good_model = repo.save_model_call_as_evidence(
+        task_id="t1",
+        loop_id=1,
+        agent_id="a1",
+        provider="openai",
+        model="gpt-4o",
+        input_tokens=1,
+        output_tokens=1,
+        cost_usd=0.0,
+        response_preview="",
+    )
+
+    assert repo.count_evidence_by_type(
+        "t1", [failed_tool, failed_shell, good_model], "any"
+    ) == 3
+    assert repo.count_evidence_by_type(
+        "t1",
+        [failed_tool, failed_shell, good_model],
+        "any",
+        successful_only=True,
+    ) == 1
+
+
 def test_agent_spec_round_trip() -> None:
     repo = InMemoryRepository()
     spec = AgentSpec(agent_id="a1", name="Worker", kind="execution")

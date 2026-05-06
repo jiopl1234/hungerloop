@@ -31,6 +31,7 @@ from hungerloop.models.tracing import LoopTrace, StopReport
 from hungerloop.models.usage import UsageSnapshot
 from hungerloop.models.validation import ValidationReport
 from hungerloop.models.worker import AgentSpec, WorkerResult
+from hungerloop.repository.evidence_success import is_successful_evidence_payload
 
 
 class InMemoryRepository:
@@ -355,9 +356,9 @@ class InMemoryRepository:
         task_id: str,
         evidence_ids: list[str],
         evidence_type: EvidenceType | str,
+        *,
+        successful_only: bool = False,
     ) -> int:
-        if evidence_type == "any":
-            return len(evidence_ids)
         wanted = (
             evidence_type.value
             if isinstance(evidence_type, EvidenceType)
@@ -366,8 +367,31 @@ class InMemoryRepository:
         return sum(
             1
             for eid in evidence_ids
-            if eid in self._evidence and self._evidence[eid].get("type") == wanted
+            if self._evidence_matches(
+                task_id=task_id,
+                evidence_id=eid,
+                evidence_type=wanted,
+                successful_only=successful_only,
+            )
         )
+
+    def _evidence_matches(
+        self,
+        *,
+        task_id: str,
+        evidence_id: str,
+        evidence_type: str,
+        successful_only: bool,
+    ) -> bool:
+        evidence = self._evidence.get(evidence_id)
+        if evidence is None or evidence.get("task_id") != task_id:
+            return False
+        actual_type = str(evidence.get("type", ""))
+        if evidence_type != "any" and actual_type != evidence_type:
+            return False
+        if not successful_only:
+            return True
+        return is_successful_evidence_payload(actual_type, evidence)
 
     def get_artifacts_by_ids(self, artifact_ids: list[str]) -> list[Artifact]:
         return [self._artifacts[aid] for aid in artifact_ids if aid in self._artifacts]

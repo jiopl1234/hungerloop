@@ -90,6 +90,7 @@ class AcceptanceCheckRunner:
                 task_id=task_id,
                 evidence_ids=candidate.evidence_ids,
                 evidence_type=ev_type,
+                successful_only=True,
             )
             ok = count >= min_count
             return ok, f"evidence_count({ev_type}): {count}/{min_count}", None

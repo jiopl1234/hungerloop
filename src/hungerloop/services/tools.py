@@ -69,6 +69,7 @@ class Tool(Protocol):
     """
 
     name: str
+    args_schema: str
     side_effect_level: SideEffectLevel
     requires_network: bool
 
@@ -95,6 +96,7 @@ class ReadFileTool:
     """Read a UTF-8 file from the candidate workspace."""
 
     name: str = "read_file"
+    args_schema: str = "args = {path: str (required)}"
     side_effect_level: SideEffectLevel = "read"
     requires_network: bool = False
 
@@ -132,6 +134,9 @@ class WriteFileTool:
     """Create or overwrite a UTF-8 file under the candidate workspace."""
 
     name: str = "write_file"
+    args_schema: str = (
+        "args = {path: str (required), content: str (required)}"
+    )
     side_effect_level: SideEffectLevel = "file_write"
     requires_network: bool = False
 
@@ -171,6 +176,10 @@ class PatchFileTool:
     """
 
     name: str = "patch_file"
+    args_schema: str = (
+        "args = {path: str (required), old_text: str (required), "
+        "new_text: str (required)}"
+    )
     side_effect_level: SideEffectLevel = "file_write"
     requires_network: bool = False
 
@@ -240,6 +249,9 @@ class RunShellTool:
     """
 
     name: str = "run_shell"
+    args_schema: str = (
+        "args = {argv: list[str] (required, non-empty), timeout: int = 60}"
+    )
     side_effect_level: SideEffectLevel = "shell"
     requires_network: bool = False
 
@@ -292,6 +304,27 @@ class RunShellTool:
             result_summary=result_summary,
             sandbox_result=sandbox_result,
         )
+
+
+BUILTIN_TOOL_ARG_SCHEMAS: dict[str, str] = {
+    ReadFileTool.name: ReadFileTool.args_schema,
+    WriteFileTool.name: WriteFileTool.args_schema,
+    PatchFileTool.name: PatchFileTool.args_schema,
+    RunShellTool.name: RunShellTool.args_schema,
+}
+
+
+def describe_tool_arg_schemas(allowed_tools: list[str]) -> str:
+    """Return prompt-ready args schemas for the tools a worker may call."""
+    tool_names = allowed_tools or list(BUILTIN_TOOL_ARG_SCHEMAS)
+    lines: list[str] = []
+    for tool_name in tool_names:
+        schema = BUILTIN_TOOL_ARG_SCHEMAS.get(tool_name)
+        if schema is None:
+            lines.append(f"- {tool_name}: args schema unavailable")
+        else:
+            lines.append(f"- {tool_name}: {schema}")
+    return "\n".join(lines) if lines else "- (none)"
 
 
 def default_tool_registry(sandbox_runner: SandboxRunner) -> dict[str, Tool]:

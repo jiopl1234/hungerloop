@@ -442,6 +442,47 @@ def test_run_model_config_openai_resolves_client(
     assert isinstance(client, OpenAIModelClient)
 
 
+def test_run_model_config_unknown_openai_pricing_requires_confirmation(
+    context: CliContext, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from hungerloop.cli.run_cmd import _resolve_model_client
+
+    monkeypatch.setenv("HL_TEST_API_KEY", "sk-test")
+    path = tmp_path / "model.yaml"
+    path.write_text(
+        (
+            "provider: openai\n"
+            "model_name: glm-5.1\n"
+            "api_key_env: HL_TEST_API_KEY\n"
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="no configured pricing"):
+        _resolve_model_client(context, path)
+
+
+def test_run_model_config_unknown_openai_pricing_can_be_accepted(
+    context: CliContext, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from hungerloop.cli.run_cmd import _resolve_model_client
+
+    monkeypatch.setenv("HL_TEST_API_KEY", "sk-test")
+    path = tmp_path / "model.yaml"
+    path.write_text(
+        (
+            "provider: openai\n"
+            "model_name: glm-5.1\n"
+            "api_key_env: HL_TEST_API_KEY\n"
+        ),
+        encoding="utf-8",
+    )
+    client = _resolve_model_client(
+        context, path, accept_unknown_pricing=True
+    )
+    assert isinstance(client, OpenAIModelClient)
+
+
 def test_run_model_config_azure_fails_clearly(
     context: CliContext, tmp_path: Path
 ) -> None:

@@ -32,38 +32,38 @@ class _DummyCandidate:
 @pytest.fixture
 def runner_setup(
     tmp_path: Path,
-) -> tuple[AcceptanceCheckRunner, WorkspaceManager]:
+) -> tuple[AcceptanceCheckRunner, WorkspaceManager, InMemoryRepository]:
     repo = InMemoryRepository()
     wm = WorkspaceManager(tmp_path)
     wm.ensure_task_workspace("t1")
     wm.create_candidate_workspace("t1", 1)
     sb = SandboxRunner(repo)
-    return AcceptanceCheckRunner(repo, wm, sb), wm
+    return AcceptanceCheckRunner(repo, wm, sb), wm, repo
 
 
 async def test_llm_judge_raises_not_implemented(
-    runner_setup: tuple[AcceptanceCheckRunner, WorkspaceManager],
+    runner_setup: tuple[AcceptanceCheckRunner, WorkspaceManager, InMemoryRepository],
 ) -> None:
-    runner, _ = runner_setup
+    runner, _, _ = runner_setup
     check = _DummyCheck(AcceptanceCheckType.LLM_JUDGE, {})
     with pytest.raises(NotImplementedError, match="LLM_JUDGE"):
         await runner.run(check, "t1", 1, _DummyCandidate())
 
 
 async def test_shell_exit_zero_missing_argv_raises(
-    runner_setup: tuple[AcceptanceCheckRunner, WorkspaceManager],
+    runner_setup: tuple[AcceptanceCheckRunner, WorkspaceManager, InMemoryRepository],
 ) -> None:
-    runner, _ = runner_setup
+    runner, _, _ = runner_setup
     check = _DummyCheck(AcceptanceCheckType.SHELL_EXIT_ZERO, {"timeout": 10})
     with pytest.raises(ValueError, match="argv"):
         await runner.run(check, "t1", 1, _DummyCandidate())
 
 
 async def test_evidence_count_zero_minimum_passes_with_no_evidence(
-    runner_setup: tuple[AcceptanceCheckRunner, WorkspaceManager],
+    runner_setup: tuple[AcceptanceCheckRunner, WorkspaceManager, InMemoryRepository],
 ) -> None:
     """min_count=0 always passes — zero evidence is enough zero evidence."""
-    runner, _ = runner_setup
+    runner, _, _ = runner_setup
     check = _DummyCheck(
         AcceptanceCheckType.EVIDENCE_COUNT_MIN,
         {"evidence_type": "any", "min_count": 0},
@@ -73,12 +73,69 @@ async def test_evidence_count_zero_minimum_passes_with_no_evidence(
     assert ev_id is None
 
 
+async def test_evidence_count_min_ignores_failed_tool_evidence(
+    runner_setup: tuple[AcceptanceCheckRunner, WorkspaceManager, InMemoryRepository],
+) -> None:
+    runner, _, repo = runner_setup
+    failed_eid = repo.save_tool_call_as_evidence(
+        task_id="t1",
+        loop_id=1,
+        agent_id="execution_worker_v1",
+        tool_name="run_shell",
+        args_summary="argv=<missing>",
+        result_summary="bad_args",
+        success=False,
+        elapsed_ms=1,
+    )
+    candidate = _DummyCandidate()
+    candidate.evidence_ids = [failed_eid]
+    check = _DummyCheck(
+        AcceptanceCheckType.EVIDENCE_COUNT_MIN,
+        {"evidence_type": "any", "min_count": 1},
+    )
+
+    passed, detail, ev_id = await runner.run(check, "t1", 1, candidate)
+
+    assert passed is False
+    assert detail == "evidence_count(any): 0/1"
+    assert ev_id is None
+
+
+async def test_evidence_count_min_counts_successful_model_evidence(
+    runner_setup: tuple[AcceptanceCheckRunner, WorkspaceManager, InMemoryRepository],
+) -> None:
+    runner, _, repo = runner_setup
+    model_eid = repo.save_model_call_as_evidence(
+        task_id="t1",
+        loop_id=1,
+        agent_id="execution_worker_v1",
+        provider="openai",
+        model="gpt-4o-mini",
+        input_tokens=1,
+        output_tokens=1,
+        cost_usd=0.0,
+        response_preview="{}",
+    )
+    candidate = _DummyCandidate()
+    candidate.evidence_ids = [model_eid]
+    check = _DummyCheck(
+        AcceptanceCheckType.EVIDENCE_COUNT_MIN,
+        {"evidence_type": "any", "min_count": 1},
+    )
+
+    passed, detail, ev_id = await runner.run(check, "t1", 1, candidate)
+
+    assert passed is True
+    assert detail == "evidence_count(any): 1/1"
+    assert ev_id is None
+
+
 async def test_human_approval_unknown_id_returns_false_not_raises(
-    runner_setup: tuple[AcceptanceCheckRunner, WorkspaceManager],
+    runner_setup: tuple[AcceptanceCheckRunner, WorkspaceManager, InMemoryRepository],
 ) -> None:
     """An approval that was never granted must surface as passed=False,
     not a KeyError or NotImplementedError."""
-    runner, _ = runner_setup
+    runner, _, _ = runner_setup
     check = _DummyCheck(
         AcceptanceCheckType.HUMAN_APPROVAL,
         {"approval_id": "never-granted"},
@@ -89,13 +146,13 @@ async def test_human_approval_unknown_id_returns_false_not_raises(
 
 
 async def test_file_exists_path_escape_does_not_crash_orchestrator(
-    runner_setup: tuple[AcceptanceCheckRunner, WorkspaceManager],
+    runner_setup: tuple[AcceptanceCheckRunner, WorkspaceManager, InMemoryRepository],
 ) -> None:
     """I-7: a path-escape in the acceptance check params must either be
     rejected loudly (PermissionError) or returned as passed=False.
     Crashing the orchestrator is unsafe — the loop would never get to
     record a tool_failed evidence row."""
-    runner, _ = runner_setup
+    runner, _, _ = runner_setup
     check = _DummyCheck(
         AcceptanceCheckType.FILE_EXISTS, {"path": "../../../etc/passwd"}
     )
@@ -107,9 +164,9 @@ async def test_file_exists_path_escape_does_not_crash_orchestrator(
 
 
 async def test_file_exists_returns_true_when_file_present(
-    runner_setup: tuple[AcceptanceCheckRunner, WorkspaceManager],
+    runner_setup: tuple[AcceptanceCheckRunner, WorkspaceManager, InMemoryRepository],
 ) -> None:
-    runner, wm = runner_setup
+    runner, wm, _ = runner_setup
     cand_root = wm.candidate_files_dir("t1", 1)
     (cand_root / "report.md").write_text("ok")
 

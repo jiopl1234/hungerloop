@@ -40,6 +40,18 @@ def _build_worker(
     return worker, repo, tmp_path
 
 
+def test_execution_worker_prompt_includes_tool_arg_schemas() -> None:
+    messages = ExecutionWorker._messages(_ctx())
+    prompt = "\n".join(message["content"] for message in messages)
+
+    assert "Allowed tools and args schema:" in prompt
+    assert "run_shell: args = {argv: list[str] (required, non-empty)" in prompt
+    assert "write_file: args = {path: str (required), content: str (required)}" in prompt
+    assert '"tool_name":"write_file"' in prompt
+    assert '"path":"hello.txt"' in prompt
+    assert "never a command string" in prompt
+
+
 async def test_execution_worker_dispatches_scripted_actions(
     tmp_path: Path,
 ) -> None:

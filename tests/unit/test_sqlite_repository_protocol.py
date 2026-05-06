@@ -88,6 +88,55 @@ def test_sqlite_repository_evidence_usage_events_and_artifacts(
     assert repo.get_artifacts_by_ids(["art-1"])[0].artifact_type == "file"
 
 
+def test_sqlite_repository_successful_only_evidence_count(tmp_path: Path) -> None:
+    repo = _repo(tmp_path)
+    repo.create_task("t1", "Goal")
+    failed_tool = repo.save_tool_call_as_evidence(
+        task_id="t1",
+        loop_id=1,
+        agent_id="a1",
+        tool_name="run_shell",
+        args_summary="argv=<missing>",
+        result_summary="bad_args",
+        success=False,
+        elapsed_ms=1,
+    )
+    failed_shell = repo.save_shell_output_as_evidence(
+        task_id="t1",
+        loop_id=1,
+        label="run_shell",
+        argv=["false"],
+        cwd="/tmp",
+        exit_code=1,
+        stdout="",
+        stderr="",
+        timed_out=False,
+    )
+    good_model = repo.save_model_call_as_evidence(
+        task_id="t1",
+        loop_id=1,
+        agent_id="a1",
+        provider="openai",
+        model="gpt-4o-mini",
+        input_tokens=10,
+        output_tokens=20,
+        cost_usd=0.01,
+        response_preview="{}",
+    )
+
+    evidence_ids = [failed_tool, failed_shell, good_model]
+    assert repo.count_evidence_by_type("t1", evidence_ids, "any") == 3
+    assert repo.count_evidence_by_type(
+        "t1", evidence_ids, "any", successful_only=True
+    ) == 1
+    assert repo.count_evidence_by_type(
+        "t1",
+        evidence_ids,
+        EvidenceType.TOOL_CALL,
+        successful_only=True,
+    ) == 0
+
+
 def test_sqlite_repository_traces_stop_memory_skill_lock_and_transaction(
     tmp_path: Path,
 ) -> None:

@@ -114,6 +114,15 @@ def _resolve_stale_threshold(cli_value: int | None) -> int:
     default=None,
     help="YAML model config. Supports provider: dummy or openai.",
 )
+@click.option(
+    "--accept-unknown-pricing",
+    is_flag=True,
+    default=False,
+    help=(
+        "Allow openai model names that are not in PricingTable.PRICES. "
+        "Cost will be recorded as 0.0 except for token ceilings."
+    ),
+)
 @click.pass_obj
 def run(
     ctx: CliContext,
@@ -126,6 +135,7 @@ def run(
     steal_lock: bool,
     lock_stale_sec: int | None,
     model_config_path: Path | None,
+    accept_unknown_pricing: bool,
 ) -> None:
     """Drive ``task_id`` through the orchestrator until a StopReport.
 
@@ -158,7 +168,11 @@ def run(
     )
 
     try:
-        model_client = _resolve_model_client(ctx, model_config_path)
+        model_client = _resolve_model_client(
+            ctx,
+            model_config_path,
+            accept_unknown_pricing=accept_unknown_pricing,
+        )
     except (ValueError, NotImplementedError, ModelAuthError) as exc:
         raise click.ClickException(str(exc)) from exc
 
@@ -297,7 +311,10 @@ def _apply_user_overrides(
 
 
 def _resolve_model_client(
-    ctx: CliContext, model_config_path: Path | None
+    ctx: CliContext,
+    model_config_path: Path | None,
+    *,
+    accept_unknown_pricing: bool = False,
 ) -> ModelClient | None:
     if model_config_path is None:
         return ctx.model_client
@@ -306,6 +323,16 @@ def _resolve_model_client(
     if config.provider == ModelProvider.DUMMY:
         return DummyModelClient()
     if config.provider == ModelProvider.OPENAI:
+        if (
+            config.model_name not in PricingTable.PRICES
+            and not accept_unknown_pricing
+        ):
+            raise ValueError(
+                f"openai model '{config.model_name}' has no configured "
+                "pricing. Add pricing support or pass "
+                "--accept-unknown-pricing to acknowledge that cost_usd will "
+                "be recorded as 0.0 and only token ceilings apply."
+            )
         return OpenAIModelClient(
             config,
             CostGuard(ctx.repo),

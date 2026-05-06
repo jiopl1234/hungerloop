@@ -21,6 +21,7 @@ from hungerloop.repository.protocol import RepositoryProtocol
 from hungerloop.services.budget_guard import BudgetGuard
 from hungerloop.services.model_client import ModelClient
 from hungerloop.services.tool_harness import ToolHarness
+from hungerloop.services.tools import describe_tool_arg_schemas
 
 
 class ExecutionWorker:
@@ -126,15 +127,22 @@ class ExecutionWorker:
         acceptance_lines = "\n".join(
             f"- {item}" for item in context.acceptance_criteria
         ) or "- (none provided)"
+        tool_schema_lines = describe_tool_arg_schemas(context.allowed_tools)
         system = (
             "You are an execution worker that emits structured JSON actions. "
-            "Respond with a JSON object containing 'summary' (string) and "
-            "'actions' (list of {tool_name, args})."
+            "Respond only with a JSON object containing 'summary' (string) "
+            "and 'actions' (list of {tool_name, args}). Do not wrap the JSON "
+            "in Markdown."
         )
         user = (
             f"Mission:\n{context.mission}\n\n"
             f"Acceptance criteria:\n{acceptance_lines}\n\n"
-            f"Allowed tools: {', '.join(context.allowed_tools) or '(any)'}"
+            f"Allowed tools and args schema:\n{tool_schema_lines}\n\n"
+            "Required JSON shape example:\n"
+            '{"summary":"created hello.txt","actions":[{"tool_name":'
+            '"write_file","args":{"path":"hello.txt","content":"hello"}}]}\n\n'
+            "Use exactly the listed args shape for each tool. For run_shell, "
+            "use an argv array and never a command string."
         )
         return [
             {"role": "system", "content": system},

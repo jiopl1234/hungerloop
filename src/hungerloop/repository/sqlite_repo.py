@@ -31,6 +31,7 @@ from hungerloop.models.usage import UsageSnapshot
 from hungerloop.models.validation import ValidationReport
 from hungerloop.models.worker import AgentSpec, WorkerResult
 from hungerloop.repository import migrations as migrations_pkg
+from hungerloop.repository.evidence_success import is_successful_evidence_payload
 from hungerloop.repository.sqlite_migrator import SQLiteMigrator
 
 
@@ -571,28 +572,42 @@ class SQLiteRepository:
         task_id: str,
         evidence_ids: list[str],
         evidence_type: EvidenceType | str,
+        *,
+        successful_only: bool = False,
     ) -> int:
         if not evidence_ids:
             return 0
-        if evidence_type == "any":
-            return len(evidence_ids)
         wanted = (
             evidence_type.value
             if isinstance(evidence_type, EvidenceType)
             else evidence_type
         )
         placeholders = ",".join("?" for _ in evidence_ids)
-        row = self.conn.execute(
+        type_clause = "" if wanted == "any" else "AND evidence_type = ?"
+        params: tuple[object, ...] = (
+            (task_id, *evidence_ids)
+            if wanted == "any"
+            else (task_id, *evidence_ids, wanted)
+        )
+        rows = self.conn.execute(
             f"""
-            SELECT COUNT(*) AS n
+            SELECT evidence_type, payload_json
             FROM evidence
             WHERE task_id = ?
               AND evidence_id IN ({placeholders})
-              AND evidence_type = ?
+              {type_clause}
             """,
-            (task_id, *evidence_ids, wanted),
-        ).fetchone()
-        return int(row["n"]) if row else 0
+            params,
+        ).fetchall()
+        count = 0
+        for row in rows:
+            actual_type = str(row["evidence_type"])
+            if successful_only and not is_successful_evidence_payload(
+                actual_type, _loads(str(row["payload_json"]))
+            ):
+                continue
+            count += 1
+        return count
 
     def get_artifacts_by_ids(self, artifact_ids: list[str]) -> list[Artifact]:
         if not artifact_ids:
