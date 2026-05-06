@@ -140,7 +140,24 @@ class ToolHarness:
                 error_type="unknown_tool",
             )
 
-        self._enforce_side_effect_policy(tool, context)
+        try:
+            self._enforce_side_effect_policy(tool, context)
+        except ToolNotPermitted:
+            # §7.5 invariant: every TOOL_CALL_STARTED has a terminal
+            # twin. Emit FAILED with error_type="not_permitted" before
+            # propagating so audit aggregations don't under-count
+            # policy denials (post-review I5).
+            self.repo.append_event(
+                EventType.TOOL_CALL_FAILED,
+                {
+                    "tool_name": tool_name,
+                    "agent_id": context.agent_id,
+                    "error_type": "not_permitted",
+                },
+                task_id=context.task_id,
+                loop_id=context.loop_id,
+            )
+            raise
         self.budget_guard.assert_can_spend(context, addl_tool_calls=1)
 
         started = time.monotonic()

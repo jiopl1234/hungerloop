@@ -149,6 +149,37 @@ async def test_file_write_blocked_when_allow_file_write_false(
         )
 
 
+async def test_policy_denial_emits_terminal_tool_call_failed_event(
+    harness_setup: tuple[ToolHarness, InMemoryRepository, BudgetGuard, Path],
+) -> None:
+    """Post-review I5: every TOOL_CALL_STARTED has a terminal twin.
+
+    Synchronous policy denials (``ToolNotPermitted``) used to leave a
+    STARTED event with no SUCCEEDED/FAILED counterpart, breaking
+    audit-aggregation invariants.
+    """
+    harness, repo, _, workspace = harness_setup
+    with pytest.raises(ToolNotPermitted):
+        await harness.execute(
+            _ctx(allow_shell=False),
+            "run_shell",
+            {"argv": ["echo", "x"]},
+            workspace,
+        )
+
+    types = [
+        ev["event_type"] for ev in repo.list_events("t1")
+        if ev.get("event_type", "").startswith("tool_call_")
+    ]
+    assert types == ["tool_call_started", "tool_call_failed"]
+    failed_payload = next(
+        ev["payload"]
+        for ev in repo.list_events("t1")
+        if ev["event_type"] == "tool_call_failed"
+    )
+    assert failed_payload["error_type"] == "not_permitted"
+
+
 async def test_budget_guard_pre_check_blocks_overflow(
     harness_setup: tuple[ToolHarness, InMemoryRepository, BudgetGuard, Path],
 ) -> None:

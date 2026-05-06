@@ -106,6 +106,10 @@ class LoopOrchestrator:
         self.stagnation_detector = stagnation_detector
         self.memory_manager = memory_manager
         self.max_loops_safety_cap = max_loops_safety_cap
+        # Set inside ``_step_inner`` immediately after ``next_loop_id`` is
+        # allocated so ``_emit_error_stop`` can persist the ERROR LoopTrace
+        # under the same loop_id the §7.5 events fired under (post-review I1).
+        self._current_loop_id: int | None = None
 
     async def step(self, task_id: str) -> LoopTrace | StopReport:
         """Execute one loop iteration (PRD §12.2).
@@ -124,6 +128,7 @@ class LoopOrchestrator:
         :class:`LoopTrace` and ERROR :class:`StopReport` always
         persist (FR-9 / synthetic-worker-exception persistence).
         """
+        self._current_loop_id = None
         try:
             return await self._step_inner(task_id)
         except (SafetyStopError, KeyboardInterrupt):
@@ -131,7 +136,9 @@ class LoopOrchestrator:
             # is operator-driven and not orchestrator-error.
             raise
         except Exception as exc:  # pragma: no cover - exercised by D0-13 test
-            return self._emit_error_stop(task_id, exc)
+            return self._emit_error_stop(
+                task_id, exc, loop_id=self._current_loop_id
+            )
 
     async def _step_inner(self, task_id: str) -> LoopTrace | StopReport:
         policy = self.repo.get_hunger_policy(task_id)
@@ -149,6 +156,7 @@ class LoopOrchestrator:
             return self._emit_stop(task_id, stop_reason)
 
         loop_id = self.repo.next_loop_id(task_id)
+        self._current_loop_id = loop_id
 
         # Consume one loop budget unit as soon as the loop is accepted.
         clock.loop_count += 1
@@ -396,13 +404,26 @@ class LoopOrchestrator:
                 loop_id=loop_id,
             )
 
-    def _emit_error_stop(self, task_id: str, exc: BaseException) -> StopReport:
+    def _emit_error_stop(
+        self,
+        task_id: str,
+        exc: BaseException,
+        *,
+        loop_id: int | None = None,
+    ) -> StopReport:
         """Persist a LoopTrace + StopReport when the orchestrator caught
         an unexpected exception (FR-9 / synthetic-worker-exception path).
 
         The trace carries ``stop_reason=ERROR`` and a ``worker_errors``
         entry so ``hungerloop trace`` shows the failure cause; the
         StopReport gets the standard resume_hint via _emit_stop.
+
+        ``loop_id`` is the in-flight loop the exception interrupted —
+        threaded from ``step()`` via ``self._current_loop_id`` so the
+        ERROR LoopTrace and the §7.5 events that already fired under
+        that same loop join cleanly. Falls back to a fresh
+        ``next_loop_id`` only when the exception fired before any loop
+        was allocated (rare; e.g. ``hunger_engine.tick`` blew up).
         """
         # Record the error in the event log so trace export surfaces it.
         self.repo.append_event(
@@ -416,10 +437,10 @@ class LoopOrchestrator:
         # Best-effort LoopTrace so a downstream `repair-state --check`
         # can detect D10 (stopped task with no trace) cleanly.
         try:
-            loop_id = self.repo.next_loop_id(task_id)
+            trace_loop_id = loop_id if loop_id is not None else self.repo.next_loop_id(task_id)
             error_trace = LoopTrace(
                 task_id=task_id,
-                loop_id=loop_id,
+                loop_id=trace_loop_id,
                 phase="error",
                 active_hunger=0.0,
                 drive_budget=0.0,

@@ -25,11 +25,7 @@ from tests.integration.conftest import make_seed_report_task, workspace
 
 
 def _event_types_for(repo: InMemoryRepository, task_id: str) -> list[str]:
-    return [
-        e["event_type"]
-        for e in repo._events
-        if e.get("task_id") == task_id
-    ]
+    return [str(e["event_type"]) for e in repo.list_events(task_id)]
 
 
 # ---------------------------------------------------------------------------
@@ -102,9 +98,8 @@ async def test_first_loop_emits_canonical_ordering(tmp_path: Path) -> None:
 
     # Filter to loop_id=1 events only.
     loop1 = [
-        e["event_type"]
-        for e in repo._events
-        if e.get("task_id") == "t1" and e.get("loop_id") == 1
+        str(e["event_type"])
+        for e in repo.list_events("t1", since_loop=1, until_loop=1)
     ]
 
     def first_index(name: str) -> int:
@@ -153,9 +148,8 @@ async def test_check_events_appear_between_validation_started_and_finished(
     await orchestrator.run("t1")
 
     loop1 = [
-        e["event_type"]
-        for e in repo._events
-        if e.get("task_id") == "t1" and e.get("loop_id") == 1
+        str(e["event_type"])
+        for e in repo.list_events("t1", since_loop=1, until_loop=1)
     ]
     started_idx = loop1.index("validation_started")
     finished_idx = loop1.index("validation_finished")
@@ -222,3 +216,20 @@ async def test_synthetic_exception_persists_error_trace(
     assert error_traces, "expected at least one ERROR LoopTrace persisted"
     assert error_traces[0].worker_errors
     assert "RuntimeError" in error_traces[0].worker_errors[0]
+
+    # Post-review I1: the ERROR LoopTrace's loop_id matches the loop the
+    # §7.5 events fired under. A drift here means events for the failed
+    # loop and the trace describing that failure live under different
+    # loop_ids — `repair-state --check D13` would falsely flag the
+    # events as orphans.
+    error_loop_id = error_traces[0].loop_id
+    loop_events_for_error_loop = [
+        e for e in repo.list_events("t1") if e.get("loop_id") == error_loop_id
+    ]
+    event_types_for_error_loop = {
+        str(e["event_type"]) for e in loop_events_for_error_loop
+    }
+    assert "loop_started" in event_types_for_error_loop, (
+        f"events for loop {error_loop_id} should include loop_started; "
+        f"got {sorted(event_types_for_error_loop)}"
+    )

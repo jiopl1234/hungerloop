@@ -866,28 +866,37 @@ class SQLiteRepository:
         return LoopTrace.model_validate(_loads(str(row["payload_json"])))
 
     def save_stop_report(self, report: StopReport) -> None:
+        """Persist the StopReport row + flip task.status='stopped' atomically.
+
+        Both writes go through ``self.transaction()`` so a process
+        crash between them can never leave the task with
+        ``status="stopped"`` *and* no StopReport row — the precise
+        scenario the D10 detector documents as "stopped task with
+        no StopReport persisted" (post-review I4).
+        """
         self._ensure_task(report.task_id)
         now = _utc_now()
-        self.conn.execute(
-            """
-            INSERT INTO stop_reports(task_id, stop_reason, created_at, payload_json)
-            VALUES (?, ?, ?, ?)
-            """,
-            (
-                report.task_id,
-                report.stop_reason.value,
-                now,
-                _model_json(report),
-            ),
-        )
-        self.conn.execute(
-            """
-            UPDATE tasks
-            SET status='stopped', last_stop_reason=?, updated_at=?
-            WHERE task_id=?
-            """,
-            (report.stop_reason.value, now, report.task_id),
-        )
+        with self.transaction():
+            self.conn.execute(
+                """
+                INSERT INTO stop_reports(task_id, stop_reason, created_at, payload_json)
+                VALUES (?, ?, ?, ?)
+                """,
+                (
+                    report.task_id,
+                    report.stop_reason.value,
+                    now,
+                    _model_json(report),
+                ),
+            )
+            self.conn.execute(
+                """
+                UPDATE tasks
+                SET status='stopped', last_stop_reason=?, updated_at=?
+                WHERE task_id=?
+                """,
+                (report.stop_reason.value, now, report.task_id),
+            )
 
     def get_last_stop_report(self, task_id: str) -> StopReport | None:
         row = self.conn.execute(
