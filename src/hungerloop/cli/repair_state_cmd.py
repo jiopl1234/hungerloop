@@ -1,18 +1,20 @@
-"""``hungerloop repair-state`` command (PRD §16.3).
+"""``hungerloop repair-state`` command (PRD §13 / §16.3).
 
 Two modes, mutually exclusive:
 
 * ``--check`` — read-only; prints one line per divergence.
-* ``--fix`` — repairs the limited v0.5b.0 set (D4/D5); refuses corruption
-  (D2/D3), stale locks (D6, points at ``--steal-lock``), and dangling
-  validation rows (D7, deferred to v0.5b.1).
+* ``--fix`` (alias ``--apply``) — repairs the auto-fixable set
+  (D4/D5/D10/D11) and refuses the rest (corruption: D2/D3/D8/D9;
+  warning-only: D6/D7/D12/D13).
 
 Exit codes are deliberate so CI pipelines can react to them:
 
-* ``0`` — clean (``--check``) or all repairable items fixed (``--fix``).
+* ``0`` — clean (``--check``) or every divergence resolved
+  successfully (``--fix``).
 * ``1`` — warnings present (``--check`` only).
-* ``2`` — corruption detected (``--check``) or refused during fix.
-* ``3`` — ``--fix`` with no actionable divergences (``--fix`` only).
+* ``2`` — corruption detected (``--check``) or any corruption
+  divergence refused during ``--fix``.
+* ``3`` — ``--fix`` with no actionable divergences.
 """
 from __future__ import annotations
 
@@ -36,9 +38,10 @@ from hungerloop.services.repair_state import (
 )
 @click.option(
     "--fix",
+    "--apply",
     "mode_fix",
     is_flag=True,
-    help="Apply the limited v0.5b.0 fix set (D4/D5).",
+    help="Apply the auto-fixable set (D4/D5/D10/D11).",
 )
 @click.option(
     "--lock-stale-sec",
@@ -74,25 +77,26 @@ def repair_state(
         ctx_obj.exit(_check_exit_code(divergences))
         return
 
-    # --fix path
-    actionable = [
-        d for d in divergences if not d.corruption and d.kind in {"D4", "D5"}
-    ]
+    # --fix path (FR-12 / FR-13: dispatch every row, refuse where the
+    # service refuses, exit 2 only if any corruption refusal occurred).
     if not divergences:
         click.echo("clean")
         return  # exit 0
-    if any(d.corruption for d in divergences):
+
+    fixable_kinds = {"D4", "D5", "D10", "D11"}
+    has_fixable = any(d.kind in fixable_kinds for d in divergences)
+    has_corruption = any(d.corruption for d in divergences)
+
+    if not has_fixable:
         for d in divergences:
             click.echo(_format_line(d))
-        click.echo(
-            "refusing to fix: corruption detected (D2/D3); restore from backup",
-            err=True,
-        )
-        click.get_current_context().exit(2)
-        return
-    if not actionable:
-        for d in divergences:
-            click.echo(_format_line(d))
+        if has_corruption:
+            click.echo(
+                "refusing to fix: corruption detected; restore from backup",
+                err=True,
+            )
+            click.get_current_context().exit(2)
+            return
         click.echo(
             "no auto-fixable divergences in this release",
             err=True,
@@ -101,13 +105,18 @@ def repair_state(
         return
 
     fixed_count = 0
+    refused_corruption = False
     for divergence in divergences:
         outcome = service.apply_fix(divergence)
         prefix = "fixed " if outcome.fixed else "skip  "
         click.echo(f"{prefix}{divergence.kind} {divergence.target} — {outcome.summary}")
         if outcome.fixed:
             fixed_count += 1
+        elif divergence.corruption:
+            refused_corruption = True
     click.echo(f"summary: {fixed_count} fixed of {len(divergences)} divergences")
+    if refused_corruption:
+        click.get_current_context().exit(2)
 
 
 def _print_check_output(divergences: list[Divergence]) -> None:

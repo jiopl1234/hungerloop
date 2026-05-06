@@ -755,3 +755,161 @@ def test_apply_fix_d11_recomputes_usage(
     assert snap.tokens == 300
     assert abs(snap.cost_usd - 0.10) < 1e-6
     assert snap.llm_calls == 1
+
+
+# ---------------------------------------------------------------------------
+# CLI --apply / --fix orchestration (D1-10)
+# ---------------------------------------------------------------------------
+
+
+def test_cli_apply_alias_works(context: CliContext) -> None:
+    """``--apply`` is the alias for ``--fix`` introduced in v0.5d.1."""
+    ws = WorkspaceManager(context.workspace_root)
+    _seed_best(ws, "task-1", {"a.txt": "alpha"})
+    (ws.best_files_dir("task-1").parent / "manifest.json").unlink()
+    runner = CliRunner()
+    result = runner.invoke(
+        cli, ["repair-state", "task-1", "--apply"], obj=context
+    )
+    assert result.exit_code == 0, result.output
+    assert "fixed" in result.output
+
+
+def test_cli_fix_mixed_corruption_and_warning_continues_then_exits_2(
+    context: CliContext,
+) -> None:
+    """FR-13: fix the warning rows, refuse corruption, exit 2.
+
+    Mixed fixture: D2 (hash mismatch — corruption, refuse) plus D5
+    (orphan candidate dir — warning, fixable). The CLI should fix D5
+    and refuse D2 in the same invocation, then exit 2 because at
+    least one corruption refusal happened.
+    """
+    ws = WorkspaceManager(context.workspace_root)
+    _seed_best(ws, "task-1", {"a.txt": "alpha"})
+    # Corruption: tamper a.txt without updating the manifest hash.
+    (ws.best_files_dir("task-1") / "a.txt").write_text(
+        "tampered", encoding="utf-8"
+    )
+    # Warning: orphan candidate workspace (no LoopTrace, no candidate row).
+    ws.create_candidate_workspace("task-1", loop_id=42)
+
+    runner = CliRunner()
+    result = runner.invoke(cli, ["repair-state", "task-1", "--fix"], obj=context)
+    assert result.exit_code == 2, result.output
+    assert "fixed D5" in result.output
+    assert "skip  D2" in result.output
+    assert "summary:" in result.output
+
+
+# ---------------------------------------------------------------------------
+# trace export --include-global (D1-11)
+# ---------------------------------------------------------------------------
+
+
+def test_cli_trace_export_excludes_global_by_default(
+    context: CliContext,
+) -> None:
+    from hungerloop.models.events import EventType
+
+    repo = context.repo
+    repo.create_task("task-1", "Goal")
+    repo.append_event(
+        EventType.LOOP_STARTED, {"x": 1}, task_id="task-1", loop_id=1
+    )
+    # Global event — task_id IS NULL.
+    repo.append_event(EventType.UNKNOWN_MODEL_PRICING, {"model": "x"})
+
+    runner = CliRunner()
+    result = runner.invoke(
+        cli, ["trace", "export", "task-1"], obj=context
+    )
+    assert result.exit_code == 0
+    assert "loop_started" in result.output
+    assert "unknown_model_pricing" not in result.output
+
+
+def test_cli_trace_export_include_global(context: CliContext) -> None:
+    from hungerloop.models.events import EventType
+
+    repo = context.repo
+    repo.create_task("task-1", "Goal")
+    repo.append_event(
+        EventType.LOOP_STARTED, {"x": 1}, task_id="task-1", loop_id=1
+    )
+    repo.append_event(EventType.UNKNOWN_MODEL_PRICING, {"model": "x"})
+
+    runner = CliRunner()
+    result = runner.invoke(
+        cli,
+        ["trace", "export", "task-1", "--include-global"],
+        obj=context,
+    )
+    assert result.exit_code == 0
+    assert "loop_started" in result.output
+    assert "unknown_model_pricing" in result.output
+
+
+# ---------------------------------------------------------------------------
+# hunger unblock idempotency (D1-12)
+# ---------------------------------------------------------------------------
+
+
+def test_cli_hunger_unblock_already_open_is_idempotent(
+    context: CliContext,
+) -> None:
+    from hungerloop.models.enums import HungerItemStatus
+    from hungerloop.models.hunger import HungerItem, HungerLedger
+
+    repo = context.repo
+    repo.create_task("task-1", "Goal")
+    repo.save_hunger_ledger(
+        "task-1",
+        HungerLedger(
+            task_id="task-1",
+            items=[
+                HungerItem(
+                    id="H-001",
+                    title="x",
+                    status=HungerItemStatus.OPEN,
+                    gap_score=1.0,
+                )
+            ],
+        ),
+    )
+    runner = CliRunner()
+    result = runner.invoke(
+        cli, ["hunger", "unblock", "task-1", "H-001"], obj=context
+    )
+    assert result.exit_code == 0
+    assert "no-op" in result.output
+
+
+def test_cli_hunger_unblock_all_with_zero_blocked_is_idempotent(
+    context: CliContext,
+) -> None:
+    from hungerloop.models.enums import HungerItemStatus
+    from hungerloop.models.hunger import HungerItem, HungerLedger
+
+    repo = context.repo
+    repo.create_task("task-1", "Goal")
+    repo.save_hunger_ledger(
+        "task-1",
+        HungerLedger(
+            task_id="task-1",
+            items=[
+                HungerItem(
+                    id="H-001",
+                    title="x",
+                    status=HungerItemStatus.OPEN,
+                    gap_score=1.0,
+                )
+            ],
+        ),
+    )
+    runner = CliRunner()
+    result = runner.invoke(
+        cli, ["hunger", "unblock-all", "task-1"], obj=context
+    )
+    assert result.exit_code == 0
+    assert "no BLOCKED items" in result.output

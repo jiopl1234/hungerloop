@@ -61,14 +61,18 @@ def hunger_refill(ctx: CliContext, task_id: str, loops: int) -> None:
 @click.argument("item_id")
 @click.pass_obj
 def hunger_unblock(ctx: CliContext, task_id: str, item_id: str) -> None:
-    """Flip a single BLOCKED item to OPEN (PRD §15.2)."""
+    """Flip a single BLOCKED item to OPEN (PRD §15.2).
+
+    Idempotent: re-running on an already-OPEN item exits 0 with a
+    "no-op" message and emits no event so audit logs stay clean.
+    """
     ledger = ctx.repo.get_hunger_ledger(task_id)
     item = next((candidate for candidate in ledger.items if candidate.id == item_id), None)
     if item is None:
         raise click.UsageError(f"hunger item not found: {item_id}")
     if item.status != HungerItemStatus.BLOCKED:
         click.echo(
-            f"item {item_id} is {item.status.value}, not BLOCKED — no change."
+            f"item {item_id} is already {item.status.value} — no-op (idempotent)."
         )
         return
     item.status = HungerItemStatus.OPEN
@@ -87,7 +91,12 @@ def hunger_unblock(ctx: CliContext, task_id: str, item_id: str) -> None:
 @click.argument("task_id")
 @click.pass_obj
 def hunger_unblock_all(ctx: CliContext, task_id: str) -> None:
-    """Flip every BLOCKED item to OPEN (PRD §15.2)."""
+    """Flip every BLOCKED item to OPEN (PRD §15.2).
+
+    Idempotent: when no items are BLOCKED, exits 0 with a "no-op"
+    message and emits no per-item events. The streak reset still
+    runs so a clean ledger doesn't leave a stale streak counter.
+    """
     ledger = ctx.repo.get_hunger_ledger(task_id)
     flipped: list[str] = []
     for item in ledger.items:
@@ -103,6 +112,11 @@ def hunger_unblock_all(ctx: CliContext, task_id: str) -> None:
             )
             flipped.append(item.id)
     ctx.repo.reset_no_progress_streak(task_id)
+    if not flipped:
+        click.echo(
+            f"no BLOCKED items on {task_id} — no-op (idempotent)."
+        )
+        return
     click.echo(f"unblocked {len(flipped)} items on {task_id}: {flipped}")
 
 

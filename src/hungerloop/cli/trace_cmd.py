@@ -44,8 +44,22 @@ def trace() -> None:
     show_default=True,
     help="Output format. Only 'jsonl' for now; reserved for prometheus/otlp.",
 )
+@click.option(
+    "--include-global",
+    is_flag=True,
+    default=False,
+    help=(
+        "Also emit rows where ``events.task_id IS NULL`` (e.g. the "
+        "``unknown_model_pricing`` global event). Default is per-task only."
+    ),
+)
 @click.pass_obj
-def trace_export(ctx: CliContext, task_id: str, fmt: str) -> None:
+def trace_export(
+    ctx: CliContext,
+    task_id: str,
+    fmt: str,
+    include_global: bool,
+) -> None:
     """Stream the event log for ``task_id`` to stdout as JSONL.
 
     Exit codes:
@@ -56,7 +70,7 @@ def trace_export(ctx: CliContext, task_id: str, fmt: str) -> None:
         click.echo(f"Task not found: {task_id}", err=True)
         raise click.exceptions.Exit(1)
 
-    rows = _events_for_task(ctx, task_id)
+    rows = _events_for_task(ctx, task_id, include_global=include_global)
     if not rows:
         return  # exit 0 with empty stdout
 
@@ -81,15 +95,19 @@ def trace_export(ctx: CliContext, task_id: str, fmt: str) -> None:
         )
 
 
-def _events_for_task(ctx: CliContext, task_id: str) -> list[dict[str, Any]]:
+def _events_for_task(
+    ctx: CliContext,
+    task_id: str,
+    *,
+    include_global: bool = False,
+) -> list[dict[str, Any]]:
     """Read events in append order; emit only rows whose ``task_id``
-    matches ``task_id`` (``task_id IS NULL`` rows are global and
-    excluded — see module docstring).
+    matches ``task_id`` unless ``include_global`` is set.
 
     Reads through the repository protocol so InMemory and SQLite share
     the same CLI behavior.
     """
-    return ctx.repo.list_events(task_id)
+    return ctx.repo.list_events(task_id, include_global=include_global)
 
 
 def _jsonl_default(value: object) -> str:
