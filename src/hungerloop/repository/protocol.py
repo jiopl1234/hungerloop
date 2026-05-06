@@ -23,7 +23,7 @@ from hungerloop.models.hunger import (
     HungerPolicy,
     HungerSnapshot,
 )
-from hungerloop.models.memory import MemoryCandidate
+from hungerloop.models.memory import MemoryCandidate, PromotedMemory
 from hungerloop.models.planning import LoopPlan
 from hungerloop.models.skill import SkillCard
 from hungerloop.models.task import TaskRecord
@@ -323,8 +323,28 @@ class RepositoryProtocol(Protocol):
     # =====================================================================
     def save_memory_candidate(self, candidate: MemoryCandidate) -> None: ...
     def list_memory_candidates(self, task_id: str) -> list[MemoryCandidate]: ...
+    def get_memory_candidate(
+        self, candidate_id: str
+    ) -> MemoryCandidate | None: ...
+    """New in v0.5e.0 (E0-03 / FR-1): single-candidate lookup; returns
+    None when the id is unknown."""
+
     def count_committed_references(self, candidate_id: str) -> int: ...
     """Used by ``MemoryManager.non_volatile`` predicate (§19.2)."""
+
+    def save_promoted_memory(self, memory: PromotedMemory) -> None: ...
+    """New in v0.5e.0 (E0-03 / FR-21): persist an ``ApprovalEngine``
+    promotion record."""
+
+    def list_promoted_memories(
+        self, task_id: str | None = None
+    ) -> list[PromotedMemory]: ...
+    """New in v0.5e.0: enumerate promoted memories. ``task_id=None``
+    returns every promoted row (across tasks) so global retrieval
+    surfaces in v0.6 can read the same path."""
+
+    def get_promoted_memory(self, memory_id: str) -> PromotedMemory | None: ...
+    """New in v0.5e.0: single-memory lookup."""
 
     def save_skill_card(self, card: SkillCard) -> None: ...
     def list_skill_cards(self, task_id: str | None = None) -> list[SkillCard]: ...

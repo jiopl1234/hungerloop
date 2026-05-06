@@ -22,7 +22,7 @@ from hungerloop.models.hunger import (
     HungerPolicy,
     HungerSnapshot,
 )
-from hungerloop.models.memory import MemoryCandidate
+from hungerloop.models.memory import MemoryCandidate, PromotedMemory
 from hungerloop.models.planning import LoopPlan
 from hungerloop.models.skill import SkillCard
 from hungerloop.models.task import TaskRecord
@@ -1065,6 +1065,87 @@ class SQLiteRepository:
             MemoryCandidate.model_validate(_loads(str(row["payload_json"])))
             for row in rows
         ]
+
+    def get_memory_candidate(
+        self, candidate_id: str
+    ) -> MemoryCandidate | None:
+        row = self.conn.execute(
+            "SELECT payload_json FROM memory_candidates WHERE candidate_id = ?",
+            (candidate_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        return MemoryCandidate.model_validate(_loads(str(row["payload_json"])))
+
+    def save_promoted_memory(self, memory: PromotedMemory) -> None:
+        self._ensure_task(memory.task_id)
+        self.conn.execute(
+            """
+            INSERT INTO promoted_memories(
+              memory_id, source_candidate_id, task_id, content, memory_type,
+              layer, evidence_ids_json, accepted_check_keys_json,
+              reuse_scenarios_json, confidence, created_at, approved_by,
+              payload_json
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(memory_id) DO UPDATE SET
+              content=excluded.content,
+              memory_type=excluded.memory_type,
+              layer=excluded.layer,
+              evidence_ids_json=excluded.evidence_ids_json,
+              accepted_check_keys_json=excluded.accepted_check_keys_json,
+              reuse_scenarios_json=excluded.reuse_scenarios_json,
+              confidence=excluded.confidence,
+              created_at=excluded.created_at,
+              approved_by=excluded.approved_by,
+              payload_json=excluded.payload_json
+            """,
+            (
+                memory.memory_id,
+                memory.source_candidate_id,
+                memory.task_id,
+                memory.content,
+                memory.memory_type,
+                memory.layer,
+                json.dumps(memory.evidence_ids),
+                json.dumps(memory.accepted_check_keys),
+                json.dumps(memory.reuse_scenarios),
+                memory.confidence,
+                memory.created_at.isoformat().replace("+00:00", "Z"),
+                memory.approved_by,
+                _model_json(memory),
+            ),
+        )
+
+    def list_promoted_memories(
+        self, task_id: str | None = None
+    ) -> list[PromotedMemory]:
+        if task_id is None:
+            rows = self.conn.execute(
+                "SELECT payload_json FROM promoted_memories ORDER BY rowid ASC"
+            ).fetchall()
+        else:
+            rows = self.conn.execute(
+                """
+                SELECT payload_json FROM promoted_memories
+                WHERE task_id = ?
+                ORDER BY rowid ASC
+                """,
+                (task_id,),
+            ).fetchall()
+        return [
+            PromotedMemory.model_validate(_loads(str(row["payload_json"])))
+            for row in rows
+        ]
+
+    def get_promoted_memory(self, memory_id: str) -> PromotedMemory | None:
+        row = self.conn.execute(
+            "SELECT payload_json FROM promoted_memories WHERE memory_id = ?",
+            (memory_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        return PromotedMemory.model_validate(_loads(str(row["payload_json"])))
 
     def count_committed_references(self, candidate_id: str) -> int:
         row = self.conn.execute(

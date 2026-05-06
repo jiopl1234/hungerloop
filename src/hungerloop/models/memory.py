@@ -16,10 +16,18 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
-MemoryType = Literal["fact", "procedure", "preference", "pitfall"]
+MemoryType = Literal[
+    "fact",
+    "procedure",
+    "preference",
+    "pitfall",
+    "failure_pattern",
+    "tool_usage",
+    "workflow_pattern",
+]
 MemoryStatus = Literal["candidate", "approved", "rejected"]
 MemoryState = Literal[
-    "proposed", "approved", "rejected", "expired", "superseded"
+    "proposed", "approved", "rejected", "expired", "superseded", "deferred"
 ]
 MemoryDecidedBy = Literal["human", "auto"]
 
@@ -34,6 +42,14 @@ class MemoryCandidate(BaseModel):
 
     evidence_ids: list[str] = Field(default_factory=list)
     referenced_check_keys: list[str] = Field(default_factory=list)
+    accepted_check_keys: list[str] = Field(default_factory=list)
+    """v0.5e.0 (PRD §19 / FR-1): the strict subset of
+    ``referenced_check_keys`` that *passed* validation. The
+    ``ApprovalEngine`` uses this to gate promotion: a candidate
+    referencing five checks but only proven on two of them must be
+    approved against ``accepted_check_keys``, never the loose
+    referenced list."""
+
     source_loop_ids: list[int] = Field(default_factory=list)
     source_candidate_state_id: str | None = None
     source_validation_id: str | None = None
@@ -58,3 +74,47 @@ class MemoryCandidate(BaseModel):
     decision_rationale: str = ""
     replaces_candidate_id: str | None = None
     expires_at: datetime | None = None
+
+    # ----- v0.5e.0 reviewer audit (PRD §19 / FR-1) ---------------------
+    reviewer: str | None = None
+    """Operator id (or ``"auto"``) that approved/rejected/deferred the
+    row. Populated by the CLI commands; ``None`` for shipped
+    proposed-only rows."""
+
+    reviewed_at: datetime | None = None
+    """UTC timestamp of the review action; ``None`` until reviewed."""
+
+    rejection_reason: str | None = None
+    """Free-text reason recorded by ``memory reject``. ``None`` for
+    approved or still-pending rows."""
+
+
+class PromotedMemory(BaseModel):
+    """Persisted promotion record (PRD §19 / FR-21).
+
+    Written by ``ApprovalEngine`` after a :class:`MemoryCandidate` is
+    approved and the predicate set evaluates to True. The candidate
+    row stays in ``memory_candidates`` (state=``"approved"``); the
+    PromotedMemory is the durable artefact returned to operators.
+    """
+
+    memory_id: str
+    source_candidate_id: str
+    task_id: str
+    content: str
+    memory_type: MemoryType = "fact"
+    layer: Literal["task", "global"] = "task"
+    """``"task"`` memories ride along with the originating task;
+    ``"global"`` memories cross tasks. v0.5e.0 only writes ``"task"``
+    by default; ``--layer global`` is reserved for v0.6+."""
+
+    evidence_ids: list[str] = Field(default_factory=list)
+    accepted_check_keys: list[str] = Field(default_factory=list)
+    reuse_scenarios: list[str] = Field(default_factory=list)
+    """Operator-supplied (or auto-extracted) scenarios in which this
+    memory should be retrieved. v0.5e.0 stores them but the retrieval
+    side lands in v0.6."""
+
+    confidence: float = 0.0
+    created_at: datetime
+    approved_by: str

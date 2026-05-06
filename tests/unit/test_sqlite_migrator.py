@@ -381,7 +381,17 @@ def test_real_migration_chain_v0_to_latest_runs_against_fresh_db(
         "source_candidate_state_id",
         "source_validation_id",
         "source_best_state_id",
+        # v5 additions:
+        "accepted_check_keys_json",
+        "action_verified",
+        "reusable",
+        "non_volatile",
+        "traceable",
+        "reviewer",
+        "reviewed_at",
+        "rejection_reason",
     } <= cols
-    assert {"usage_snapshots", "task_locks"} <= tables
+    assert {"usage_snapshots", "task_locks", "promoted_memories"} <= tables
     assert "idx_memory_state" in indexes
     assert "idx_memory_source_best" in indexes
+    assert "idx_promoted_memories_task" in indexes

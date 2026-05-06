@@ -89,6 +89,51 @@ def test_sqlite_repository_evidence_usage_events_and_artifacts(
     assert repo.get_artifacts_by_ids(["art-1"])[0].artifact_type == "file"
 
 
+def test_promoted_memory_round_trips_and_survives_restart(tmp_path: Path) -> None:
+    """E0-03: PromotedMemory write/read parity + cross-restart load."""
+    from datetime import datetime, timezone
+
+    from hungerloop.models.memory import PromotedMemory
+
+    db = tmp_path / "hungerloop.sqlite"
+    repo = SQLiteRepository.open(db)
+    repo.create_task("t1", "Goal")
+    # Save the source candidate first so the FK to memory_candidates
+    # holds.
+    from hungerloop.models.memory import MemoryCandidate
+
+    repo.save_memory_candidate(
+        MemoryCandidate(
+            candidate_id="cand-1",
+            task_id="t1",
+            content="example content",
+            referenced_check_keys=["H-001:0"],
+            accepted_check_keys=["H-001:0"],
+        )
+    )
+    memory = PromotedMemory(
+        memory_id="mem-1",
+        source_candidate_id="cand-1",
+        task_id="t1",
+        content="approved fact",
+        memory_type="fact",
+        layer="task",
+        evidence_ids=["ev-1"],
+        accepted_check_keys=["H-001:0"],
+        reuse_scenarios=["report drafting"],
+        confidence=0.8,
+        created_at=datetime(2026, 5, 6, 12, 0, 0, tzinfo=timezone.utc),
+        approved_by="alice@example.com",
+    )
+    repo.save_promoted_memory(memory)
+
+    reopened = SQLiteRepository.open(db)
+    assert reopened.get_promoted_memory("mem-1") == memory
+    listing = reopened.list_promoted_memories("t1")
+    assert listing == [memory]
+    assert reopened.list_promoted_memories() == [memory]
+
+
 def test_save_usage_snapshot_upserts_and_survives_restart(tmp_path: Path) -> None:
     """D0-08: explicit ``save_usage_snapshot`` upserts and persists across
     restart, regardless of whether evidence rows were ever written."""

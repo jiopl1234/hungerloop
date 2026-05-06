@@ -23,7 +23,7 @@ from hungerloop.models.hunger import (
     HungerPolicy,
     HungerSnapshot,
 )
-from hungerloop.models.memory import MemoryCandidate
+from hungerloop.models.memory import MemoryCandidate, PromotedMemory
 from hungerloop.models.planning import LoopPlan
 from hungerloop.models.skill import SkillCard
 from hungerloop.models.task import TaskRecord
@@ -74,6 +74,7 @@ class InMemoryRepository:
 
         # Memory / skill
         self._memory: dict[str, MemoryCandidate] = {}
+        self._promoted_memories: dict[str, PromotedMemory] = {}
         self._skills: dict[str, SkillCard] = {}
         self._committed_refs: dict[str, int] = {}
 
@@ -605,8 +606,28 @@ class InMemoryRepository:
     def list_memory_candidates(self, task_id: str) -> list[MemoryCandidate]:
         return [c for c in self._memory.values() if c.task_id == task_id]
 
+    def get_memory_candidate(
+        self, candidate_id: str
+    ) -> MemoryCandidate | None:
+        return self._memory.get(candidate_id)
+
     def count_committed_references(self, candidate_id: str) -> int:
         return self._committed_refs.get(candidate_id, 0)
+
+    def save_promoted_memory(self, memory: PromotedMemory) -> None:
+        self._promoted_memories[memory.memory_id] = memory
+
+    def list_promoted_memories(
+        self, task_id: str | None = None
+    ) -> list[PromotedMemory]:
+        if task_id is None:
+            return list(self._promoted_memories.values())
+        return [
+            m for m in self._promoted_memories.values() if m.task_id == task_id
+        ]
+
+    def get_promoted_memory(self, memory_id: str) -> PromotedMemory | None:
+        return self._promoted_memories.get(memory_id)
 
     def save_skill_card(self, card: SkillCard) -> None:
         self._skills[card.skill_id] = card

@@ -36,8 +36,9 @@ from hungerloop.repository.migration_errors import (
 # Bump per migration. v0.5b.0 shipped at 1; v0.5c.0 shipped at 2 with
 # `migrations/v2__memory_candidate_lifecycle.sql`; v3 adds the runtime
 # tables/constraints needed by SQLiteRepository; v4 adds source links for
-# MemoryCandidate predicates.
-LATEST_VERSION: int = 4
+# MemoryCandidate predicates; v5 adds the v0.5e.0 memory lifecycle
+# extensions (predicate columns, reviewer audit, promoted_memories).
+LATEST_VERSION: int = 5
 
 # Migration files: ``v{N}__{slug}.sql`` where N is a positive int and
 # slug is ``[a-z0-9_]+``. Anything else is rejected at startup.
