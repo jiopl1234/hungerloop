@@ -77,11 +77,38 @@ class RepositoryProtocol(Protocol):
     def mark_candidate_committed(self, candidate_id: str) -> None: ...
     def mark_candidate_rejected(self, candidate_id: str) -> None: ...
 
+    def list_candidates_for_task(self, task_id: str) -> list[CandidateState]: ...
+    """New in v0.5d.0 (D0-01 / FR-1): public read path for repair-state
+    and CLI surfaces that previously reached into ``InMemoryRepository.
+    _candidates``. Returns candidates ordered by loop_id ASC."""
+
+    def get_candidate(self, candidate_id: str) -> CandidateState | None: ...
+    """New in v0.5d.0 (D0-01 / FR-1): single-candidate lookup; returns
+    None when the id is unknown."""
+
     # =====================================================================
     # Section 3 — Validation
     # =====================================================================
     def save_validation_report(self, report: ValidationReport) -> None: ...
     def add_failure_from_validation(self, report: ValidationReport) -> None: ...
+
+    def get_validation_report(
+        self, validation_id: str
+    ) -> ValidationReport | None: ...
+    """New in v0.5d.0 (D0-01 / FR-1): single-report lookup; returns None
+    when the id is unknown."""
+
+    def validation_exists(self, validation_id: str) -> bool: ...
+    """New in v0.5d.0 (D0-01 / FR-1): cheap existence check used by the
+    repair-state D7 detector to flag dangling accepted_checks rows."""
+
+    def iter_accepted_checks(
+        self, task_id: str
+    ) -> list[dict[str, object]]: ...
+    """New in v0.5d.0 (D0-01 / FR-1): list of accepted_check rows
+    persisted by ``CommitManager.promote``. Each dict carries
+    ``check_key``, ``hunger_item_id``, ``check_index``,
+    ``accepted_at_loop``, ``validation_id``, ``evidence_id``."""
 
     def save_accepted_check(
         self,
@@ -293,6 +320,12 @@ class RepositoryProtocol(Protocol):
     """No-op when the current owner doesn't match — defends against
     double-release after a steal. Clean shutdown calls this in the same
     transaction that persists ``StopReport`` (PRD §5.1.1)."""
+
+    def get_task_lock(self, task_id: str) -> dict[str, object] | None: ...
+    """New in v0.5d.0 (D0-01 / FR-1): public lock inspector. Returns
+    ``{"owner": str, "locked_at": datetime}`` or ``None`` when no lock
+    is held. Used by the repair-state D6 detector and by ``hungerloop
+    status`` to surface stale-lock conditions."""
 
     def transaction(self) -> AbstractContextManager[Any]: ...
     """Cross-cutting writes (CommitManager) execute inside ``with

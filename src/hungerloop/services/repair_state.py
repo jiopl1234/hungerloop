@@ -21,7 +21,7 @@ import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Literal
+from typing import Literal
 
 from pydantic import BaseModel
 
@@ -223,13 +223,9 @@ class RepairStateService:
 
         traces = self.repo.list_loop_traces(task_id)
         loop_ids_with_traces = {t.loop_id for t in traces}
-        candidates_attr: dict[str, Any] = getattr(self.repo, "_candidates", {}) or {}
-        candidate_loop_ids: set[int] = set()
-        for cand in candidates_attr.values():
-            cand_task = getattr(cand, "task_id", None)
-            cand_loop = getattr(cand, "loop_id", None)
-            if cand_task == task_id and isinstance(cand_loop, int):
-                candidate_loop_ids.add(cand_loop)
+        candidate_loop_ids: set[int] = {
+            cand.loop_id for cand in self.repo.list_candidates_for_task(task_id)
+        }
 
         divergences: list[Divergence] = []
         for entry in sorted(candidates_root.iterdir()):
@@ -257,8 +253,7 @@ class RepairStateService:
 
     def _detect_stale_lock(self, task_id: str) -> list[Divergence]:
         """D6 — task lock present and older than ``stale_threshold_seconds``."""
-        locks: dict[str, dict[str, Any]] = getattr(self.repo, "_task_locks", {}) or {}
-        info = locks.get(task_id)
+        info = self.repo.get_task_lock(task_id)
         if not info:
             return []
         locked_at = info.get("locked_at")
@@ -288,21 +283,13 @@ class RepairStateService:
         Detection lands in v0.5b.0 so operators can see the issue; the fix
         is deferred to v0.5b.1.
         """
-        accepted: dict[tuple[str, str], dict[str, Any]] = getattr(
-            self.repo, "_accepted_checks", {}
-        ) or {}
-        validations: dict[str, Any] = getattr(
-            self.repo, "_validation_reports", {}
-        ) or {}
-
         divergences: list[Divergence] = []
-        for (rec_task, check_key), record in sorted(accepted.items()):
-            if rec_task != task_id:
-                continue
+        for record in self.repo.iter_accepted_checks(task_id):
             validation_id = record.get("validation_id")
-            if validation_id is None:
+            check_key = record.get("check_key")
+            if not isinstance(validation_id, str) or not isinstance(check_key, str):
                 continue
-            if validation_id not in validations:
+            if not self.repo.validation_exists(validation_id):
                 divergences.append(
                     Divergence(
                         kind="D7",

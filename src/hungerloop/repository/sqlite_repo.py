@@ -385,6 +385,29 @@ class SQLiteRepository:
             (candidate_id,),
         )
 
+    def list_candidates_for_task(self, task_id: str) -> list[CandidateState]:
+        rows = self.conn.execute(
+            """
+            SELECT payload_json FROM candidates
+            WHERE task_id = ?
+            ORDER BY loop_id ASC, candidate_id ASC
+            """,
+            (task_id,),
+        ).fetchall()
+        return [
+            CandidateState.model_validate(_loads(str(row["payload_json"])))
+            for row in rows
+        ]
+
+    def get_candidate(self, candidate_id: str) -> CandidateState | None:
+        row = self.conn.execute(
+            "SELECT payload_json FROM candidates WHERE candidate_id = ?",
+            (candidate_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        return CandidateState.model_validate(_loads(str(row["payload_json"])))
+
     # =====================================================================
     # Section 3 — Validation
     # =====================================================================
@@ -411,6 +434,51 @@ class SQLiteRepository:
 
     def add_failure_from_validation(self, report: ValidationReport) -> None:
         self.save_validation_report(report)
+
+    def get_validation_report(
+        self, validation_id: str
+    ) -> ValidationReport | None:
+        row = self.conn.execute(
+            "SELECT payload_json FROM validation_reports WHERE validation_id = ?",
+            (validation_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        return ValidationReport.model_validate(_loads(str(row["payload_json"])))
+
+    def validation_exists(self, validation_id: str) -> bool:
+        row = self.conn.execute(
+            "SELECT 1 FROM validation_reports WHERE validation_id = ? LIMIT 1",
+            (validation_id,),
+        ).fetchone()
+        return row is not None
+
+    def iter_accepted_checks(self, task_id: str) -> list[dict[str, object]]:
+        rows = self.conn.execute(
+            """
+            SELECT check_key, hunger_item_id, check_index,
+                   accepted_at_loop, validation_id, evidence_id
+            FROM accepted_checks
+            WHERE task_id = ?
+            ORDER BY check_key ASC
+            """,
+            (task_id,),
+        ).fetchall()
+        return [
+            {
+                "check_key": str(row["check_key"]),
+                "hunger_item_id": str(row["hunger_item_id"]),
+                "check_index": int(row["check_index"]),
+                "accepted_at_loop": int(row["accepted_at_loop"]),
+                "validation_id": str(row["validation_id"]),
+                "evidence_id": (
+                    str(row["evidence_id"])
+                    if row["evidence_id"] is not None
+                    else None
+                ),
+            }
+            for row in rows
+        ]
 
     def save_accepted_check(
         self,
@@ -1063,6 +1131,18 @@ class SQLiteRepository:
             "DELETE FROM task_locks WHERE task_id = ? AND owner = ?",
             (task_id, owner),
         )
+
+    def get_task_lock(self, task_id: str) -> dict[str, object] | None:
+        row = self.conn.execute(
+            "SELECT owner, locked_at FROM task_locks WHERE task_id = ?",
+            (task_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        locked_at = datetime.fromisoformat(
+            str(row["locked_at"]).replace("Z", "+00:00")
+        )
+        return {"owner": str(row["owner"]), "locked_at": locked_at}
 
     @contextmanager
     def transaction(self) -> Iterator[None]:

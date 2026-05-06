@@ -207,6 +207,15 @@ class InMemoryRepository:
     def mark_candidate_rejected(self, candidate_id: str) -> None:
         self._rejected.add(candidate_id)
 
+    def list_candidates_for_task(self, task_id: str) -> list[CandidateState]:
+        return sorted(
+            (c for c in self._candidates.values() if c.task_id == task_id),
+            key=lambda c: c.loop_id,
+        )
+
+    def get_candidate(self, candidate_id: str) -> CandidateState | None:
+        return self._candidates.get(candidate_id)
+
     # =====================================================================
     # Section 3 — Validation
     # =====================================================================
@@ -215,6 +224,24 @@ class InMemoryRepository:
 
     def add_failure_from_validation(self, report: ValidationReport) -> None:
         self._failures.append(report)
+
+    def get_validation_report(
+        self, validation_id: str
+    ) -> ValidationReport | None:
+        return self._validation_reports.get(validation_id)
+
+    def validation_exists(self, validation_id: str) -> bool:
+        return validation_id in self._validation_reports
+
+    def iter_accepted_checks(self, task_id: str) -> list[dict[str, object]]:
+        rows: list[dict[str, object]] = []
+        for (rec_task, check_key), record in sorted(self._accepted_checks.items()):
+            if rec_task != task_id:
+                continue
+            row: dict[str, object] = {"check_key": check_key}
+            row.update(record)
+            rows.append(row)
+        return rows
 
     def save_accepted_check(
         self,
@@ -608,6 +635,13 @@ class InMemoryRepository:
         # double-release after a steal.
         if existing["owner"] == owner:
             del self._task_locks[task_id]
+
+    def get_task_lock(self, task_id: str) -> dict[str, object] | None:
+        info = self._task_locks.get(task_id)
+        if info is None:
+            return None
+        # Return a shallow copy so callers can't mutate stored state.
+        return dict(info)
 
     @contextmanager
     def transaction(self) -> Iterator[None]:
