@@ -33,6 +33,7 @@ from pydantic import BaseModel, Field
 
 from hungerloop.models.blackboard import Artifact
 from hungerloop.models.context import ContextPack
+from hungerloop.models.events import EventType
 from hungerloop.repository.protocol import RepositoryProtocol
 from hungerloop.services.budget_guard import BudgetGuard
 from hungerloop.services.tools import Tool
@@ -94,6 +95,20 @@ class ToolHarness:
                 ToolResult) so :class:`WorkerRuntime` can re-raise via the
                 same pathway as :class:`WorkerBudgetExceeded`.
         """
+        # PRD §7.5: TOOL_CALL_STARTED fires once per execute() call,
+        # before unknown-tool / policy / budget rejections so the audit
+        # trail shows every attempted call (not just successful dispatches).
+        self.repo.append_event(
+            EventType.TOOL_CALL_STARTED,
+            {
+                "tool_name": tool_name,
+                "agent_id": context.agent_id,
+                "args_summary": self._summarize_args(args),
+            },
+            task_id=context.task_id,
+            loop_id=context.loop_id,
+        )
+
         tool = self.tool_registry.get(tool_name)
         if tool is None:
             evidence_id = self.repo.save_tool_call_as_evidence(
@@ -105,6 +120,16 @@ class ToolHarness:
                 result_summary=f"unknown tool: {tool_name}",
                 success=False,
                 elapsed_ms=0,
+            )
+            self.repo.append_event(
+                EventType.TOOL_CALL_FAILED,
+                {
+                    "tool_name": tool_name,
+                    "agent_id": context.agent_id,
+                    "error_type": "unknown_tool",
+                },
+                task_id=context.task_id,
+                loop_id=context.loop_id,
             )
             return ToolResult(
                 tool_name=tool_name,
@@ -151,6 +176,17 @@ class ToolHarness:
                 context.agent_id,
                 tool_calls=1,
                 elapsed_seconds=elapsed_seconds,
+            )
+            self.repo.append_event(
+                EventType.TOOL_CALL_FAILED,
+                {
+                    "tool_name": tool_name,
+                    "agent_id": context.agent_id,
+                    "error_type": error_type,
+                    "elapsed_ms": elapsed_ms,
+                },
+                task_id=context.task_id,
+                loop_id=context.loop_id,
             )
             return ToolResult(
                 tool_name=tool_name,
@@ -201,6 +237,31 @@ class ToolHarness:
             tool_calls=1,
             elapsed_seconds=elapsed_seconds,
         )
+
+        if outcome.success:
+            self.repo.append_event(
+                EventType.TOOL_CALL_SUCCEEDED,
+                {
+                    "tool_name": tool_name,
+                    "agent_id": context.agent_id,
+                    "elapsed_ms": elapsed_ms,
+                    "artifact_count": len(artifact_ids),
+                },
+                task_id=context.task_id,
+                loop_id=context.loop_id,
+            )
+        else:
+            self.repo.append_event(
+                EventType.TOOL_CALL_FAILED,
+                {
+                    "tool_name": tool_name,
+                    "agent_id": context.agent_id,
+                    "error_type": "tool_failed",
+                    "elapsed_ms": elapsed_ms,
+                },
+                task_id=context.task_id,
+                loop_id=context.loop_id,
+            )
 
         return ToolResult(
             tool_name=tool_name,

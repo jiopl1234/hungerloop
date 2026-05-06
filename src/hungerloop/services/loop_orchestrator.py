@@ -114,7 +114,26 @@ class LoopOrchestrator:
         to terminate. The Orchestrator never raises; cost ceilings hit
         inside :class:`WorkerRuntime` are converted to ``SAFETY_STOP``
         reports here.
+
+        v0.5d.0 (PRD §7.5): emits the fine-grained lifecycle event
+        sequence — LOOP_STARTED → LOOP_PLANNED → (WORKER_STARTED →
+        … → WORKER_FINISHED|FAILED)+ → CANDIDATE_CREATED →
+        VALIDATION_STARTED → CHECK_*+ → VALIDATION_FINISHED →
+        CANDIDATE_COMMITTED|REJECTED → LOOP_COMMITTED|LOOP_REJECTED.
+        Synthetic worker exceptions are caught at this level so a
+        :class:`LoopTrace` and ERROR :class:`StopReport` always
+        persist (FR-9 / synthetic-worker-exception persistence).
         """
+        try:
+            return await self._step_inner(task_id)
+        except (SafetyStopError, KeyboardInterrupt):
+            # SafetyStop has its own emit path inside _step_inner; KeyboardInterrupt
+            # is operator-driven and not orchestrator-error.
+            raise
+        except Exception as exc:  # pragma: no cover - exercised by D0-13 test
+            return self._emit_error_stop(task_id, exc)
+
+    async def _step_inner(self, task_id: str) -> LoopTrace | StopReport:
         policy = self.repo.get_hunger_policy(task_id)
         clock = self.repo.get_hunger_clock(task_id)
         ledger = self.repo.get_hunger_ledger(task_id)
@@ -134,6 +153,11 @@ class LoopOrchestrator:
         # Consume one loop budget unit as soon as the loop is accepted.
         clock.loop_count += 1
         self.repo.save_hunger_clock(clock)
+
+        # Capture best_state anchor BEFORE any candidate work so the trace's
+        # "before" pointer is unambiguous even on failure paths.
+        best_before = self.repo.get_best_state(task_id)
+        best_state_id_before = best_before.state_id if best_before else None
 
         candidate_root = self.workspace_manager.create_candidate_workspace(
             task_id, loop_id
@@ -157,6 +181,19 @@ class LoopOrchestrator:
         budget = self.budget_allocator.allocate(snapshot)
         plan = self.planner.plan(task_id, loop_id, snapshot, budget)
         self.repo.save_loop_plan(plan)
+        # PRD §7.5: LOOP_PLANNED fires once after the planner returns,
+        # regardless of whether the plan has assignments.
+        self.repo.append_event(
+            EventType.LOOP_PLANNED,
+            {
+                "loop_id": loop_id,
+                "selected_hunger_item_ids": list(plan.selected_hunger_item_ids),
+                "worker_ids": [a.agent_id for a in plan.assignments],
+                "assignment_count": len(plan.assignments),
+            },
+            task_id=task_id,
+            loop_id=loop_id,
+        )
 
         if not plan.assignments:
             return self._handle_empty_plan(
@@ -164,6 +201,7 @@ class LoopOrchestrator:
                 loop_id=loop_id,
                 snapshot=snapshot,
                 plan=plan,
+                best_state_id_before=best_state_id_before,
             )
 
         try:
@@ -199,7 +237,26 @@ class LoopOrchestrator:
 
         candidate = self.integrator.integrate(task_id, loop_id, worker_results)
         self.repo.save_candidate(candidate)
+        self.repo.append_event(
+            EventType.CANDIDATE_CREATED,
+            {
+                "candidate_state_id": candidate.id,
+                "loop_id": loop_id,
+                "worker_ids": [r.agent_id for r in worker_results],
+            },
+            task_id=task_id,
+            loop_id=loop_id,
+        )
 
+        self.repo.append_event(
+            EventType.VALIDATION_STARTED,
+            {
+                "candidate_state_id": candidate.id,
+                "target_hunger_item_ids": list(plan.selected_hunger_item_ids),
+            },
+            task_id=task_id,
+            loop_id=loop_id,
+        )
         validation = await self.validation_gate.validate(
             task_id=task_id,
             loop_id=loop_id,
@@ -207,8 +264,41 @@ class LoopOrchestrator:
             target_hunger_item_ids=plan.selected_hunger_item_ids,
         )
         self.repo.save_validation_report(validation)
+        self._emit_check_events(task_id, loop_id, validation)
+        self.repo.append_event(
+            EventType.VALIDATION_FINISHED,
+            {
+                "validation_report_id": validation.id,
+                "verdict": validation.verdict.value,
+                "newly_passed": list(validation.newly_passed_check_keys),
+                "regressed": list(validation.regressed_check_keys),
+            },
+            task_id=task_id,
+            loop_id=loop_id,
+        )
 
         commit_decision = self.commit_manager.apply(candidate, validation)
+        if commit_decision["committed"]:
+            self.repo.append_event(
+                EventType.CANDIDATE_COMMITTED,
+                {
+                    "candidate_state_id": candidate.id,
+                    "validation_report_id": validation.id,
+                },
+                task_id=task_id,
+                loop_id=loop_id,
+            )
+        else:
+            self.repo.append_event(
+                EventType.CANDIDATE_REJECTED,
+                {
+                    "candidate_state_id": candidate.id,
+                    "validation_report_id": validation.id,
+                    "reason": commit_decision["reason"],
+                },
+                task_id=task_id,
+                loop_id=loop_id,
+            )
         self.hunger_update.apply_validation(task_id, validation)
         stagnation = self.stagnation_detector.update(task_id, loop_id, validation)
 
@@ -216,6 +306,10 @@ class LoopOrchestrator:
             self.memory_manager.propose_from_loop(task_id, loop_id, validation)
         # SkillCard generation is end-of-task only (PRD §20.2); the CLI calls
         # SkillManager.maybe_create_skill_card after the StopReport is built.
+
+        # best_state may have been promoted by CommitManager.apply.
+        best_after = self.repo.get_best_state(task_id)
+        best_state_id_after = best_after.state_id if best_after else None
 
         usage_after = self.repo.get_usage_snapshot(task_id).model_copy()
         trace = LoopTrace(
@@ -232,6 +326,12 @@ class LoopOrchestrator:
             committed=commit_decision["committed"],
             newly_passed_check_keys=list(validation.newly_passed_check_keys),
             regressed_check_keys=list(validation.regressed_check_keys),
+            currently_passed_check_keys=list(validation.currently_passed_check_keys),
+            satisfied_hunger_item_ids=list(validation.satisfied_hunger_item_ids),
+            unsatisfied_hunger_item_ids=list(validation.unsatisfied_hunger_item_ids),
+            best_state_id_before_loop=best_state_id_before,
+            best_state_id_after_loop=best_state_id_after,
+            verdict=validation.verdict.value,
             blocked_items_added=list(stagnation["blocked_items"]),
             blocked_item_ids=list(stagnation["blocked_items"]),
             tokens_consumed_this_loop=usage_after.tokens - usage_before.tokens,
@@ -275,6 +375,74 @@ class LoopOrchestrator:
             return self._emit_stop(task_id, StopReason.BLOCKED)
         return trace
 
+    def _emit_check_events(
+        self, task_id: str, loop_id: int, validation: ValidationReport
+    ) -> None:
+        """One CHECK_PASSED / CHECK_FAILED / CHECK_REGRESSED event per row."""
+        for check in validation.check_results:
+            if check.regressed:
+                event_type = EventType.CHECK_REGRESSED
+            elif check.passed:
+                event_type = EventType.CHECK_PASSED
+            else:
+                event_type = EventType.CHECK_FAILED
+            self.repo.append_event(
+                event_type,
+                {
+                    "check_key": check.check_key,
+                    "newly_passed": check.newly_passed,
+                },
+                task_id=task_id,
+                loop_id=loop_id,
+            )
+
+    def _emit_error_stop(self, task_id: str, exc: BaseException) -> StopReport:
+        """Persist a LoopTrace + StopReport when the orchestrator caught
+        an unexpected exception (FR-9 / synthetic-worker-exception path).
+
+        The trace carries ``stop_reason=ERROR`` and a ``worker_errors``
+        entry so ``hungerloop trace`` shows the failure cause; the
+        StopReport gets the standard resume_hint via _emit_stop.
+        """
+        # Record the error in the event log so trace export surfaces it.
+        self.repo.append_event(
+            EventType.ERROR,
+            {
+                "error_type": type(exc).__name__,
+                "error_message": str(exc)[:240],
+            },
+            task_id=task_id,
+        )
+        # Best-effort LoopTrace so a downstream `repair-state --check`
+        # can detect D10 (stopped task with no trace) cleanly.
+        try:
+            loop_id = self.repo.next_loop_id(task_id)
+            error_trace = LoopTrace(
+                task_id=task_id,
+                loop_id=loop_id,
+                phase="error",
+                active_hunger=0.0,
+                drive_budget=0.0,
+                work_pressure=0.0,
+                committed=False,
+                worker_errors=[f"{type(exc).__name__}: {str(exc)[:240]}"],
+                stop_reason=StopReason.ERROR,
+                delta_summary=f"orchestrator caught {type(exc).__name__}",
+                next_action="repair",
+            )
+            self.repo.save_loop_trace(error_trace)
+        except Exception:  # pragma: no cover — defence in depth
+            # Don't let trace persistence failure hide the real error.
+            pass
+        return self._emit_stop(
+            task_id,
+            StopReason.ERROR,
+            recommendation=(
+                f"orchestrator caught {type(exc).__name__}: {str(exc)[:240]}; "
+                "run repair-state --check, then run --resume or --reset"
+            ),
+        )
+
     async def run(self, task_id: str) -> StopReport:
         """Drive :meth:`step` until a :class:`StopReport` is returned.
 
@@ -304,7 +472,14 @@ class LoopOrchestrator:
         budget: BudgetAllocation,
         candidate_root: Path,
     ) -> list[WorkerResult]:
-        """Build context and dispatch each assignment in plan order."""
+        """Build context and dispatch each assignment in plan order.
+
+        v0.5d.0 (PRD §7.5): emits WORKER_STARTED / WORKER_FINISHED /
+        WORKER_FAILED for each assignment. ``WORKER_FAILED`` fires
+        when ``WorkerResult.error`` is populated; bare exceptions in
+        the worker runtime propagate to ``_step_inner``'s outer
+        try/except and become an ERROR stop.
+        """
         results: list[WorkerResult] = []
         for assignment in plan.assignments:
             spec = self.repo.get_agent_spec(assignment.agent_id)
@@ -319,12 +494,60 @@ class LoopOrchestrator:
                 output_schema_name=spec.output_schema_name,
                 candidate_workspace_ref=f"candidates/loop_{loop_id:03d}",
             )
+            self.repo.append_event(
+                EventType.WORKER_STARTED,
+                {
+                    "agent_id": assignment.agent_id,
+                    "mission": assignment.mission,
+                    "target_hunger_item_ids": list(
+                        assignment.target_hunger_item_ids
+                    ),
+                },
+                task_id=task_id,
+                loop_id=loop_id,
+            )
             result = await self.worker_runtime.run(
                 spec, context, workspace_root=candidate_root
             )
             self.repo.save_worker_result(result)
             results.append(result)
+            failure_msg = self._worker_failure_message(result)
+            if failure_msg is not None:
+                self.repo.append_event(
+                    EventType.WORKER_FAILED,
+                    {
+                        "agent_id": assignment.agent_id,
+                        "error": failure_msg,
+                    },
+                    task_id=task_id,
+                    loop_id=loop_id,
+                )
+            else:
+                self.repo.append_event(
+                    EventType.WORKER_FINISHED,
+                    {
+                        "agent_id": assignment.agent_id,
+                        "evidence_count": len(result.evidence_ids),
+                        "artifact_count": len(result.artifact_ids),
+                    },
+                    task_id=task_id,
+                    loop_id=loop_id,
+                )
         return results
+
+    @staticmethod
+    def _worker_failure_message(result: WorkerResult) -> str | None:
+        """Extract a short failure description from a WorkerResult.
+
+        Returns ``None`` when the worker is treated as successful (no
+        ``error`` field and ``requires_human`` is False); otherwise a
+        truncated description suitable for a WORKER_FAILED payload.
+        """
+        if result.error is not None:
+            return result.error[:240]
+        if result.requires_human:
+            return "requires_human"
+        return None
 
     def _handle_empty_plan(
         self,
@@ -333,6 +556,7 @@ class LoopOrchestrator:
         loop_id: int,
         snapshot: HungerSnapshot,
         plan: LoopPlan,
+        best_state_id_before: str | None,
     ) -> LoopTrace | StopReport:
         """No assignments — bump the streak; only stop when the threshold trips."""
         self.workspace_manager.reject_candidate(task_id, loop_id)
@@ -356,6 +580,8 @@ class LoopOrchestrator:
             candidate_state_id=None,
             validation_report_id=None,
             committed=False,
+            best_state_id_before_loop=best_state_id_before,
+            best_state_id_after_loop=best_state_id_before,
             delta_summary="empty plan",
             next_action="continue",
         )
@@ -378,11 +604,28 @@ class LoopOrchestrator:
         Orchestrator never calls ``repo.save_stop_report``. Tests that
         need a record in repository state must call ``save_stop_report``
         themselves after receiving the report.
+
+        v0.5d.0: emits a ``STOP_REPORT_CREATED`` event so the trace
+        log marks every terminal transition. The event is best-effort
+        (failures don't block the StopReport return).
         """
-        return build_stop_report(
+        report = build_stop_report(
             self.repo,
             task_id,
             stop_reason,
             recommendation=recommendation,
         )
+        try:
+            self.repo.append_event(
+                EventType.STOP_REPORT_CREATED,
+                {
+                    "stop_reason": stop_reason.value,
+                    "goal_status": report.goal_status,
+                    "total_loops": report.total_loops,
+                },
+                task_id=task_id,
+            )
+        except Exception:  # pragma: no cover — defensive
+            pass
+        return report
 

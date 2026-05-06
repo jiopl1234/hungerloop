@@ -114,13 +114,33 @@ class OpenAIModelClient:
         I-8: ``cost_guard.assert_within_budget`` runs *before every* attempt,
         not just before the first one, so a budget that flips during a long
         retry sequence still short-circuits cleanly with ``SafetyStopError``.
+
+        v0.5d.0 (PRD §7.5): emits MODEL_CALL_STARTED once per call,
+        plus _SUCCEEDED / _FAILED / _AUTH_REQUIRED / _RATE_LIMITED
+        per attempt. The orchestrator's per-loop sequence shows every
+        retry; downstream aggregators can collapse by ``call_id``.
         """
+        # Stable per-call id so retries on the same call can be collapsed
+        # by downstream aggregators / dashboards.
+        call_id = f"mc-{loop_id:03d}-{agent_id}-{id(messages):x}"
+        self.repo.append_event(
+            EventType.MODEL_CALL_STARTED,
+            {
+                "call_id": call_id,
+                "agent_id": agent_id,
+                "model": self.config.model_name,
+                "max_tokens": max_tokens,
+                "max_retries": max_retries,
+            },
+            task_id=task_id,
+            loop_id=loop_id,
+        )
         last_error: ModelCallError | None = None
         async with self._client_factory() as client:
             for attempt in range(max_retries + 1):
                 self.cost_guard.assert_within_budget(task_id)
                 try:
-                    return await self._call_once(
+                    response = await self._call_once(
                         client,
                         task_id=task_id,
                         loop_id=loop_id,
@@ -140,9 +160,32 @@ class OpenAIModelClient:
                         error_message=str(exc),
                         retryable=False,
                     )
+                    self.repo.append_event(
+                        EventType.MODEL_AUTH_REQUIRED,
+                        {
+                            "call_id": call_id,
+                            "agent_id": agent_id,
+                            "model": self.config.model_name,
+                            "attempt": attempt,
+                        },
+                        task_id=task_id,
+                        loop_id=loop_id,
+                    )
                     raise
                 except ModelRateLimitError as exc:
                     last_error = exc
+                    self.repo.append_event(
+                        EventType.MODEL_RATE_LIMITED,
+                        {
+                            "call_id": call_id,
+                            "agent_id": agent_id,
+                            "model": self.config.model_name,
+                            "attempt": attempt,
+                            "retry_after": exc.retry_after,
+                        },
+                        task_id=task_id,
+                        loop_id=loop_id,
+                    )
                     if attempt >= max_retries:
                         break
                     delay = self._delay_for_rate_limit(
@@ -162,8 +205,38 @@ class OpenAIModelClient:
                         + random.uniform(0, 0.5),
                     )
                     await asyncio.sleep(delay)
+                else:
+                    self.repo.append_event(
+                        EventType.MODEL_CALL_SUCCEEDED,
+                        {
+                            "call_id": call_id,
+                            "agent_id": agent_id,
+                            "model": self.config.model_name,
+                            "attempt": attempt,
+                            "input_tokens": response.usage.input_tokens,
+                            "output_tokens": response.usage.output_tokens,
+                            "cost_usd": response.usage.cost_usd,
+                        },
+                        task_id=task_id,
+                        loop_id=loop_id,
+                    )
+                    return response
 
         assert last_error is not None
+        # Final MODEL_CALL_FAILED event after all retries exhausted.
+        self.repo.append_event(
+            EventType.MODEL_CALL_FAILED,
+            {
+                "call_id": call_id,
+                "agent_id": agent_id,
+                "model": self.config.model_name,
+                "error_type": type(last_error).__name__,
+                "error_message": str(last_error)[:240],
+                "retryable": last_error.retryable,
+            },
+            task_id=task_id,
+            loop_id=loop_id,
+        )
         # Final-error evidence (PRD §11.4 #6).
         self.repo.save_model_error_as_evidence(
             task_id=task_id,
