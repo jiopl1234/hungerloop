@@ -117,6 +117,23 @@ def test_v0_5e_memory_lifecycle_additions_present() -> None:
     assert expected <= actual
 
 
+def test_v0_5e_skill_lifecycle_additions_present() -> None:
+    """v0.5e.1 (PRD §18 / FR-16): skill lifecycle audit events.
+
+    The shipped ``skill_card_emitted`` stays in the enum but is no
+    longer fired by SkillManager — the candidate/active split owns
+    the audit trail going forward.
+    """
+    expected = {
+        "skill_card_candidate_created",
+        "skill_card_activated",
+        "skill_card_rejected",
+        "skill_card_imported",
+    }
+    actual = {m.value for m in EventType}
+    assert expected <= actual
+
+
 def test_no_shipped_event_value_renamed() -> None:
     """Wire-contract regression net (PRD §7.2) — every value that ever
     shipped to operators must remain in the enum. Adding to this set

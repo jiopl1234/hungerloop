@@ -91,3 +91,10 @@ class EventType(str, Enum):
     MEMORY_CANDIDATE_EXPIRED = "memory_candidate_expired"
     MEMORY_PROMOTED = "memory_promoted"
     SKILL_CARD_EMITTED = "skill_card_emitted"
+    # v0.5e.1 — skill lifecycle (PRD §18 / FR-16). The shipped
+    # SKILL_CARD_EMITTED stays in the enum but is no longer emitted by
+    # SkillManager; the new vocabulary mirrors memory's lifecycle shape.
+    SKILL_CARD_CANDIDATE_CREATED = "skill_card_candidate_created"
+    SKILL_CARD_ACTIVATED = "skill_card_activated"
+    SKILL_CARD_REJECTED = "skill_card_rejected"
+    SKILL_CARD_IMPORTED = "skill_card_imported"

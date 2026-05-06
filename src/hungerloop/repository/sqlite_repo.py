@@ -24,7 +24,7 @@ from hungerloop.models.hunger import (
 )
 from hungerloop.models.memory import MemoryCandidate, PromotedMemory
 from hungerloop.models.planning import LoopPlan
-from hungerloop.models.skill import SkillCard
+from hungerloop.models.skill import ActiveSkillCard, SkillCard, SkillCardCandidate
 from hungerloop.models.task import TaskRecord
 from hungerloop.models.tracing import LoopTrace, StopReport
 from hungerloop.models.usage import UsageSnapshot
@@ -1189,6 +1189,132 @@ class SQLiteRepository:
             ).fetchall()
         return [
             SkillCard.model_validate(_loads(str(row["payload_json"])))
+            for row in rows
+        ]
+
+    def save_skill_card_candidate(
+        self, candidate: SkillCardCandidate
+    ) -> None:
+        self._ensure_task(candidate.task_id)
+        self.conn.execute(
+            """
+            INSERT INTO skill_card_candidates(
+              skill_candidate_id, task_id, source_best_state_id,
+              source_stop_report_id, name, state, created_at, payload_json
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(skill_candidate_id) DO UPDATE SET
+              source_best_state_id=excluded.source_best_state_id,
+              source_stop_report_id=excluded.source_stop_report_id,
+              name=excluded.name,
+              state=excluded.state,
+              payload_json=excluded.payload_json
+            """,
+            (
+                candidate.skill_candidate_id,
+                candidate.task_id,
+                candidate.source_best_state_id,
+                candidate.source_stop_report_id,
+                candidate.name,
+                candidate.state,
+                candidate.created_at.isoformat().replace("+00:00", "Z"),
+                _model_json(candidate),
+            ),
+        )
+
+    def get_skill_card_candidate(
+        self, skill_candidate_id: str
+    ) -> SkillCardCandidate | None:
+        row = self.conn.execute(
+            """
+            SELECT payload_json FROM skill_card_candidates
+            WHERE skill_candidate_id = ?
+            """,
+            (skill_candidate_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        return SkillCardCandidate.model_validate(
+            _loads(str(row["payload_json"]))
+        )
+
+    def list_skill_card_candidates(
+        self,
+        *,
+        task_id: str | None = None,
+        state: str | None = None,
+    ) -> list[SkillCardCandidate]:
+        clauses: list[str] = []
+        params: list[object] = []
+        if task_id is not None:
+            clauses.append("task_id = ?")
+            params.append(task_id)
+        if state is not None and state != "all":
+            clauses.append("state = ?")
+            params.append(state)
+        sql = "SELECT payload_json FROM skill_card_candidates"
+        if clauses:
+            sql += " WHERE " + " AND ".join(clauses)
+        sql += " ORDER BY rowid ASC"
+        rows = self.conn.execute(sql, tuple(params)).fetchall()
+        return [
+            SkillCardCandidate.model_validate(_loads(str(row["payload_json"])))
+            for row in rows
+        ]
+
+    def save_active_skill_card(self, skill: ActiveSkillCard) -> None:
+        self.conn.execute(
+            """
+            INSERT INTO active_skill_cards(
+              skill_id, source_candidate_id, name, state,
+              activated_at, activated_by, payload_json
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(skill_id) DO UPDATE SET
+              source_candidate_id=excluded.source_candidate_id,
+              name=excluded.name,
+              state=excluded.state,
+              activated_at=excluded.activated_at,
+              activated_by=excluded.activated_by,
+              payload_json=excluded.payload_json
+            """,
+            (
+                skill.skill_id,
+                skill.source_candidate_id,
+                skill.name,
+                skill.state,
+                skill.activated_at.isoformat().replace("+00:00", "Z"),
+                skill.activated_by,
+                _model_json(skill),
+            ),
+        )
+
+    def get_active_skill_card(self, skill_id: str) -> ActiveSkillCard | None:
+        row = self.conn.execute(
+            "SELECT payload_json FROM active_skill_cards WHERE skill_id = ?",
+            (skill_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        return ActiveSkillCard.model_validate(_loads(str(row["payload_json"])))
+
+    def list_active_skill_cards(
+        self, *, state: str | None = None
+    ) -> list[ActiveSkillCard]:
+        if state is None or state == "all":
+            rows = self.conn.execute(
+                "SELECT payload_json FROM active_skill_cards ORDER BY rowid ASC"
+            ).fetchall()
+        else:
+            rows = self.conn.execute(
+                """
+                SELECT payload_json FROM active_skill_cards
+                WHERE state = ? ORDER BY rowid ASC
+                """,
+                (state,),
+            ).fetchall()
+        return [
+            ActiveSkillCard.model_validate(_loads(str(row["payload_json"])))
             for row in rows
         ]
 

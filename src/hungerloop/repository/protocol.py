@@ -25,7 +25,7 @@ from hungerloop.models.hunger import (
 )
 from hungerloop.models.memory import MemoryCandidate, PromotedMemory
 from hungerloop.models.planning import LoopPlan
-from hungerloop.models.skill import SkillCard
+from hungerloop.models.skill import ActiveSkillCard, SkillCard, SkillCardCandidate
 from hungerloop.models.task import TaskRecord
 from hungerloop.models.tracing import LoopTrace, StopReport
 from hungerloop.models.usage import UsageSnapshot
@@ -353,6 +353,35 @@ class RepositoryProtocol(Protocol):
 
     def save_skill_card(self, card: SkillCard) -> None: ...
     def list_skill_cards(self, task_id: str | None = None) -> list[SkillCard]: ...
+
+    # ----- v0.5e.1 skill lifecycle (PRD §18 / E1-03) ---------------------
+    def save_skill_card_candidate(
+        self, candidate: SkillCardCandidate
+    ) -> None: ...
+    """Insert/update an auto-generated skill candidate awaiting review."""
+
+    def get_skill_card_candidate(
+        self, skill_candidate_id: str
+    ) -> SkillCardCandidate | None: ...
+
+    def list_skill_card_candidates(
+        self,
+        *,
+        task_id: str | None = None,
+        state: str | None = None,
+    ) -> list[SkillCardCandidate]: ...
+    """Filter by task and/or state. Default returns every candidate
+    (state=None means no filter; ``"all"`` is equivalent)."""
+
+    def save_active_skill_card(self, skill: ActiveSkillCard) -> None: ...
+    """Insert/update a promoted skill (FR-3)."""
+
+    def get_active_skill_card(self, skill_id: str) -> ActiveSkillCard | None: ...
+
+    def list_active_skill_cards(
+        self, *, state: str | None = None
+    ) -> list[ActiveSkillCard]: ...
+    """List every active/deprecated skill. State filter is optional."""
 
     # =====================================================================
     # Section 8 — Approvals, misc, transactions, task lock

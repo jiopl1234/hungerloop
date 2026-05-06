@@ -25,7 +25,7 @@ from hungerloop.models.hunger import (
 )
 from hungerloop.models.memory import MemoryCandidate, PromotedMemory
 from hungerloop.models.planning import LoopPlan
-from hungerloop.models.skill import SkillCard
+from hungerloop.models.skill import ActiveSkillCard, SkillCard, SkillCardCandidate
 from hungerloop.models.task import TaskRecord
 from hungerloop.models.tracing import LoopTrace, StopReport
 from hungerloop.models.usage import UsageSnapshot
@@ -76,6 +76,8 @@ class InMemoryRepository:
         self._memory: dict[str, MemoryCandidate] = {}
         self._promoted_memories: dict[str, PromotedMemory] = {}
         self._skills: dict[str, SkillCard] = {}
+        self._skill_candidates: dict[str, SkillCardCandidate] = {}
+        self._active_skills: dict[str, ActiveSkillCard] = {}
         self._committed_refs: dict[str, int] = {}
 
         # Misc
@@ -639,6 +641,43 @@ class InMemoryRepository:
         if task_id is None:
             return list(self._skills.values())
         return [s for s in self._skills.values() if s.task_id == task_id]
+
+    def save_skill_card_candidate(
+        self, candidate: SkillCardCandidate
+    ) -> None:
+        self._skill_candidates[candidate.skill_candidate_id] = candidate
+
+    def get_skill_card_candidate(
+        self, skill_candidate_id: str
+    ) -> SkillCardCandidate | None:
+        return self._skill_candidates.get(skill_candidate_id)
+
+    def list_skill_card_candidates(
+        self,
+        *,
+        task_id: str | None = None,
+        state: str | None = None,
+    ) -> list[SkillCardCandidate]:
+        out = list(self._skill_candidates.values())
+        if task_id is not None:
+            out = [c for c in out if c.task_id == task_id]
+        if state is not None and state != "all":
+            out = [c for c in out if c.state == state]
+        return out
+
+    def save_active_skill_card(self, skill: ActiveSkillCard) -> None:
+        self._active_skills[skill.skill_id] = skill
+
+    def get_active_skill_card(self, skill_id: str) -> ActiveSkillCard | None:
+        return self._active_skills.get(skill_id)
+
+    def list_active_skill_cards(
+        self, *, state: str | None = None
+    ) -> list[ActiveSkillCard]:
+        out = list(self._active_skills.values())
+        if state is not None and state != "all":
+            out = [s for s in out if s.state == state]
+        return out
 
     # =====================================================================
     # Section 8 — Approvals, misc, transactions
