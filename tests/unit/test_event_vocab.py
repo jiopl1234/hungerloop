@@ -99,6 +99,24 @@ def test_v0_5d_additions_present() -> None:
     assert expected <= actual
 
 
+def test_v0_5e_memory_lifecycle_additions_present() -> None:
+    """v0.5e.0 (PRD §19 / FR-22): memory lifecycle audit events.
+
+    The shipped ``memory_candidate_emitted`` is unchanged; the new
+    rows fire from the CLI's approve/reject/defer/expire commands
+    and from ApprovalEngine's promotion path.
+    """
+    expected = {
+        "memory_candidate_approved",
+        "memory_candidate_rejected",
+        "memory_candidate_deferred",
+        "memory_candidate_expired",
+        "memory_promoted",
+    }
+    actual = {m.value for m in EventType}
+    assert expected <= actual
+
+
 def test_no_shipped_event_value_renamed() -> None:
     """Wire-contract regression net (PRD §7.2) — every value that ever
     shipped to operators must remain in the enum. Adding to this set

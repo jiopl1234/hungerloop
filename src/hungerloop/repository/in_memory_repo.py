@@ -107,6 +107,9 @@ class InMemoryRepository:
     def get_task(self, task_id: str) -> TaskRecord | None:
         return self._tasks.get(task_id)
 
+    def list_task_ids(self) -> list[str]:
+        return list(self._tasks.keys())
+
     def task_exists(self, task_id: str) -> bool:
         if task_id in self._tasks:
             return True

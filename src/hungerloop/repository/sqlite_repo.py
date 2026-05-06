@@ -130,6 +130,12 @@ class SQLiteRepository:
             updated_at=str(row["updated_at"]),
         )
 
+    def list_task_ids(self) -> list[str]:
+        rows = self.conn.execute(
+            "SELECT task_id FROM tasks ORDER BY rowid ASC"
+        ).fetchall()
+        return [str(row["task_id"]) for row in rows]
+
     def task_exists(self, task_id: str) -> bool:
         row = self.conn.execute(
             "SELECT 1 FROM tasks WHERE task_id = ? LIMIT 1", (task_id,)

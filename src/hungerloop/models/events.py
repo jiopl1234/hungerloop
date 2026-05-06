@@ -83,4 +83,11 @@ class EventType(str, Enum):
 
     # ----- Memory / skill -----------------------------------------------
     MEMORY_CANDIDATE_EMITTED = "memory_candidate_emitted"
+    # v0.5e.0 — memory lifecycle (PRD §19 / FR-22). Each row corresponds
+    # to a single CLI verb; the orchestrator never emits these directly.
+    MEMORY_CANDIDATE_APPROVED = "memory_candidate_approved"
+    MEMORY_CANDIDATE_REJECTED = "memory_candidate_rejected"
+    MEMORY_CANDIDATE_DEFERRED = "memory_candidate_deferred"
+    MEMORY_CANDIDATE_EXPIRED = "memory_candidate_expired"
+    MEMORY_PROMOTED = "memory_promoted"
     SKILL_CARD_EMITTED = "skill_card_emitted"
