@@ -213,6 +213,16 @@ class RepositoryProtocol(Protocol):
 
     def get_artifacts_by_ids(self, artifact_ids: list[str]) -> list[Artifact]: ...
 
+    def list_successful_tool_call_evidence(
+        self, task_id: str
+    ) -> list[dict[str, object]]: ...
+    """New in v0.5e.1 (E1-05 / PRD §18.4): list every successful
+    ``tool_call`` evidence row for ``task_id`` so ``derive_tools`` can
+    walk them in chronological order. Each dict carries
+    ``loop_id``, ``payload`` (with ``tool_name``), and the standard
+    evidence fields. Used only by the derivation helpers; CLI surfaces
+    can still call ``count_evidence_by_type`` for cardinality."""
+
     def save_artifact(self, artifact: Artifact) -> None: ...
     """New in v0.5a (Day 5): ToolHarness persists artifacts produced by
     write_file / patch_file. Previously a test-only helper on

@@ -60,17 +60,59 @@ def test_skill_card_none_when_best_is_missing() -> None:
 
 
 def test_skill_card_generated_on_done_with_two_checks() -> None:
+    """v0.5e.1 trigger: writes a SkillCardCandidate (not a SkillCard).
+
+    The legacy ``skill_cards`` table is intentionally untouched —
+    operators promote the candidate via ``hungerloop skill approve``.
+    """
+    from hungerloop.models.tracing import LoopTrace
+
     repo = InMemoryRepository()
+    repo.create_task("t1", "Goal")
     repo.save_best_state(_best(["H-001:0", "H-001:1"]))
+    # Trigger condition #4: a successful tool_call evidence row.
+    repo.save_tool_call_as_evidence(
+        task_id="t1",
+        loop_id=1,
+        agent_id="a1",
+        tool_name="write_file",
+        args_summary="{}",
+        result_summary="ok",
+        success=True,
+        elapsed_ms=1,
+    )
+    # Trigger condition #5: a committed LoopTrace with no regressions.
+    repo.save_loop_trace(
+        LoopTrace(
+            task_id="t1",
+            loop_id=1,
+            phase="exploit",
+            active_hunger=10.0,
+            drive_budget=10.0,
+            work_pressure=0.0,
+            committed=True,
+            delta_summary="wrote report.md",
+        )
+    )
+
     mgr = SkillManager(repo)
-    card = mgr.maybe_create_skill_card("t1", _stop(StopReason.DONE))
-    assert card is not None
-    assert card.task_id == "t1"
-    assert card.accepted_check_keys == ["H-001:0", "H-001:1"]
-    assert card.evidence_ids == ["ev-1", "ev-2"]
-    saved = repo.list_skill_cards("t1")
+    candidate = mgr.maybe_create_skill_card("t1", _stop(StopReason.DONE))
+    assert candidate is not None
+    assert candidate.task_id == "t1"
+    assert candidate.accepted_check_keys == ["H-001:0", "H-001:1"]
+    assert candidate.evidence_ids == ["ev-1", "ev-2"]
+    assert candidate.state == "candidate"
+
+    saved = repo.list_skill_card_candidates(task_id="t1")
     assert len(saved) == 1
-    assert saved[0].skill_id == card.skill_id
+    assert saved[0].skill_candidate_id == candidate.skill_candidate_id
+
+    # Legacy skill_cards table is intentionally empty.
+    assert repo.list_skill_cards("t1") == []
+
+    # Audit event fired.
+    types = {ev["event_type"] for ev in repo.list_events("t1")}
+    assert "skill_card_candidate_created" in types
 
 
 # ---- CLI list commands ----------------------------------------------------
@@ -78,7 +120,10 @@ def test_skill_card_generated_on_done_with_two_checks() -> None:
 
 @pytest.fixture
 def populated_context(tmp_path: Path) -> CliContext:
+    from hungerloop.models.tracing import LoopTrace
+
     repo = InMemoryRepository()
+    repo.create_task("t1", "Goal")
     repo.save_memory_candidate(
         MemoryCandidate(
             candidate_id="mem-1",
@@ -92,6 +137,28 @@ def populated_context(tmp_path: Path) -> CliContext:
         )
     )
     repo.save_best_state(_best(["H-001:0", "H-001:1"]))
+    repo.save_tool_call_as_evidence(
+        task_id="t1",
+        loop_id=1,
+        agent_id="a1",
+        tool_name="write_file",
+        args_summary="{}",
+        result_summary="ok",
+        success=True,
+        elapsed_ms=1,
+    )
+    repo.save_loop_trace(
+        LoopTrace(
+            task_id="t1",
+            loop_id=1,
+            phase="exploit",
+            active_hunger=10.0,
+            drive_budget=10.0,
+            work_pressure=0.0,
+            committed=True,
+            delta_summary="wrote report.md",
+        )
+    )
     SkillManager(repo).maybe_create_skill_card("t1", _stop(StopReason.DONE))
     return CliContext(repo=repo, workspace_root=tmp_path)
 

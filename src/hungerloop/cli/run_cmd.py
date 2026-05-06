@@ -258,7 +258,7 @@ def run(
 
     click.echo(f"Task {task_id} stopped: {report.stop_reason.value}")
     if skill_card is not None:
-        click.echo(f"  skill_card: {skill_card.skill_id}")
+        click.echo(f"  skill_card_candidate: {skill_card.skill_candidate_id}")
     click.echo(f"  goal_status: {report.goal_status}")
     click.echo(f"  total_loops: {report.total_loops}")
     click.echo(f"  total_cost_usd: {report.total_cost_usd:.4f}")

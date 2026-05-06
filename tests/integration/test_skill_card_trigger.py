@@ -35,13 +35,15 @@ async def test_skill_card_emitted_on_done_with_two_checks(tmp_path: Path) -> Non
     report = await orchestrator.run("t1")
     assert report.stop_reason is StopReason.DONE
 
-    card = SkillManager(repo).maybe_create_skill_card("t1", report)
-    assert card is not None
-    assert len(card.accepted_check_keys) >= 2
+    candidate = SkillManager(repo).maybe_create_skill_card("t1", report)
+    assert candidate is not None
+    assert len(candidate.accepted_check_keys) >= 2
 
-    cards = repo.list_skill_cards("t1")
-    assert len(cards) == 1
-    assert cards[0].skill_id == card.skill_id
+    # v0.5e.1: SkillManager writes SkillCardCandidate, not SkillCard.
+    candidates = repo.list_skill_card_candidates(task_id="t1")
+    assert len(candidates) == 1
+    assert candidates[0].skill_candidate_id == candidate.skill_candidate_id
+    assert repo.list_skill_cards("t1") == []
 
 
 async def test_skill_card_skipped_when_only_one_check_accepted(tmp_path: Path) -> None:
