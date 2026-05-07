@@ -578,12 +578,6 @@ class RepairStateService:
                 divergence, summary=f"best/ does not exist for task {task_id}"
             )
 
-        self._workspace.write_manifest(
-            task_id=task_id,
-            path=best_dir,
-            status="best",
-        )
-
         files_on_disk = [p for p in best_dir.rglob("*") if p.is_file()]
         total_bytes = sum(p.stat().st_size for p in files_on_disk)
         summary = (
@@ -596,6 +590,11 @@ class RepairStateService:
             action="fix",
             target=str(best_dir),
             summary=summary,
+        )
+        self._workspace.write_manifest(
+            task_id=task_id,
+            path=best_dir,
+            status="best",
         )
         return FixOutcome(fixed=True, summary=summary)
 
@@ -611,6 +610,16 @@ class RepairStateService:
                     f"could not infer (task_id, loop_id) from {candidate_path}"
                 ),
             )
+        summary = (
+            f"moved orphan candidate loop_{loop_id:03d} to rejected/"
+        )
+        self._emit_event(
+            task_id=task_id,
+            kind="D5",
+            action="fix",
+            target=str(candidate_path),
+            summary=summary,
+        )
         # ``WorkspaceManager.reject_candidate`` expects the ``files/`` dir
         # to exist; if the candidate dir was created without ``files/``
         # (e.g. a hand-rolled stub) move the whole tree manually and write
@@ -634,16 +643,6 @@ class RepairStateService:
                 status="rejected",
                 source_workspace_ref=f"candidates/loop_{loop_id:03d}",
             )
-        summary = (
-            f"moved orphan candidate loop_{loop_id:03d} to rejected/"
-        )
-        self._emit_event(
-            task_id=task_id,
-            kind="D5",
-            action="fix",
-            target=str(candidate_path),
-            summary=summary,
-        )
         return FixOutcome(fixed=True, summary=summary)
 
     def _fix_d10(self, divergence: Divergence) -> FixOutcome:
@@ -666,10 +665,22 @@ class RepairStateService:
             last_loop_id=latest.loop_id,
             recommendation="auto-recovered by repair-state --apply (D10)",
         )
-        self.repo.save_stop_report(report)
         summary = (
             f"synthesised StopReport(stop_reason=ERROR) for task {task_id} "
             f"from loop {latest.loop_id} trace"
+        )
+        # ERROR resume preflight compares repair actions after the latest
+        # stop_report_created event. D10 creates that missing terminal anchor
+        # first, then writes the repair action before mutating StopReport state.
+        self.repo.append_event(
+            EventType.STOP_REPORT_CREATED,
+            {
+                "stop_reason": report.stop_reason.value,
+                "goal_status": report.goal_status,
+                "total_loops": latest.loop_id,
+                "recovered_by": "repair-state",
+            },
+            task_id=task_id,
         )
         self._emit_event(
             task_id=task_id,
@@ -678,13 +689,13 @@ class RepairStateService:
             target=task_id,
             summary=summary,
         )
+        self.repo.save_stop_report(report)
         return FixOutcome(fixed=True, summary=summary)
 
     def _fix_d11(self, divergence: Divergence) -> FixOutcome:
         """Recompute usage_snapshot from evidence rows; persist (PRD §13 / FR-12)."""
         task_id = divergence.target
         recomputed = self.repo.aggregate_evidence_usage(task_id)
-        self.repo.save_usage_snapshot(recomputed)
         summary = (
             f"rewrote usage_snapshot for task {task_id} from evidence "
             f"(tokens={recomputed.tokens}, cost=${recomputed.cost_usd:.4f}, "
@@ -698,6 +709,7 @@ class RepairStateService:
             target=task_id,
             summary=summary,
         )
+        self.repo.save_usage_snapshot(recomputed)
         return FixOutcome(fixed=True, summary=summary)
 
     def _refuse(

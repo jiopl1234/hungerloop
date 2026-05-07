@@ -184,13 +184,25 @@ async def test_budget_guard_pre_check_blocks_overflow(
     harness_setup: tuple[ToolHarness, InMemoryRepository, BudgetGuard, Path],
 ) -> None:
     """Pre-call assert_can_spend rejects when current+addl exceeds max."""
-    harness, _, guard, workspace = harness_setup
+    harness, repo, guard, workspace = harness_setup
     ctx = _ctx(max_tool_calls=1)
     guard.record(ctx.task_id, ctx.loop_id, ctx.agent_id, tool_calls=1)
     with pytest.raises(WorkerBudgetExceeded, match="tool_call"):
         await harness.execute(
             ctx, "write_file", {"path": "x.txt", "content": "x"}, workspace
         )
+    types = [
+        ev["event_type"]
+        for ev in repo.list_events("t1")
+        if ev.get("event_type", "").startswith("tool_call_")
+    ]
+    assert types == ["tool_call_started", "tool_call_failed"]
+    failed_payload = next(
+        ev["payload"]
+        for ev in repo.list_events("t1")
+        if ev["event_type"] == "tool_call_failed"
+    )
+    assert failed_payload["error_type"] == "budget_exceeded"
 
 
 async def test_budget_guard_records_after_call(

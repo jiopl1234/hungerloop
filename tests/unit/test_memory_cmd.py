@@ -271,6 +271,24 @@ def test_list_all_tasks_fanout(context: CliContext) -> None:
     assert "m-2" in result.output
 
 
+def test_show_prints_candidate_details(context: CliContext) -> None:
+    _seed_candidate(
+        context.repo,
+        traceable=False,
+        reusable=False,
+        action_verified=False,
+    )
+    runner = CliRunner()
+    result = runner.invoke(cli, ["memory", "show", "cand-1"], obj=context)
+    assert result.exit_code == 0, result.output
+    assert "candidate_id" in result.output
+    assert "cand-1" in result.output
+    assert "action_verified     : False" in result.output
+    assert "reusable            : False" in result.output
+    assert "traceable           : False" in result.output
+    assert "accepted_check_keys : ['H-001:0']" in result.output
+
+
 # ---------------------------------------------------------------------------
 # memory promoted (list / show)
 # ---------------------------------------------------------------------------

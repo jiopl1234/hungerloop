@@ -35,7 +35,7 @@ from hungerloop.models.blackboard import Artifact
 from hungerloop.models.context import ContextPack
 from hungerloop.models.events import EventType
 from hungerloop.repository.protocol import RepositoryProtocol
-from hungerloop.services.budget_guard import BudgetGuard
+from hungerloop.services.budget_guard import BudgetGuard, WorkerBudgetExceeded
 from hungerloop.services.tools import Tool
 
 
@@ -158,7 +158,20 @@ class ToolHarness:
                 loop_id=context.loop_id,
             )
             raise
-        self.budget_guard.assert_can_spend(context, addl_tool_calls=1)
+        try:
+            self.budget_guard.assert_can_spend(context, addl_tool_calls=1)
+        except WorkerBudgetExceeded:
+            self.repo.append_event(
+                EventType.TOOL_CALL_FAILED,
+                {
+                    "tool_name": tool_name,
+                    "agent_id": context.agent_id,
+                    "error_type": "budget_exceeded",
+                },
+                task_id=context.task_id,
+                loop_id=context.loop_id,
+            )
+            raise
 
         started = time.monotonic()
         try:

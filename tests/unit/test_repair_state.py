@@ -26,6 +26,7 @@ from click.testing import CliRunner
 
 from hungerloop.cli.context import CliContext
 from hungerloop.cli.main import cli
+from hungerloop.cli.preflight import check_resume_preflight
 from hungerloop.models.blackboard import CandidateState
 from hungerloop.models.enums import LoopPhase, ValidationVerdict
 from hungerloop.models.tracing import LoopTrace
@@ -315,6 +316,28 @@ def test_fix_d4_rewrites_manifest_and_emits_event(
     assert service.detect("task-1") == []
 
 
+def test_fix_d4_emits_event_before_manifest_write(
+    context: CliContext, service: RepairStateService
+) -> None:
+    ws = WorkspaceManager(context.workspace_root)
+    _seed_best(ws, "task-1", {"a.txt": "alpha"})
+    (ws.best_files_dir("task-1").parent / "manifest.json").unlink()
+
+    original = service._workspace.write_manifest
+
+    def wrapped_write_manifest(*args: Any, **kwargs: Any) -> None:
+        repair_events = [
+            e for e in context.repo._events if e["event_type"] == "repair_state_action"
+        ]
+        assert repair_events
+        original(*args, **kwargs)
+
+    service._workspace.write_manifest = wrapped_write_manifest  # type: ignore[method-assign]
+    [d4] = service.detect("task-1")
+    outcome = service.apply_fix(d4)
+    assert outcome.fixed is True
+
+
 def test_fix_d5_moves_orphan_to_rejected(
     context: CliContext, service: RepairStateService
 ) -> None:
@@ -333,6 +356,28 @@ def test_fix_d5_moves_orphan_to_rejected(
     assert not (
         ws.task_root("task-1") / "candidates" / "loop_007" / "files"
     ).exists()
+
+
+def test_fix_d5_emits_event_before_candidate_move(
+    context: CliContext, service: RepairStateService
+) -> None:
+    ws = WorkspaceManager(context.workspace_root)
+    _seed_best(ws, "task-1", {"a.txt": "alpha"})
+    ws.create_candidate_workspace("task-1", loop_id=7)
+
+    original = service._workspace.reject_candidate
+
+    def wrapped_reject_candidate(task_id: str, loop_id: int) -> None:
+        repair_events = [
+            e for e in context.repo._events if e["event_type"] == "repair_state_action"
+        ]
+        assert repair_events
+        original(task_id, loop_id)
+
+    service._workspace.reject_candidate = wrapped_reject_candidate  # type: ignore[method-assign]
+    [d5] = [d for d in service.detect("task-1") if d.kind == "D5"]
+    outcome = service.apply_fix(d5)
+    assert outcome.fixed is True
 
 
 def test_fix_d2_refuses_with_corruption_summary(
@@ -717,6 +762,36 @@ def test_apply_fix_d10_synthesises_stop_report(
     assert last is not None
     assert last.last_loop_id == 7
     assert "auto-recovered" in last.recommendation
+    assert [
+        ev["event_type"] for ev in repo.list_events("task-1")
+    ] == ["stop_report_created", "repair_state_action"]
+
+
+def test_apply_fix_d10_unblocks_error_resume_preflight(
+    context: CliContext, service: RepairStateService
+) -> None:
+    repo = context.repo
+    repo.create_task("task-1", "Goal")
+    repo.save_loop_trace(
+        LoopTrace(
+            task_id="task-1",
+            loop_id=7,
+            phase="explore",
+            active_hunger=10.0,
+            drive_budget=10.0,
+            work_pressure=5.0,
+            committed=False,
+        )
+    )
+    task = repo.get_task("task-1")
+    assert task is not None
+    repo._tasks["task-1"] = task.model_copy(update={"status": "stopped"})  # type: ignore[attr-defined]
+
+    [d10] = [d for d in service.detect("task-1") if d.kind == "D10"]
+    outcome = service.apply_fix(d10)
+    assert outcome.fixed is True
+
+    check_resume_preflight(repo, "task-1", resume_human=True)
 
 
 def test_apply_fix_d11_recomputes_usage(
@@ -755,6 +830,49 @@ def test_apply_fix_d11_recomputes_usage(
     assert snap.tokens == 300
     assert abs(snap.cost_usd - 0.10) < 1e-6
     assert snap.llm_calls == 1
+
+
+def test_apply_fix_d11_emits_event_before_snapshot_write(
+    context: CliContext, service: RepairStateService
+) -> None:
+    repo = context.repo
+    repo.create_task("task-1", "Goal")
+    repo.save_model_call_as_evidence(
+        task_id="task-1",
+        loop_id=1,
+        agent_id="a1",
+        provider="openai",
+        model="gpt-4o-mini",
+        input_tokens=100,
+        output_tokens=200,
+        cost_usd=0.10,
+        response_preview="{}",
+    )
+    from hungerloop.models.usage import UsageSnapshot
+
+    repo.save_usage_snapshot(
+        UsageSnapshot(
+            task_id="task-1",
+            tokens=10,
+            cost_usd=0.01,
+            llm_calls=1,
+            tool_calls=0,
+        )
+    )
+
+    original = repo.save_usage_snapshot
+
+    def wrapped_save_usage_snapshot(snapshot: Any) -> None:
+        repair_events = [
+            e for e in repo._events if e["event_type"] == "repair_state_action"
+        ]
+        assert repair_events
+        original(snapshot)
+
+    repo.save_usage_snapshot = wrapped_save_usage_snapshot  # type: ignore[method-assign]
+    [d11] = [d for d in service.detect("task-1") if d.kind == "D11"]
+    outcome = service.apply_fix(d11)
+    assert outcome.fixed is True
 
 
 # ---------------------------------------------------------------------------

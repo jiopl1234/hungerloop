@@ -1,6 +1,7 @@
 """SQLiteRepository protocol and durability tests."""
 from __future__ import annotations
 
+import json
 import sqlite3
 from pathlib import Path
 
@@ -132,6 +133,46 @@ def test_promoted_memory_round_trips_and_survives_restart(tmp_path: Path) -> Non
     listing = reopened.list_promoted_memories("t1")
     assert listing == [memory]
     assert reopened.list_promoted_memories() == [memory]
+
+
+def test_save_memory_candidate_keeps_v5_query_columns_in_sync(
+    tmp_path: Path,
+) -> None:
+    """v0.5e lifecycle columns must mirror payload_json for SQL consumers."""
+    repo = _repo(tmp_path)
+    repo.create_task("t1", "Goal")
+    candidate = MemoryCandidate(
+        candidate_id="cand-1",
+        task_id="t1",
+        content="Verified acceptance check H-001:0",
+        accepted_check_keys=["H-001:0"],
+        action_verified=True,
+        reusable=True,
+        non_volatile=True,
+        traceable=True,
+        reviewer="alice",
+        rejection_reason="not general enough",
+    )
+
+    repo.save_memory_candidate(candidate)
+
+    row = repo.conn.execute(
+        """
+        SELECT accepted_check_keys_json, action_verified, reusable,
+               non_volatile, traceable, reviewer, rejection_reason
+        FROM memory_candidates
+        WHERE candidate_id = ?
+        """,
+        ("cand-1",),
+    ).fetchone()
+    assert row is not None
+    assert json.loads(str(row["accepted_check_keys_json"])) == ["H-001:0"]
+    assert row["action_verified"] == 1
+    assert row["reusable"] == 1
+    assert row["non_volatile"] == 1
+    assert row["traceable"] == 1
+    assert row["reviewer"] == "alice"
+    assert row["rejection_reason"] == "not general enough"
 
 
 def test_save_usage_snapshot_upserts_and_survives_restart(tmp_path: Path) -> None:

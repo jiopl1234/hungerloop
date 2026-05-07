@@ -115,6 +115,38 @@ def memory_list(
         )
 
 
+@memory.command("show")
+@click.argument("candidate_id")
+@click.pass_obj
+def memory_show(ctx: CliContext, candidate_id: str) -> None:
+    """Print one :class:`MemoryCandidate` in a stable operator-facing format."""
+    cand = ctx.repo.get_memory_candidate(candidate_id)
+    if cand is None:
+        raise click.UsageError(f"memory candidate not found: {candidate_id}")
+    click.echo(f"candidate_id        : {cand.candidate_id}")
+    click.echo(f"task_id             : {cand.task_id}")
+    click.echo(f"state               : {cand.state}")
+    click.echo(f"status              : {cand.status}")
+    click.echo(f"memory_type         : {cand.memory_type}")
+    click.echo(f"confidence          : {cand.confidence:.4f}")
+    click.echo(f"action_verified     : {cand.action_verified}")
+    click.echo(f"reusable            : {cand.reusable}")
+    click.echo(f"non_volatile        : {cand.non_volatile}")
+    click.echo(f"traceable           : {cand.traceable}")
+    click.echo(f"decision_loop_id    : {cand.decision_loop_id}")
+    click.echo(f"decided_by          : {cand.decided_by}")
+    click.echo(f"reviewer            : {cand.reviewer}")
+    click.echo(f"reviewed_at         : {cand.reviewed_at}")
+    click.echo(f"rejection_reason    : {cand.rejection_reason}")
+    click.echo(f"source_candidate_state_id: {cand.source_candidate_state_id}")
+    click.echo(f"source_validation_id: {cand.source_validation_id}")
+    click.echo(f"source_best_state_id: {cand.source_best_state_id}")
+    click.echo(f"evidence_ids        : {cand.evidence_ids}")
+    click.echo(f"accepted_check_keys : {cand.accepted_check_keys}")
+    click.echo(f"referenced_check_keys: {cand.referenced_check_keys}")
+    click.echo(f"content             : {cand.content}")
+
+
 # ---------------------------------------------------------------------------
 # memory approve / reject / defer / expire
 # ---------------------------------------------------------------------------

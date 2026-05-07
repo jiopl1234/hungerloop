@@ -1056,9 +1056,11 @@ class SQLiteRepository:
               candidate_id, task_id, status, memory_type, payload_json,
               state, decision_loop_id, decided_by, decision_rationale,
               replaces_candidate_id, expires_at, source_candidate_state_id,
-              source_validation_id, source_best_state_id
+              source_validation_id, source_best_state_id,
+              accepted_check_keys_json, action_verified, reusable,
+              non_volatile, traceable, reviewer, reviewed_at, rejection_reason
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(candidate_id) DO UPDATE SET
               status=excluded.status,
               memory_type=excluded.memory_type,
@@ -1071,7 +1073,15 @@ class SQLiteRepository:
               expires_at=excluded.expires_at,
               source_candidate_state_id=excluded.source_candidate_state_id,
               source_validation_id=excluded.source_validation_id,
-              source_best_state_id=excluded.source_best_state_id
+              source_best_state_id=excluded.source_best_state_id,
+              accepted_check_keys_json=excluded.accepted_check_keys_json,
+              action_verified=excluded.action_verified,
+              reusable=excluded.reusable,
+              non_volatile=excluded.non_volatile,
+              traceable=excluded.traceable,
+              reviewer=excluded.reviewer,
+              reviewed_at=excluded.reviewed_at,
+              rejection_reason=excluded.rejection_reason
             """,
             (
                 candidate.candidate_id,
@@ -1092,6 +1102,18 @@ class SQLiteRepository:
                 candidate.source_candidate_state_id,
                 candidate.source_validation_id,
                 candidate.source_best_state_id,
+                json.dumps(candidate.accepted_check_keys),
+                int(candidate.action_verified),
+                int(candidate.reusable),
+                int(candidate.non_volatile),
+                int(candidate.traceable),
+                candidate.reviewer,
+                (
+                    candidate.reviewed_at.isoformat().replace("+00:00", "Z")
+                    if candidate.reviewed_at is not None
+                    else None
+                ),
+                candidate.rejection_reason,
             ),
         )
 
