@@ -76,7 +76,9 @@ def test_pack_carries_typed_budget(budget: BudgetAllocation) -> None:
 
 
 def test_acceptance_criteria_flatten_in_order(budget: BudgetAllocation) -> None:
-    """Criteria preserve item order then check order."""
+    """Criteria preserve item order then check order, and now carry the
+    check's ``params`` payload so the worker has the machine-checkable
+    semantics (not only the human description)."""
     repo = MagicMock()
     repo.get_best_state.return_value = None
     repo.get_hunger_items.return_value = [
@@ -96,7 +98,15 @@ def test_acceptance_criteria_flatten_in_order(budget: BudgetAllocation) -> None:
         candidate_workspace_ref="candidates/loop_001",
     )
 
-    assert pack.acceptance_criteria == ["alpha", "beta", "gamma"]
+    # Order preserved (item then check).
+    assert len(pack.acceptance_criteria) == 3
+    assert pack.acceptance_criteria[0].startswith("alpha [")
+    assert pack.acceptance_criteria[1].startswith("beta [")
+    assert pack.acceptance_criteria[2].startswith("gamma [")
+    # Each line carries the original params blob.
+    assert '"path": "alpha.md"' in pack.acceptance_criteria[0]
+    assert '"path": "beta.md"' in pack.acceptance_criteria[1]
+    assert '"path": "gamma.md"' in pack.acceptance_criteria[2]
 
 
 def test_best_state_summary_none_when_absent(budget: BudgetAllocation) -> None:

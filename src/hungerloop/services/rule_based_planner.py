@@ -77,9 +77,11 @@ class RuleBasedPlanner:
             )
 
         item = selected[0]
+        task = self.repo.get_task(task_id)
+        raw_goal = task.raw_goal if task is not None else ""
         assignment = Assignment(
             agent_id=EXECUTION_WORKER_V1.agent_id,
-            mission=self._mission_for(item, snapshot.phase),
+            mission=self._mission_for(item, snapshot.phase, raw_goal),
             target_hunger_item_ids=[item.id],
             allowed_tools=list(EXECUTION_WORKER_V1.allowed_tools),
         )
@@ -93,8 +95,12 @@ class RuleBasedPlanner:
         )
 
     @staticmethod
-    def _mission_for(item: HungerItem, phase: LoopPhase) -> str:
-        """Compose a deterministic mission string for the worker."""
+    def _mission_for(item: HungerItem, phase: LoopPhase, raw_goal: str) -> str:
+        """Compose a deterministic mission string for the worker.
+
+        Includes the original user goal verbatim so the worker has the task
+        semantics, not just the structural acceptance check descriptions.
+        """
         if item.acceptance_checks:
             checks_summary = "; ".join(
                 check.description or check.check_type.value
@@ -102,7 +108,11 @@ class RuleBasedPlanner:
             )
         else:
             checks_summary = "no acceptance checks"
+        goal_block = (
+            f"User goal:\n{raw_goal.strip()}\n\n" if raw_goal.strip() else ""
+        )
         return (
-            f"[phase={phase.value}] Make progress on {item.id}: {item.title}. "
+            f"[phase={phase.value}] Make progress on {item.id}: {item.title}.\n"
+            f"{goal_block}"
             f"Acceptance: {checks_summary}."
         )
