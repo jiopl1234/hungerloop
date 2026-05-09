@@ -169,7 +169,26 @@ def test_worker_result_persists() -> None:
     repo = InMemoryRepository()
     result = WorkerResult(agent_id="a1", task_id="t1", loop_id=1, summary="done")
     repo.save_worker_result(result)
-    # No getter in protocol; verify no raise.
+    assert repo.get_last_worker_result("t1", "a1", 2) == result
+
+
+def test_get_last_worker_result_respects_agent_and_before_loop() -> None:
+    repo = InMemoryRepository()
+    repo.save_worker_result(
+        WorkerResult(agent_id="execution_worker_v1", task_id="t1", loop_id=1, summary="explore")
+    )
+    latest = WorkerResult(
+        agent_id="execution_worker_v1", task_id="t1", loop_id=2, summary="write"
+    )
+    repo.save_worker_result(latest)
+    research = WorkerResult(
+        agent_id="research_worker_v1", task_id="t1", loop_id=2, summary="research"
+    )
+    repo.save_worker_result(research)
+
+    assert repo.get_last_worker_result("t1", "execution_worker_v1", 3) == latest
+    assert repo.get_last_worker_result("t1", "research_worker_v1", 3) == research
+    assert repo.get_last_worker_result("t1", "execution_worker_v1", 1) is None
 
 
 def test_loop_plan_persists() -> None:

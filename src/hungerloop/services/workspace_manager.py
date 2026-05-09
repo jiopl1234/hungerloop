@@ -25,6 +25,7 @@ import shutil
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Literal
 
 from hungerloop.models.workspace import WorkspaceStatus
 
@@ -65,6 +66,32 @@ class WorkspaceManager:
 
     def rejected_files_dir(self, task_id: str, loop_id: int) -> Path:
         return self.task_root(task_id) / "rejected" / f"loop_{loop_id:03d}" / "files"
+
+    def list_workspace_files(
+        self,
+        task_id: str,
+        *,
+        ref: Literal["best", "candidate"],
+        loop_id: int | None = None,
+    ) -> list[str]:
+        """Return sorted relative file paths for a task workspace ref."""
+        if ref == "best":
+            root = self.best_files_dir(task_id)
+        else:
+            if loop_id is None:
+                raise ValueError("loop_id is required for candidate workspace")
+            root = self.candidate_files_dir(task_id, loop_id)
+        if not root.exists():
+            return []
+
+        out: list[str] = []
+        for path in root.rglob("*"):
+            rel = path.relative_to(root)
+            if _is_ignored_inventory_path(rel):
+                continue
+            if path.is_file():
+                out.append(rel.as_posix())
+        return sorted(out)
 
     def ensure_task_workspace(self, task_id: str) -> None:
         """Create the ``best/files`` directory if missing."""
@@ -251,3 +278,7 @@ class WorkspaceManager:
             json.dumps(manifest, indent=2, ensure_ascii=False),
             encoding="utf-8",
         )
+
+
+def _is_ignored_inventory_path(path: Path) -> bool:
+    return any(part.startswith(".") or part == "__pycache__" for part in path.parts)

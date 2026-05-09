@@ -35,6 +35,7 @@ class EventType(str, Enum):
     WORKER_STARTED = "worker_started"
     WORKER_FINISHED = "worker_finished"
     WORKER_FAILED = "worker_failed"
+    CONTEXT_TRUNCATED = "context_truncated"
 
     # ----- Model calls (v0.5d.0) ----------------------------------------
     MODEL_CALL_STARTED = "model_call_started"

@@ -12,6 +12,16 @@ from pydantic import BaseModel, Field
 from hungerloop.models.planning import BudgetAllocation
 
 
+class TruncationInfo(BaseModel):
+    """Audit metadata for context-history truncation."""
+
+    chars_before: int = Field(..., ge=0)
+    chars_after: int = Field(..., ge=0)
+    dropped_failures: int = Field(0, ge=0)
+    dropped_evidence: int = Field(0, ge=0)
+    truncated_best_summary: bool = False
+
+
 class ContextPack(BaseModel):
     """Agent execution context for one loop iteration."""
 
@@ -31,6 +41,10 @@ class ContextPack(BaseModel):
     relevant_claim_ids: list[str] = Field(default_factory=list)
     relevant_evidence_ids: list[str] = Field(default_factory=list)
     failure_patterns_to_avoid: list[str] = Field(default_factory=list)
+    last_self_summary: str | None = None
+    relevant_evidence_summaries: list[str] = Field(default_factory=list)
+    best_workspace_files: list[str] = Field(default_factory=list)
+    truncation_info: TruncationInfo | None = None
 
     allowed_tools: list[str] = Field(default_factory=list)
     forbidden_tools: list[str] = Field(default_factory=list)

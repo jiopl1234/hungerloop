@@ -805,6 +805,28 @@ class SQLiteRepository:
             ),
         )
 
+    def get_last_worker_result(
+        self,
+        task_id: str,
+        agent_id: str,
+        before_loop_id: int,
+    ) -> WorkerResult | None:
+        row = self.conn.execute(
+            """
+            SELECT payload_json
+            FROM worker_results
+            WHERE task_id = ?
+              AND agent_id = ?
+              AND loop_id < ?
+            ORDER BY loop_id DESC
+            LIMIT 1
+            """,
+            (task_id, agent_id, before_loop_id),
+        ).fetchone()
+        if row is None:
+            return None
+        return WorkerResult.model_validate_json(str(row["payload_json"]))
+
     def save_loop_plan(self, plan: LoopPlan) -> None:
         self._ensure_task(plan.task_id)
         self.conn.execute(

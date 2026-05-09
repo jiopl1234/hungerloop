@@ -21,6 +21,7 @@ from hungerloop.models.enums import (
 from hungerloop.models.hunger import AcceptanceCheck, HungerItem
 from hungerloop.models.planning import BudgetAllocation
 from hungerloop.services.context_builder import ContextBuilder
+from hungerloop.services.workspace_reader import WorkspaceReader
 
 
 def _check(description: str) -> AcceptanceCheck:
@@ -50,13 +51,27 @@ def budget() -> BudgetAllocation:
     )
 
 
-def test_pack_carries_typed_budget(budget: BudgetAllocation) -> None:
-    """ContextPack.budget is the BudgetAllocation instance, not a dict."""
+def _repo() -> MagicMock:
     repo = MagicMock()
     repo.get_best_state.return_value = None
+    repo.get_last_worker_result.return_value = None
+    repo.list_loop_traces.return_value = []
+    repo.list_successful_tool_call_evidence.return_value = []
+    return repo
+
+
+def test_pack_carries_typed_budget(
+    budget: BudgetAllocation,
+    fake_workspace_reader: WorkspaceReader,
+) -> None:
+    """ContextPack.budget is the BudgetAllocation instance, not a dict."""
+    repo = _repo()
     repo.get_hunger_items.return_value = [_item("H-001", ["a"])]
 
-    pack = ContextBuilder(repo=repo).build_for_agent(
+    pack = ContextBuilder(
+        repo=repo,
+        workspace_reader=fake_workspace_reader,
+    ).build_for_agent(
         task_id="t1",
         loop_id=1,
         agent_id="execution_worker_v1",
@@ -75,18 +90,23 @@ def test_pack_carries_typed_budget(budget: BudgetAllocation) -> None:
     assert pack.phase == "exploit"
 
 
-def test_acceptance_criteria_flatten_in_order(budget: BudgetAllocation) -> None:
+def test_acceptance_criteria_flatten_in_order(
+    budget: BudgetAllocation,
+    fake_workspace_reader: WorkspaceReader,
+) -> None:
     """Criteria preserve item order then check order, and now carry the
     check's ``params`` payload so the worker has the machine-checkable
     semantics (not only the human description)."""
-    repo = MagicMock()
-    repo.get_best_state.return_value = None
+    repo = _repo()
     repo.get_hunger_items.return_value = [
         _item("H-001", ["alpha", "beta"]),
         _item("H-002", ["gamma"]),
     ]
 
-    pack = ContextBuilder(repo=repo).build_for_agent(
+    pack = ContextBuilder(
+        repo=repo,
+        workspace_reader=fake_workspace_reader,
+    ).build_for_agent(
         task_id="t1",
         loop_id=1,
         agent_id="a",
@@ -109,12 +129,17 @@ def test_acceptance_criteria_flatten_in_order(budget: BudgetAllocation) -> None:
     assert '"path": "gamma.md"' in pack.acceptance_criteria[2]
 
 
-def test_best_state_summary_none_when_absent(budget: BudgetAllocation) -> None:
-    repo = MagicMock()
-    repo.get_best_state.return_value = None
+def test_best_state_summary_none_when_absent(
+    budget: BudgetAllocation,
+    fake_workspace_reader: WorkspaceReader,
+) -> None:
+    repo = _repo()
     repo.get_hunger_items.return_value = [_item("H-001", ["a"])]
 
-    pack = ContextBuilder(repo=repo).build_for_agent(
+    pack = ContextBuilder(
+        repo=repo,
+        workspace_reader=fake_workspace_reader,
+    ).build_for_agent(
         task_id="t1",
         loop_id=1,
         agent_id="a",
@@ -128,8 +153,11 @@ def test_best_state_summary_none_when_absent(budget: BudgetAllocation) -> None:
     assert pack.best_state_summary is None
 
 
-def test_best_state_summary_passed_through(budget: BudgetAllocation) -> None:
-    repo = MagicMock()
+def test_best_state_summary_passed_through(
+    budget: BudgetAllocation,
+    fake_workspace_reader: WorkspaceReader,
+) -> None:
+    repo = _repo()
     repo.get_best_state.return_value = BestState(
         task_id="t1",
         state_id="prev",
@@ -137,7 +165,10 @@ def test_best_state_summary_passed_through(budget: BudgetAllocation) -> None:
     )
     repo.get_hunger_items.return_value = [_item("H-001", ["a"])]
 
-    pack = ContextBuilder(repo=repo).build_for_agent(
+    pack = ContextBuilder(
+        repo=repo,
+        workspace_reader=fake_workspace_reader,
+    ).build_for_agent(
         task_id="t1",
         loop_id=1,
         agent_id="a",

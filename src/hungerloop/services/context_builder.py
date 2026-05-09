@@ -5,11 +5,28 @@
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
 
-from hungerloop.models.context import ContextPack
+from hungerloop.models.context import ContextPack, TruncationInfo
+from hungerloop.models.enums import EvidenceType
 from hungerloop.models.hunger import AcceptanceCheck
 from hungerloop.models.planning import BudgetAllocation
+from hungerloop.repository.evidence_success import is_successful_evidence_payload
 from hungerloop.repository.protocol import RepositoryProtocol
+from hungerloop.services.evidence_render import (
+    summarize_failed_check,
+    summarize_tool_call,
+)
+from hungerloop.services.workspace_reader import WorkspaceReader
+
+K_REJECT_WINDOW = 3
+K_EVIDENCE_WINDOW = 2
+MAX_LINE_CHARS = 200
+MAX_BEST_SUMMARY_CHARS = 800
+MAX_LAST_SELF_SUMMARY_CHARS = 200
+MAX_WORKSPACE_FILE_PATH_CHARS = 120
+MAX_WORKSPACE_FILES_LINE_CHARS = 800
+MAX_HISTORY_CHARS = 2000
 
 
 def _format_check(check: AcceptanceCheck) -> str:
@@ -31,11 +48,24 @@ def _format_check(check: AcceptanceCheck) -> str:
     return f"{desc} [{check.check_type.value} params={params_blob}]"
 
 
+@dataclass(frozen=True)
+class _LoopHistorySlice:
+    rejected_lines: list[str]
+    successful_evidence_ids: list[str]
+    successful_evidence_lines: list[str]
+    last_self_summary: str | None
+
+
 class ContextBuilder:
     """Build agent execution contexts."""
 
-    def __init__(self, repo: RepositoryProtocol) -> None:
+    def __init__(
+        self,
+        repo: RepositoryProtocol,
+        workspace_reader: WorkspaceReader,
+    ) -> None:
         self.repo = repo
+        self.workspace_reader = workspace_reader
 
     def build_for_agent(
         self,
@@ -66,6 +96,35 @@ class ContextBuilder:
             A context pack for the agent.
         """
         best = self.repo.get_best_state(task_id)
+        best_summary, best_summary_truncated = _clip_optional(
+            best.summary if best else None,
+            MAX_BEST_SUMMARY_CHARS,
+        )
+        history = self._loop_history(task_id, agent_id, loop_id)
+        last_summary, _ = _clip_optional(
+            history.last_self_summary,
+            MAX_LAST_SELF_SUMMARY_CHARS,
+        )
+        best_files = _shape_workspace_files(
+            self.workspace_reader.list_workspace_files(task_id, ref="best"),
+            path_cap=MAX_WORKSPACE_FILE_PATH_CHARS,
+            line_cap=MAX_WORKSPACE_FILES_LINE_CHARS,
+            max_paths=20,
+        )
+        evidence_ids = history.successful_evidence_ids[: K_EVIDENCE_WINDOW * 5]
+        evidence_lines = history.successful_evidence_lines[: K_EVIDENCE_WINDOW * 5]
+        failure_lines = history.rejected_lines[: K_REJECT_WINDOW * 4]
+        evidence_ids, evidence_lines, failure_lines, truncation_info = (
+            _apply_history_cap(
+                last_summary=last_summary,
+                best_summary=best_summary,
+                best_files=best_files,
+                evidence_ids=evidence_ids,
+                evidence_lines=evidence_lines,
+                failure_lines=failure_lines,
+                best_summary_truncated=best_summary_truncated,
+            )
+        )
 
         items = self.repo.get_hunger_items(target_hunger_item_ids)
         acceptance_criteria = []
@@ -81,9 +140,222 @@ class ContextBuilder:
             phase=budget.phase.value,
             target_hunger_item_ids=target_hunger_item_ids,
             acceptance_criteria=acceptance_criteria,
-            best_state_summary=best.summary if best else None,
+            best_state_summary=best_summary,
             candidate_workspace_ref=candidate_workspace_ref,
+            relevant_evidence_ids=evidence_ids,
+            failure_patterns_to_avoid=failure_lines,
+            last_self_summary=last_summary,
+            relevant_evidence_summaries=evidence_lines,
+            best_workspace_files=best_files,
+            truncation_info=truncation_info,
             allowed_tools=allowed_tools,
             budget=budget,
             required_output_schema=output_schema_name,
         )
+
+    def _loop_history(
+        self,
+        task_id: str,
+        agent_id: str,
+        current_loop_id: int,
+    ) -> _LoopHistorySlice:
+        result = self.repo.get_last_worker_result(task_id, agent_id, current_loop_id)
+        last_summary = result.summary if result and result.summary else None
+        traces = self.repo.list_loop_traces(task_id)
+
+        rejected_lines: list[str] = []
+        rejected = [
+            trace
+            for trace in traces
+            if not trace.committed and trace.loop_id < current_loop_id
+        ]
+        rejected.sort(key=lambda trace: trace.loop_id, reverse=True)
+        for trace in rejected[:K_REJECT_WINDOW]:
+            if trace.validation_report_id is None:
+                continue
+            report = self.repo.get_validation_report(trace.validation_report_id)
+            if report is None:
+                continue
+            for check in report.check_results:
+                if not check.passed:
+                    rejected_lines.append(
+                        summarize_failed_check(
+                            check,
+                            trace.loop_id,
+                            max_chars=MAX_LINE_CHARS,
+                        )
+                    )
+
+        committed_loop_ids = {trace.loop_id for trace in traces if trace.committed}
+        min_loop_id = current_loop_id - K_EVIDENCE_WINDOW
+        evidence_rows: list[tuple[int, int, str, str]] = []
+        for index, row in enumerate(
+            self.repo.list_successful_tool_call_evidence(task_id)
+        ):
+            loop_id = _coerce_loop_id(row.get("loop_id"))
+            if loop_id is None:
+                continue
+            if loop_id not in committed_loop_ids:
+                continue
+            if not (min_loop_id <= loop_id < current_loop_id):
+                continue
+            payload_raw = row.get("payload")
+            if not isinstance(payload_raw, dict):
+                continue
+            payload = dict(payload_raw)
+            evidence_type = str(payload.get("type", row.get("evidence_type", "")))
+            if evidence_type != EvidenceType.TOOL_CALL.value:
+                continue
+            if not is_successful_evidence_payload(EvidenceType.TOOL_CALL, payload):
+                continue
+            evidence_id = str(row.get("evidence_id", ""))
+            if not evidence_id:
+                continue
+            evidence_rows.append(
+                (
+                    loop_id,
+                    index,
+                    evidence_id,
+                    summarize_tool_call(
+                        payload,
+                        loop_id,
+                        max_chars=MAX_LINE_CHARS,
+                    ),
+                )
+            )
+        evidence_rows.sort(key=lambda item: (-item[0], item[1]))
+
+        return _LoopHistorySlice(
+            rejected_lines=rejected_lines,
+            successful_evidence_ids=[row[2] for row in evidence_rows],
+            successful_evidence_lines=[row[3] for row in evidence_rows],
+            last_self_summary=last_summary,
+        )
+
+
+def _coerce_loop_id(value: object) -> int | None:
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str) and value.isdigit():
+        return int(value)
+    return None
+
+
+def _clip_optional(value: str | None, max_chars: int) -> tuple[str | None, bool]:
+    if value is None:
+        return None, False
+    if len(value) <= max_chars:
+        return value, False
+    return f"{value[: max_chars - 1]}…", True
+
+
+def _clip_required(value: str, max_chars: int) -> str:
+    if len(value) <= max_chars:
+        return value
+    return f"{value[: max_chars - 1]}…"
+
+
+def _shape_workspace_files(
+    raw_files: list[str],
+    *,
+    path_cap: int,
+    line_cap: int,
+    max_paths: int,
+) -> list[str]:
+    sorted_files = sorted(raw_files)
+    selected = [_clip_required(path, path_cap) for path in sorted_files[:max_paths]]
+    sentinel_count = max(0, len(sorted_files) - len(selected))
+
+    def rendered(paths: list[str], count: int) -> str:
+        shaped = [*paths]
+        if count:
+            shaped.append(f"… (+{count} more)")
+        return "files in best/: " + ", ".join(shaped)
+
+    while selected and len(rendered(selected, sentinel_count)) > line_cap:
+        selected.pop()
+        sentinel_count += 1
+
+    out = [*selected]
+    if sentinel_count:
+        out.append(f"… (+{sentinel_count} more)")
+    return out
+
+
+def _assemble_history(
+    *,
+    last_summary: str | None,
+    best_summary: str | None,
+    best_files: list[str],
+    failure_lines: list[str],
+    evidence_lines: list[str],
+) -> str:
+    parts: list[str] = []
+    if last_summary:
+        parts.append(last_summary)
+    if best_summary:
+        parts.append(best_summary)
+    if best_files:
+        parts.append("files in best/: " + ", ".join(best_files))
+    parts.extend(failure_lines)
+    parts.extend(evidence_lines)
+    return "\n".join(parts)
+
+
+def _apply_history_cap(
+    *,
+    last_summary: str | None,
+    best_summary: str | None,
+    best_files: list[str],
+    evidence_ids: list[str],
+    evidence_lines: list[str],
+    failure_lines: list[str],
+    best_summary_truncated: bool,
+) -> tuple[list[str], list[str], list[str], TruncationInfo | None]:
+    assembled = _assemble_history(
+        last_summary=last_summary,
+        best_summary=best_summary,
+        best_files=best_files,
+        failure_lines=failure_lines,
+        evidence_lines=evidence_lines,
+    )
+    if len(assembled) <= MAX_HISTORY_CHARS:
+        return evidence_ids, evidence_lines, failure_lines, None
+
+    chars_before = len(assembled)
+    dropped_evidence = 0
+    dropped_failures = 0
+    while len(assembled) > MAX_HISTORY_CHARS and evidence_lines:
+        evidence_lines.pop()
+        evidence_ids.pop()
+        dropped_evidence += 1
+        assembled = _assemble_history(
+            last_summary=last_summary,
+            best_summary=best_summary,
+            best_files=best_files,
+            failure_lines=failure_lines,
+            evidence_lines=evidence_lines,
+        )
+    while len(assembled) > MAX_HISTORY_CHARS and failure_lines:
+        failure_lines.pop()
+        dropped_failures += 1
+        assembled = _assemble_history(
+            last_summary=last_summary,
+            best_summary=best_summary,
+            best_files=best_files,
+            failure_lines=failure_lines,
+            evidence_lines=evidence_lines,
+        )
+
+    return (
+        evidence_ids,
+        evidence_lines,
+        failure_lines,
+        TruncationInfo(
+            chars_before=chars_before,
+            chars_after=len(assembled),
+            dropped_failures=dropped_failures,
+            dropped_evidence=dropped_evidence,
+            truncated_best_summary=best_summary_truncated,
+        ),
+    )

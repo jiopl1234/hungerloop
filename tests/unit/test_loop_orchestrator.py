@@ -80,7 +80,7 @@ def _build_orchestrator(
         workspace_manager=workspace_manager,
         budget_allocator=BudgetAllocator(),
         planner=RuleBasedPlanner(repo),
-        context_builder=ContextBuilder(repo),
+        context_builder=ContextBuilder(repo, workspace_reader=workspace_manager),
         worker_runtime=runtime,
         integrator=Integrator(),
         validation_gate=ValidationGate(
@@ -120,7 +120,7 @@ def _build_full_orchestrator(
         workspace_manager=workspace_manager,
         budget_allocator=BudgetAllocator(),
         planner=RuleBasedPlanner(repo),
-        context_builder=ContextBuilder(repo),
+        context_builder=ContextBuilder(repo, workspace_reader=workspace_manager),
         worker_runtime=runtime,
         integrator=Integrator(),
         validation_gate=ValidationGate(
@@ -444,4 +444,3 @@ async def test_safety_cap_emits_error_after_excessive_loops(tmp_path: Path) -> N
     assert isinstance(outcome, StopReport)
     assert outcome.stop_reason is StopReason.ERROR
     assert "max_loops_safety_cap=3" in outcome.recommendation
-

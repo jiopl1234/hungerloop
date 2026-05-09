@@ -515,6 +515,13 @@ class LoopOrchestrator:
                 output_schema_name=spec.output_schema_name,
                 candidate_workspace_ref=f"candidates/loop_{loop_id:03d}",
             )
+            if context.truncation_info is not None:
+                self.repo.append_event(
+                    EventType.CONTEXT_TRUNCATED,
+                    context.truncation_info.model_dump(),
+                    task_id=task_id,
+                    loop_id=loop_id,
+                )
             self.repo.append_event(
                 EventType.WORKER_STARTED,
                 {
@@ -649,4 +656,3 @@ class LoopOrchestrator:
         except Exception:  # pragma: no cover — defensive
             pass
         return report
-

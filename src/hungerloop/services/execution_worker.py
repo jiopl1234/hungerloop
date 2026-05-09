@@ -134,10 +134,12 @@ class ExecutionWorker:
             "and 'actions' (list of {tool_name, args}). Do not wrap the JSON "
             "in Markdown."
         )
+        prior_context = ExecutionWorker._prior_loop_context(context)
         user = (
             f"Mission:\n{context.mission}\n\n"
             f"Acceptance criteria:\n{acceptance_lines}\n\n"
             f"Allowed tools and args schema:\n{tool_schema_lines}\n\n"
+            f"{prior_context}"
             "Required JSON shape example:\n"
             '{"summary":"created hello.txt","actions":[{"tool_name":'
             '"write_file","args":{"path":"hello.txt","content":"hello"}}]}\n\n'
@@ -148,6 +150,54 @@ class ExecutionWorker:
             {"role": "system", "content": system},
             {"role": "user", "content": user},
         ]
+
+    @staticmethod
+    def _prior_loop_context(context: ContextPack) -> str:
+        trigger = (
+            context.last_self_summary is not None
+            or bool(context.failure_patterns_to_avoid)
+            or bool(context.relevant_evidence_summaries)
+            or bool(context.best_workspace_files)
+        )
+        if not trigger:
+            return ""
+
+        lines = [
+            f"Prior loop context (loop {context.loop_id} of this task):",
+            f"- last attempt summary: {context.last_self_summary or 'n/a'}",
+            f"- best state: {context.best_state_summary or 'empty'}",
+        ]
+        if context.best_workspace_files:
+            lines.append(
+                f"- files in best/: {', '.join(context.best_workspace_files)}"
+            )
+        if context.failure_patterns_to_avoid:
+            lines.append(
+                "- patterns to avoid (do NOT repeat these actions; "
+                "they did not move any check):"
+            )
+            lines.extend(
+                f"  - {line}" for line in context.failure_patterns_to_avoid
+            )
+        if context.relevant_evidence_summaries:
+            lines.append(
+                "- successful actions already on record "
+                "(refer to these instead of re-running):"
+            )
+            lines.extend(
+                f"  - {line}" for line in context.relevant_evidence_summaries
+            )
+        lines.extend(
+            [
+                "",
+                "If a previous loop already created a file you need, prefer",
+                "patch_file over a fresh write_file.",
+                "If you already explored the workspace last loop, do NOT explore",
+                "again — act on the patterns-to-avoid above.",
+                "",
+            ]
+        )
+        return "\n".join(lines) + "\n"
 
     @staticmethod
     def _extract_actions(

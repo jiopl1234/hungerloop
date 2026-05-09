@@ -268,7 +268,8 @@ def test_sqlite_repository_traces_stop_memory_skill_lock_and_transaction(
     repo.create_task("t1", "Goal")
     repo.save_best_state(BestState(task_id="t1", state_id="best-1", summary="ok"))
     repo.save_agent_spec(AgentSpec(agent_id="a1", name="A"))
-    repo.save_worker_result(WorkerResult(agent_id="a1", task_id="t1", loop_id=1))
+    result = WorkerResult(agent_id="a1", task_id="t1", loop_id=1, summary="done")
+    repo.save_worker_result(result)
     repo.save_loop_plan(LoopPlan(task_id="t1", loop_id=1, phase=LoopPhase.EXPLORE))
     repo.save_loop_trace(
         LoopTrace(
@@ -301,6 +302,7 @@ def test_sqlite_repository_traces_stop_memory_skill_lock_and_transaction(
     repo.save_skill_card(SkillCard(skill_id="skill-1", task_id="t1", name="Skill"))
 
     assert repo.get_agent_spec("a1").name == "A"
+    assert repo.get_last_worker_result("t1", "a1", 2) == result
     assert repo.list_loop_traces("t1")[0].loop_id == 1
     assert repo.get_last_stop_reason("t1") is StopReason.DONE
     assert repo.get_last_stop_report("t1").goal_status == "completed"  # type: ignore[union-attr]
@@ -328,6 +330,28 @@ def test_sqlite_repository_traces_stop_memory_skill_lock_and_transaction(
     except RuntimeError:
         pass
     assert all(card.skill_id != "rollback" for card in repo.list_skill_cards("t1"))
+
+
+def test_sqlite_get_last_worker_result_respects_agent_scope(
+    tmp_path: Path,
+) -> None:
+    repo = _repo(tmp_path)
+    repo.create_task("t1", "Goal")
+    repo.save_worker_result(
+        WorkerResult(agent_id="execution_worker_v1", task_id="t1", loop_id=1, summary="explore")
+    )
+    latest = WorkerResult(
+        agent_id="execution_worker_v1", task_id="t1", loop_id=2, summary="write"
+    )
+    repo.save_worker_result(latest)
+    research = WorkerResult(
+        agent_id="research_worker_v1", task_id="t1", loop_id=2, summary="research"
+    )
+    repo.save_worker_result(research)
+
+    assert repo.get_last_worker_result("t1", "execution_worker_v1", 3) == latest
+    assert repo.get_last_worker_result("t1", "research_worker_v1", 3) == research
+    assert repo.get_last_worker_result("t1", "execution_worker_v1", 1) is None
 
 
 def test_sqlite_schema_rejects_bad_evidence_type(tmp_path: Path) -> None:

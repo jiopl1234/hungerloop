@@ -243,6 +243,14 @@ class RepositoryProtocol(Protocol):
     def save_worker_result(self, result: WorkerResult) -> None: ...
     """New in v0.5a (§28 / N2)."""
 
+    def get_last_worker_result(
+        self,
+        task_id: str,
+        agent_id: str,
+        before_loop_id: int,
+    ) -> WorkerResult | None: ...
+    """New in v0.5f.0: latest prior result for one agent before a loop."""
+
     def save_loop_plan(self, plan: LoopPlan) -> None: ...
     """New in v0.5a (§28 / N2)."""
 

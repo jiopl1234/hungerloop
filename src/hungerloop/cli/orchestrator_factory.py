@@ -11,6 +11,7 @@ integration tests can inject a scripted dummy.
 from __future__ import annotations
 
 from pathlib import Path
+from typing import cast
 
 from hungerloop.repository.protocol import RepositoryProtocol
 from hungerloop.services.acceptance_runner import AcceptanceCheckRunner
@@ -35,6 +36,7 @@ from hungerloop.services.tools import default_tool_registry
 from hungerloop.services.validation_gate import ValidationGate
 from hungerloop.services.worker_runtime import WorkerRuntime
 from hungerloop.services.workspace_manager import WorkspaceManager
+from hungerloop.services.workspace_reader import WorkspaceReader
 
 
 def build_orchestrator(
@@ -71,7 +73,10 @@ def build_orchestrator(
         workspace_manager=workspace_manager,
         budget_allocator=BudgetAllocator(),
         planner=RuleBasedPlanner(repo),
-        context_builder=ContextBuilder(repo),
+        context_builder=ContextBuilder(
+            repo,
+            workspace_reader=cast(WorkspaceReader, workspace_manager),
+        ),
         worker_runtime=runtime,
         integrator=Integrator(),
         validation_gate=ValidationGate(

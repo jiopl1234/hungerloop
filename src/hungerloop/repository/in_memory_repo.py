@@ -479,6 +479,23 @@ class InMemoryRepository:
         rid = f"WR-{result.task_id}-{result.loop_id}-{result.agent_id}"
         self._worker_results[rid] = result
 
+    def get_last_worker_result(
+        self,
+        task_id: str,
+        agent_id: str,
+        before_loop_id: int,
+    ) -> WorkerResult | None:
+        matches = [
+            result
+            for result in self._worker_results.values()
+            if result.task_id == task_id
+            and result.agent_id == agent_id
+            and result.loop_id < before_loop_id
+        ]
+        if not matches:
+            return None
+        return max(matches, key=lambda result: result.loop_id)
+
     def save_loop_plan(self, plan: LoopPlan) -> None:
         self._loop_plans[(plan.task_id, plan.loop_id)] = plan
 
