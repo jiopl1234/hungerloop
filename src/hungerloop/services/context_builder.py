@@ -17,6 +17,7 @@ from hungerloop.services.evidence_render import (
     summarize_failed_check,
     summarize_tool_call,
 )
+from hungerloop.services.prior_loop_context import render_prior_loop_context_block
 from hungerloop.services.workspace_reader import WorkspaceReader
 
 K_REJECT_WINDOW = 3
@@ -25,7 +26,11 @@ MAX_LINE_CHARS = 200
 MAX_BEST_SUMMARY_CHARS = 800
 MAX_LAST_SELF_SUMMARY_CHARS = 200
 MAX_WORKSPACE_FILE_PATH_CHARS = 120
-MAX_WORKSPACE_FILES_LINE_CHARS = 800
+# Keep the non-evictable rendered prior-loop block under MAX_HISTORY_CHARS:
+# last summary + best summary + best-files line + static labels/hints.
+MAX_WORKSPACE_FILES_LINE_CHARS = 700
+# The cap relies on the non-evictable section caps above; _apply_history_cap
+# asserts if those caps drift past the rendered prior-loop block budget.
 MAX_HISTORY_CHARS = 2000
 
 
@@ -111,11 +116,14 @@ class ContextBuilder:
             line_cap=MAX_WORKSPACE_FILES_LINE_CHARS,
             max_paths=20,
         )
+        # Evidence slots are global recency slots, not per-loop quotas: a busy
+        # newest committed loop can occupy all slots before older loops appear.
         evidence_ids = history.successful_evidence_ids[: K_EVIDENCE_WINDOW * 5]
         evidence_lines = history.successful_evidence_lines[: K_EVIDENCE_WINDOW * 5]
         failure_lines = history.rejected_lines[: K_REJECT_WINDOW * 4]
         evidence_ids, evidence_lines, failure_lines, truncation_info = (
             _apply_history_cap(
+                loop_id=loop_id,
                 last_summary=last_summary,
                 best_summary=best_summary,
                 best_files=best_files,
@@ -284,26 +292,26 @@ def _shape_workspace_files(
 
 def _assemble_history(
     *,
+    loop_id: int,
     last_summary: str | None,
     best_summary: str | None,
     best_files: list[str],
     failure_lines: list[str],
     evidence_lines: list[str],
 ) -> str:
-    parts: list[str] = []
-    if last_summary:
-        parts.append(last_summary)
-    if best_summary:
-        parts.append(best_summary)
-    if best_files:
-        parts.append("files in best/: " + ", ".join(best_files))
-    parts.extend(failure_lines)
-    parts.extend(evidence_lines)
-    return "\n".join(parts)
+    return render_prior_loop_context_block(
+        loop_id=loop_id,
+        last_self_summary=last_summary,
+        best_state_summary=best_summary,
+        best_workspace_files=best_files,
+        failure_patterns_to_avoid=failure_lines,
+        relevant_evidence_summaries=evidence_lines,
+    )
 
 
 def _apply_history_cap(
     *,
+    loop_id: int,
     last_summary: str | None,
     best_summary: str | None,
     best_files: list[str],
@@ -313,6 +321,7 @@ def _apply_history_cap(
     best_summary_truncated: bool,
 ) -> tuple[list[str], list[str], list[str], TruncationInfo | None]:
     assembled = _assemble_history(
+        loop_id=loop_id,
         last_summary=last_summary,
         best_summary=best_summary,
         best_files=best_files,
@@ -320,6 +329,7 @@ def _apply_history_cap(
         evidence_lines=evidence_lines,
     )
     if len(assembled) <= MAX_HISTORY_CHARS:
+        assert len(assembled) <= MAX_HISTORY_CHARS
         return evidence_ids, evidence_lines, failure_lines, None
 
     chars_before = len(assembled)
@@ -330,6 +340,7 @@ def _apply_history_cap(
         evidence_ids.pop()
         dropped_evidence += 1
         assembled = _assemble_history(
+            loop_id=loop_id,
             last_summary=last_summary,
             best_summary=best_summary,
             best_files=best_files,
@@ -340,6 +351,7 @@ def _apply_history_cap(
         failure_lines.pop()
         dropped_failures += 1
         assembled = _assemble_history(
+            loop_id=loop_id,
             last_summary=last_summary,
             best_summary=best_summary,
             best_files=best_files,
@@ -347,13 +359,19 @@ def _apply_history_cap(
             evidence_lines=evidence_lines,
         )
 
+    chars_after = len(assembled)
+    assert chars_after <= MAX_HISTORY_CHARS, (
+        "history block cap invariant violated; lower non-evictable section "
+        "caps or update MAX_HISTORY_CHARS"
+    )
+
     return (
         evidence_ids,
         evidence_lines,
         failure_lines,
         TruncationInfo(
             chars_before=chars_before,
-            chars_after=len(assembled),
+            chars_after=chars_after,
             dropped_failures=dropped_failures,
             dropped_evidence=dropped_evidence,
             truncated_best_summary=best_summary_truncated,

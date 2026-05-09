@@ -20,6 +20,7 @@ from hungerloop.models.worker import WorkerResult
 from hungerloop.repository.protocol import RepositoryProtocol
 from hungerloop.services.budget_guard import BudgetGuard
 from hungerloop.services.model_client import ModelClient
+from hungerloop.services.prior_loop_context import render_prior_loop_context_block
 from hungerloop.services.tool_harness import ToolHarness
 from hungerloop.services.tools import describe_tool_arg_schemas
 
@@ -153,51 +154,14 @@ class ExecutionWorker:
 
     @staticmethod
     def _prior_loop_context(context: ContextPack) -> str:
-        trigger = (
-            context.last_self_summary is not None
-            or bool(context.failure_patterns_to_avoid)
-            or bool(context.relevant_evidence_summaries)
-            or bool(context.best_workspace_files)
+        return render_prior_loop_context_block(
+            loop_id=context.loop_id,
+            last_self_summary=context.last_self_summary,
+            best_state_summary=context.best_state_summary,
+            best_workspace_files=context.best_workspace_files,
+            failure_patterns_to_avoid=context.failure_patterns_to_avoid,
+            relevant_evidence_summaries=context.relevant_evidence_summaries,
         )
-        if not trigger:
-            return ""
-
-        lines = [
-            f"Prior loop context (loop {context.loop_id} of this task):",
-            f"- last attempt summary: {context.last_self_summary or 'n/a'}",
-            f"- best state: {context.best_state_summary or 'empty'}",
-        ]
-        if context.best_workspace_files:
-            lines.append(
-                f"- files in best/: {', '.join(context.best_workspace_files)}"
-            )
-        if context.failure_patterns_to_avoid:
-            lines.append(
-                "- patterns to avoid (do NOT repeat these actions; "
-                "they did not move any check):"
-            )
-            lines.extend(
-                f"  - {line}" for line in context.failure_patterns_to_avoid
-            )
-        if context.relevant_evidence_summaries:
-            lines.append(
-                "- successful actions already on record "
-                "(refer to these instead of re-running):"
-            )
-            lines.extend(
-                f"  - {line}" for line in context.relevant_evidence_summaries
-            )
-        lines.extend(
-            [
-                "",
-                "If a previous loop already created a file you need, prefer",
-                "patch_file over a fresh write_file.",
-                "If you already explored the workspace last loop, do NOT explore",
-                "again — act on the patterns-to-avoid above.",
-                "",
-            ]
-        )
-        return "\n".join(lines) + "\n"
 
     @staticmethod
     def _extract_actions(

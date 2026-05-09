@@ -249,7 +249,12 @@ class RepositoryProtocol(Protocol):
         agent_id: str,
         before_loop_id: int,
     ) -> WorkerResult | None: ...
-    """New in v0.5f.0: latest prior result for one agent before a loop."""
+    """New in v0.5f.0: latest prior result for one agent before a loop.
+
+    This is intentionally agent-scoped. Future multi-agent loop memory should
+    add an explicit cross-agent read path rather than broadening this method
+    silently.
+    """
 
     def save_loop_plan(self, plan: LoopPlan) -> None: ...
     """New in v0.5a (§28 / N2)."""

@@ -13,7 +13,12 @@ from hungerloop.models.planning import BudgetAllocation
 
 
 class TruncationInfo(BaseModel):
-    """Audit metadata for context-history truncation."""
+    """Audit metadata for total prior-loop block truncation.
+
+    ``ContextBuilder`` may clip individual sections before assembling the
+    block. This model is emitted only when the final rendered prior-loop block
+    itself overflowed and entries had to be dropped.
+    """
 
     chars_before: int = Field(..., ge=0)
     chars_after: int = Field(..., ge=0)

@@ -14,12 +14,14 @@ from hungerloop.models.validation import CheckResult, ValidationReport
 from hungerloop.models.worker import WorkerResult
 from hungerloop.repository.in_memory_repo import InMemoryRepository
 from hungerloop.services.context_builder import (
+    K_EVIDENCE_WINDOW,
     MAX_HISTORY_CHARS,
     MAX_WORKSPACE_FILE_PATH_CHARS,
     MAX_WORKSPACE_FILES_LINE_CHARS,
     ContextBuilder,
 )
 from hungerloop.services.execution_worker import ExecutionWorker
+from hungerloop.services.prior_loop_context import render_prior_loop_context_block
 
 EXPECTED_LOOP1_PROMPT = (
     """\
@@ -276,7 +278,7 @@ def test_loop3_after_committed_loop2_renders_evidence_summaries() -> None:
     assert "loop 2 tool_call write_file:" in user_message
 
 
-def test_best_file_inventory_filters_and_truncates() -> None:
+def test_static_workspace_reader_inventory_sorts_and_truncates() -> None:
     repo = InMemoryRepository()
     reader = StaticWorkspaceReader(
         ["fizzbuzz.py", "test_fizzbuzz.py", "__pycache__/x.pyc", ".pytest_cache/v"]
@@ -335,6 +337,24 @@ def test_reject_window_caps_history() -> None:
     assert "loop 3:" in joined
     assert "loop 2:" not in joined
     assert "loop 1:" not in joined
+
+
+def test_evidence_window_excludes_loops_before_k_window() -> None:
+    repo = InMemoryRepository()
+    old_evidence = _seed_committed_loop(repo, 1)
+    boundary_evidence = _seed_committed_loop(repo, 2)
+    recent_evidence = _seed_committed_loop(repo, 3)
+
+    pack = _build_pack(repo, loop_id=4, path="fizzbuzz.py")
+
+    assert K_EVIDENCE_WINDOW == 2
+    assert recent_evidence in pack.relevant_evidence_ids
+    assert boundary_evidence in pack.relevant_evidence_ids
+    assert old_evidence not in pack.relevant_evidence_ids
+    joined = "\n".join(pack.relevant_evidence_summaries)
+    assert "loop 3 tool_call write_file" in joined
+    assert "loop 2 tool_call write_file" in joined
+    assert "loop 1 tool_call write_file" not in joined
 
 
 def test_history_truncation_info_and_determinism() -> None:
@@ -416,6 +436,15 @@ def test_history_truncation_info_and_determinism() -> None:
     assert pack1.truncation_info is not None
     assert pack1.truncation_info.chars_before > MAX_HISTORY_CHARS
     assert pack1.truncation_info.chars_after <= MAX_HISTORY_CHARS
+    rendered_history = render_prior_loop_context_block(
+        loop_id=pack1.loop_id,
+        last_self_summary=pack1.last_self_summary,
+        best_state_summary=pack1.best_state_summary,
+        best_workspace_files=pack1.best_workspace_files,
+        failure_patterns_to_avoid=pack1.failure_patterns_to_avoid,
+        relevant_evidence_summaries=pack1.relevant_evidence_summaries,
+    )
+    assert len(rendered_history) == pack1.truncation_info.chars_after
     assert (
         pack1.truncation_info.dropped_evidence
         + pack1.truncation_info.dropped_failures
