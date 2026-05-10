@@ -293,6 +293,15 @@ async def test_budgeted_mode_emits_budget_exhausted_after_base_done(
         for event in repo._events
     )
 
+    # Post-PR #1 fixup #3: the persisted hunger snapshot must carry the
+    # actual terminal stop_reason. Before the fix, the orchestrator
+    # saved the engine's snapshot (stop_reason=DONE) before the
+    # refinement hook overrode the verdict to BUDGET_EXHAUSTED, leaving
+    # hunger_snapshots and StopReport in disagreement.
+    persisted = repo.get_latest_hunger_snapshot("t1")
+    assert persisted is not None
+    assert persisted.stop_reason is StopReason.BUDGET_EXHAUSTED
+
 
 async def test_ignore_stagnation_continues_until_budget_exhausted(
     tmp_path: Path,

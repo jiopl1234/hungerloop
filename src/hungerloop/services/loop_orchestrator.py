@@ -162,7 +162,16 @@ class LoopOrchestrator:
             snapshot=snapshot,
         )
         if isinstance(budgeted, StopReport):
-            self.repo.save_hunger_snapshot(task_id, snapshot)
+            # The refinement hook decides BUDGET_EXHAUSTED outside the
+            # engine, so the snapshot's stop_reason still reads DONE.
+            # Persist a snapshot whose stop_reason matches the actual
+            # StopReport so audit views (hunger_snapshots stream,
+            # repair-state diagnostics) don't disagree with the
+            # StopReport's terminal verdict.
+            final_snapshot = snapshot.model_copy(
+                update={"stop_reason": budgeted.stop_reason}
+            )
+            self.repo.save_hunger_snapshot(task_id, final_snapshot)
             return budgeted
         if isinstance(budgeted, tuple):
             ledger, snapshot = budgeted
