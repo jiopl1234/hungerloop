@@ -44,7 +44,12 @@ class StagnationDetector:
         self.max_global_no_progress = max_global_no_progress_loops
 
     def update(
-        self, task_id: str, loop_id: int, validation_report: ValidationReport
+        self,
+        task_id: str,
+        loop_id: int,
+        validation_report: ValidationReport,
+        *,
+        respect_stagnation: bool = True,
     ) -> StagnationResult:
         """Update stagnation counters based on validation report.
 
@@ -77,7 +82,10 @@ class StagnationDetector:
             else:
                 item.consecutive_failure_count += 1
 
-            if item.consecutive_failure_count >= self.max_item_failures:
+            if (
+                respect_stagnation
+                and item.consecutive_failure_count >= self.max_item_failures
+            ):
                 item.status = HungerItemStatus.BLOCKED
                 blocked_items.append(iid)
 
@@ -88,7 +96,9 @@ class StagnationDetector:
             global_blocked = False
         else:
             streak: int = self.repo.increment_no_progress_streak(task_id)
-            global_blocked = streak >= self.max_global_no_progress
+            global_blocked = (
+                respect_stagnation and streak >= self.max_global_no_progress
+            )
 
         return {
             "blocked_items": blocked_items,

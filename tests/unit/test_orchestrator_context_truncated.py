@@ -19,6 +19,7 @@ from hungerloop.services.hunger_engine import HungerEngine
 from hungerloop.services.hunger_update import HungerUpdateService
 from hungerloop.services.integrator import Integrator
 from hungerloop.services.loop_orchestrator import LoopOrchestrator
+from hungerloop.services.refinement_compiler import RefinementCompiler
 from hungerloop.services.rule_based_planner import RuleBasedPlanner
 from hungerloop.services.sandbox_runner import SandboxRunner
 from hungerloop.services.stagnation_detector import StagnationDetector
@@ -82,6 +83,7 @@ def _orchestrator(
         commit_manager=CommitManager(repo, workspace_manager),
         hunger_update=HungerUpdateService(repo),
         stagnation_detector=StagnationDetector(repo),
+        refinement_compiler=RefinementCompiler(repo),
         max_loops_safety_cap=1,
     )
 

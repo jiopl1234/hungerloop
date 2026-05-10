@@ -4,7 +4,7 @@ from __future__ import annotations
 import pytest
 
 from hungerloop.models.blackboard import BestState
-from hungerloop.models.enums import StopReason
+from hungerloop.models.enums import HungerItemStatus, StopReason
 from hungerloop.models.hunger import HungerItem, HungerLedger
 from hungerloop.repository.in_memory_repo import InMemoryRepository
 from hungerloop.services.stop_report_builder import build_stop_report
@@ -66,6 +66,38 @@ def test_hunger_expired_abandoned_when_best_has_no_accepted_checks() -> None:
     )
     report = build_stop_report(repo, "t1", StopReason.HUNGER_EXPIRED)
     assert report.goal_status == "abandoned"
+
+
+def test_budget_exhausted_completed_when_tier0_done() -> None:
+    repo = InMemoryRepository()
+    _seed_ledger(
+        repo,
+        [
+            HungerItem(
+                id="H-001",
+                title="done",
+                status=HungerItemStatus.VALIDATED_SATISFIED,
+                gap_score=0.0,
+            )
+        ],
+    )
+    report = build_stop_report(repo, "t1", StopReason.BUDGET_EXHAUSTED)
+    assert report.goal_status == "completed"
+
+
+def test_budget_exhausted_partial_when_tier0_not_done_but_best_useful() -> None:
+    repo = InMemoryRepository()
+    _seed_ledger(repo, [HungerItem(id="H-001", title="open")])
+    repo.save_best_state(
+        BestState(
+            task_id="t1",
+            state_id="BS-1",
+            summary="partial work",
+            accepted_check_keys=["H-001:0"],
+        )
+    )
+    report = build_stop_report(repo, "t1", StopReason.BUDGET_EXHAUSTED)
+    assert report.goal_status == "partial"
 
 
 def test_remaining_and_blocked_items_populated() -> None:

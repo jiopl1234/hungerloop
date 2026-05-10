@@ -22,6 +22,7 @@ import asyncio
 import json
 import os
 import random
+import re
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from typing import Any
@@ -51,6 +52,7 @@ _COST_DELTA_THRESHOLD_DEFAULT = 0.20
 # rule-of-thumb for English-heavy chat. The reconciliation event exists
 # precisely so ops can see when this heuristic is wrong.
 _CHARS_PER_TOKEN = 4
+_STREAM_REQUIRED_MAX_TOKENS = 4096
 
 
 class OpenAIModelClient:
@@ -260,17 +262,26 @@ class OpenAIModelClient:
         messages: list[dict[str, str]],
         max_tokens: int,
     ) -> ModelResponse:
+        if max_tokens > _STREAM_REQUIRED_MAX_TOKENS:
+            return await self._call_once_streaming(
+                client,
+                task_id=task_id,
+                loop_id=loop_id,
+                agent_id=agent_id,
+                messages=messages,
+                max_tokens=max_tokens,
+            )
+
+        request_payload = self._request_payload(
+            messages=messages,
+            max_tokens=max_tokens,
+            stream=False,
+        )
         try:
             response = await client.post(
                 f"{self.base_url}/chat/completions",
                 headers={"Authorization": f"Bearer {self.api_key}"},
-                json={
-                    "model": self.config.model_name,
-                    "messages": messages,
-                    "max_tokens": max_tokens,
-                    "temperature": self.config.temperature,
-                    "response_format": {"type": "json_object"},
-                },
+                json=request_payload,
             )
         except httpx.TransportError as exc:
             raise ModelCallError(
@@ -289,7 +300,11 @@ class OpenAIModelClient:
             raise ModelCallError("provider_server_error", retryable=True)
         if response.status_code >= 400:
             raise ModelCallError(
-                f"provider_http_error:{response.status_code}", retryable=False
+                (
+                    f"provider_http_error:{response.status_code}: "
+                    f"{_clip_http_error_body(response.text)}"
+                ),
+                retryable=False,
             )
 
         try:
@@ -304,9 +319,146 @@ class OpenAIModelClient:
                 f"provider_json_not_object: type={type(data).__name__}",
                 retryable=False,
             )
-        usage_raw = data.get("usage", {}) or {}
-        input_tokens = int(usage_raw.get("prompt_tokens", 0))
-        output_tokens = int(usage_raw.get("completion_tokens", 0))
+        choices = data.get("choices") or []
+        if not choices:
+            raise ModelCallError("missing_choices", retryable=False)
+        first_choice = choices[0] if isinstance(choices[0], dict) else {}
+        message = first_choice.get("message", {})
+        content = message.get("content", "") if isinstance(message, dict) else ""
+        if not isinstance(content, str):
+            raise ModelCallError("invalid_content_type", retryable=False)
+
+        return self._build_model_response(
+            task_id=task_id,
+            loop_id=loop_id,
+            agent_id=agent_id,
+            messages=messages,
+            max_tokens=max_tokens,
+            usage_raw=data.get("usage", {}) or {},
+            response_preview=str(data),
+            content=content,
+        )
+
+    async def _call_once_streaming(
+        self,
+        client: httpx.AsyncClient,
+        *,
+        task_id: str,
+        loop_id: int,
+        agent_id: str,
+        messages: list[dict[str, str]],
+        max_tokens: int,
+    ) -> ModelResponse:
+        request_payload = self._request_payload(
+            messages=messages,
+            max_tokens=max_tokens,
+            stream=True,
+        )
+        try:
+            async with client.stream(
+                "POST",
+                f"{self.base_url}/chat/completions",
+                headers={"Authorization": f"Bearer {self.api_key}"},
+                json=request_payload,
+            ) as response:
+                if response.status_code in {401, 403}:
+                    raise ModelAuthError(
+                        "auth_error: openai credentials invalid or unauthorized"
+                    )
+                if response.status_code == 429:
+                    raise ModelRateLimitError(
+                        "rate_limit", retry_after=response.headers.get("retry-after")
+                    )
+                if response.status_code >= 500:
+                    raise ModelCallError("provider_server_error", retryable=True)
+                if response.status_code >= 400:
+                    body = (await response.aread()).decode(errors="replace")
+                    raise ModelCallError(
+                        (
+                            f"provider_http_error:{response.status_code}: "
+                            f"{_clip_http_error_body(body)}"
+                        ),
+                        retryable=False,
+                    )
+
+                content_parts: list[str] = []
+                reasoning_parts: list[str] = []
+                usage_raw: dict[str, object] = {}
+                async for line in response.aiter_lines():
+                    if not line or not line.startswith("data: "):
+                        continue
+                    payload = line[6:].strip()
+                    if payload == "[DONE]":
+                        break
+                    try:
+                        chunk = json.loads(payload)
+                    except json.JSONDecodeError as exc:
+                        raise ModelCallError(
+                            "invalid_provider_json_response", retryable=False
+                        ) from exc
+                    if not isinstance(chunk, dict):
+                        raise ModelCallError(
+                            f"provider_json_not_object: type={type(chunk).__name__}",
+                            retryable=False,
+                        )
+                    usage_chunk = chunk.get("usage")
+                    if isinstance(usage_chunk, dict):
+                        usage_raw = dict(usage_chunk)
+                    for choice in chunk.get("choices") or []:
+                        if not isinstance(choice, dict):
+                            continue
+                        delta = choice.get("delta") or {}
+                        if not isinstance(delta, dict):
+                            continue
+                        content_piece = delta.get("content")
+                        reasoning_piece = delta.get("reasoning_content")
+                        if isinstance(content_piece, str):
+                            content_parts.append(content_piece)
+                        if isinstance(reasoning_piece, str):
+                            reasoning_parts.append(reasoning_piece)
+        except httpx.TransportError as exc:
+            raise ModelCallError(
+                f"network_error:{type(exc).__name__}: {exc}", retryable=True
+            ) from exc
+
+        content = "".join(content_parts)
+        preview_parts = [content]
+        reasoning_text = "".join(reasoning_parts)
+        if reasoning_text:
+            preview_parts.append(f"\n[reasoning]\n{reasoning_text}")
+        return self._build_model_response(
+            task_id=task_id,
+            loop_id=loop_id,
+            agent_id=agent_id,
+            messages=messages,
+            max_tokens=max_tokens,
+            usage_raw=usage_raw,
+            response_preview="".join(preview_parts),
+            content=content,
+        )
+
+    def _build_model_response(
+        self,
+        *,
+        task_id: str,
+        loop_id: int,
+        agent_id: str,
+        messages: list[dict[str, str]],
+        max_tokens: int,
+        usage_raw: object,
+        response_preview: str,
+        content: str,
+    ) -> ModelResponse:
+        usage_payload = usage_raw if isinstance(usage_raw, dict) else {}
+        input_tokens = _coerce_int(
+            usage_payload.get("prompt_tokens", usage_payload.get("input_tokens", 0))
+        )
+        output_tokens = _coerce_int(
+            usage_payload.get(
+                "completion_tokens",
+                usage_payload.get("output_tokens", 0),
+            )
+        )
         cost_usd = self.pricing.estimate(
             self.config.model_name,
             input_tokens=input_tokens,
@@ -326,7 +478,7 @@ class OpenAIModelClient:
             input_tokens=input_tokens,
             output_tokens=output_tokens,
             cost_usd=cost_usd,
-            response_preview=str(data)[:5000],
+            response_preview=response_preview[:5000],
         )
         # Persist successful-call evidence before the post-call budget
         # check. If actual usage trips SAFETY_STOP, the stop report and
@@ -342,17 +494,8 @@ class OpenAIModelClient:
             actual_cost_usd=cost_usd,
         )
 
-        choices = data.get("choices") or []
-        if not choices:
-            raise ModelCallError("missing_choices", retryable=False)
-        first_choice = choices[0] if isinstance(choices[0], dict) else {}
-        message = first_choice.get("message", {})
-        content = message.get("content", "") if isinstance(message, dict) else ""
-        if not isinstance(content, str):
-            raise ModelCallError("invalid_content_type", retryable=False)
-
         try:
-            json_data = json.loads(content)
+            json_data = json.loads(_extract_json_object_text(content))
         except json.JSONDecodeError as exc:
             raise ModelCallError(
                 f"invalid_json_response: {exc.msg}",
@@ -371,6 +514,25 @@ class OpenAIModelClient:
             usage=usage,
             evidence_id=evidence_id,
         )
+
+    def _request_payload(
+        self,
+        *,
+        messages: list[dict[str, str]],
+        max_tokens: int,
+        stream: bool,
+    ) -> dict[str, object]:
+        payload: dict[str, object] = {
+            "model": self.config.model_name,
+            "messages": messages,
+            "max_tokens": max_tokens,
+            "temperature": self.config.temperature,
+            "response_format": {"type": "json_object"},
+        }
+        if stream:
+            payload["stream"] = True
+            payload["stream_options"] = {"include_usage": True}
+        return payload
 
     def _maybe_emit_reconciliation(
         self,
@@ -465,3 +627,41 @@ class OpenAIModelClient:
                 except (TypeError, ValueError, OverflowError):
                     pass
         return float(min(cap, base * (2**attempt) + random.uniform(0, 0.5)))
+
+
+def _clip_http_error_body(text: str, max_chars: int = 500) -> str:
+    """Keep provider 4xx diagnostics useful without storing full bodies."""
+    stripped = " ".join(text.split())
+    if len(stripped) <= max_chars:
+        return stripped
+    if max_chars <= 1:
+        return "…"
+    return f"{stripped[: max_chars - 1]}…"
+
+
+def _extract_json_object_text(content: str) -> str:
+    """Extract the first JSON object, tolerating streamed reasoning wrappers."""
+    stripped = re.sub(r"<think>.*?</think>", "", content, flags=re.DOTALL).strip()
+    if stripped.startswith("{"):
+        start = 0
+    else:
+        start = stripped.find("{")
+        if start == -1:
+            return stripped
+    try:
+        _, end = json.JSONDecoder().raw_decode(stripped[start:])
+    except json.JSONDecodeError:
+        return stripped[start:]
+    return stripped[start : start + end]
+
+
+def _coerce_int(value: object) -> int:
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(value)
+    if isinstance(value, str) and value.strip().isdigit():
+        return int(value)
+    return 0

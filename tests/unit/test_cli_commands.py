@@ -11,6 +11,8 @@ from hungerloop.cli.context import CliContext
 from hungerloop.cli.main import cli
 from hungerloop.models.enums import (
     AcceptanceCheckType,
+    CompletionMode,
+    DecayType,
     HungerItemStatus,
     StopReason,
 )
@@ -336,6 +338,57 @@ def test_run_with_refill_passes_preflight(context: CliContext) -> None:
     # We just verify the CLI didn't error on preflight.
 
 
+def test_run_budgeted_refinement_flags_update_policy(context: CliContext) -> None:
+    context.repo.save_hunger_ledger("t1", HungerLedger(task_id="t1", items=[]))
+
+    runner = CliRunner()
+    result = runner.invoke(
+        cli,
+        [
+            "run",
+            "t1",
+            "--budget-loops",
+            "10",
+            "--spend-budget",
+            "--refinement-profile",
+            "python_medium",
+            "--max-refinement-tier",
+            "2",
+            "--ignore-stagnation",
+        ],
+        obj=context,
+    )
+
+    assert result.exit_code == 0, result.output
+    policy = context.repo.get_hunger_policy("t1")
+    assert policy.decay_type is DecayType.LOOP_COUNT
+    assert policy.decay_duration_seconds == 10.0
+    assert policy.completion_mode is CompletionMode.SPEND_BUDGET
+    assert policy.refinement_profile == "python_medium"
+    assert policy.max_refinement_tier == 2
+    assert policy.respect_stagnation is False
+
+
+def test_run_spend_budget_requires_budget_loops(context: CliContext) -> None:
+    runner = CliRunner()
+    result = runner.invoke(
+        cli,
+        ["run", "t1", "--spend-budget", "--max-refinement-tier", "1"],
+        obj=context,
+    )
+
+    assert result.exit_code != 0
+    assert "--spend-budget requires --budget-loops" in result.output
+
+
+def test_run_ignore_stagnation_requires_spend_budget(context: CliContext) -> None:
+    runner = CliRunner()
+    result = runner.invoke(cli, ["run", "t1", "--ignore-stagnation"], obj=context)
+
+    assert result.exit_code != 0
+    assert "--ignore-stagnation requires --spend-budget" in result.output
+
+
 def test_run_raise_cost_ceiling_updates_policy(context: CliContext) -> None:
     context.repo.save_hunger_ledger("t1", HungerLedger(task_id="t1", items=[]))
     context.repo.save_stop_report(
@@ -440,6 +493,40 @@ def test_run_model_config_openai_resolves_client(
     )
     client = _resolve_model_client(context, path)
     assert isinstance(client, OpenAIModelClient)
+
+
+def test_run_model_config_openai_resolves_budget_allocator(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from hungerloop.cli.run_cmd import _resolve_budget_allocator
+    from hungerloop.models.enums import LoopPhase
+    from hungerloop.models.hunger import HungerSnapshot
+
+    monkeypatch.setenv("HL_TEST_API_KEY", "sk-test")
+    path = tmp_path / "model.yaml"
+    path.write_text(
+        (
+            "provider: openai\n"
+            "model_name: gpt-4o-mini\n"
+            "api_key_env: HL_TEST_API_KEY\n"
+            "max_tokens: 60000\n"
+        ),
+        encoding="utf-8",
+    )
+
+    allocator = _resolve_budget_allocator(path)
+    budget = allocator.allocate(
+        HungerSnapshot(
+            drive_budget=80.0,
+            work_pressure=10.0,
+            active_hunger=10.0,
+            drive_ratio=0.8,
+            phase=LoopPhase.EXPLORE,
+            should_stop=False,
+        )
+    )
+
+    assert budget.max_tokens == 60000
 
 
 def test_run_model_config_unknown_openai_pricing_requires_confirmation(

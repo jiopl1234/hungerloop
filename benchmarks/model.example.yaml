@@ -1,0 +1,6 @@
+provider: openai
+model_name: gpt-4o-mini
+api_key_env: OPENAI_API_KEY
+base_url: https://api.openai.com/v1
+timeout_seconds: 60
+temperature: 0.1

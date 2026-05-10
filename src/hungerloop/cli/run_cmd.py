@@ -12,7 +12,9 @@ import click
 from hungerloop.cli.context import CliContext
 from hungerloop.cli.orchestrator_factory import build_orchestrator
 from hungerloop.cli.preflight import PreflightError, check_resume_preflight
+from hungerloop.models.enums import CompletionMode, DecayType
 from hungerloop.models.events import EventType
+from hungerloop.services.budget_allocator import BudgetAllocator
 from hungerloop.services.cost_guard import CostGuard
 from hungerloop.services.model_client import DummyModelClient, ModelAuthError, ModelClient
 from hungerloop.services.model_config import (
@@ -63,6 +65,37 @@ def _resolve_stale_threshold(cli_value: int | None) -> int:
         "Credit N loop budgets before resuming; required when the previous "
         "stop_reason was HUNGER_EXPIRED."
     ),
+)
+@click.option(
+    "--budget-loops",
+    type=int,
+    default=None,
+    help="Explicit loop work budget for this run.",
+)
+@click.option(
+    "--spend-budget",
+    is_flag=True,
+    default=False,
+    help="Continue into deterministic refinement tiers after base correctness.",
+)
+@click.option(
+    "--refinement-profile",
+    type=str,
+    default=None,
+    help="Refinement profile to use with --spend-budget, e.g. python_medium.",
+)
+@click.option(
+    "--max-refinement-tier",
+    type=int,
+    default=0,
+    show_default=True,
+    help="Highest deterministic refinement tier to generate.",
+)
+@click.option(
+    "--ignore-stagnation",
+    is_flag=True,
+    default=False,
+    help="In spend-budget mode, keep running until budget exhaustion.",
 )
 @click.option(
     "--unblock-all",
@@ -148,6 +181,11 @@ def run(
     task_id: str,
     max_loops: int,
     refill_loops: int | None,
+    budget_loops: int | None,
+    spend_budget: bool,
+    refinement_profile: str | None,
+    max_refinement_tier: int,
+    ignore_stagnation: bool,
     unblock_all: bool,
     resume_human: bool,
     raise_cost_ceiling: float | None,
@@ -176,6 +214,14 @@ def run(
             task_id=task_id,
         )
 
+    _validate_budgeted_refinement_flags(
+        max_loops=max_loops,
+        budget_loops=budget_loops,
+        spend_budget=spend_budget,
+        max_refinement_tier=max_refinement_tier,
+        ignore_stagnation=ignore_stagnation,
+    )
+
     # Preflight runs *before* overrides so its comparisons (e.g.
     # raise_cost_ceiling vs. current ceiling) see the pre-resume policy.
     try:
@@ -197,6 +243,11 @@ def run(
         ctx,
         task_id,
         refill_loops=refill_loops,
+        budget_loops=budget_loops,
+        spend_budget=spend_budget,
+        refinement_profile=refinement_profile,
+        max_refinement_tier=max_refinement_tier,
+        ignore_stagnation=ignore_stagnation,
         unblock_all=unblock_all,
         resume_human=resume_human,
         raise_cost_ceiling=raise_cost_ceiling,
@@ -210,6 +261,7 @@ def run(
         )
     except (ValueError, NotImplementedError, ModelAuthError) as exc:
         raise click.ClickException(str(exc)) from exc
+    budget_allocator = _resolve_budget_allocator(model_config_path)
 
     # Acquire the task lock (PRD §5.1.1) before invoking the orchestrator.
     owner = _build_lock_owner()
@@ -242,6 +294,7 @@ def run(
             repo=ctx.repo,
             workspace_root=ctx.workspace_root,
             model_client=model_client,
+            budget_allocator=budget_allocator,
             max_loops_safety_cap=max_loops,
         )
         orchestrator.workspace_manager.ensure_task_workspace(task_id)
@@ -272,6 +325,11 @@ def _apply_user_overrides(
     task_id: str,
     *,
     refill_loops: int | None,
+    budget_loops: int | None,
+    spend_budget: bool,
+    refinement_profile: str | None,
+    max_refinement_tier: int,
+    ignore_stagnation: bool,
     unblock_all: bool,
     resume_human: bool,
     raise_cost_ceiling: float | None,
@@ -288,6 +346,26 @@ def _apply_user_overrides(
       counters reset, plus a per-item audit event (PRD §15.2).
     * ``--raise-cost-ceiling X`` → ``policy.max_total_cost_usd = X``.
     """
+    if (
+        budget_loops is not None
+        or spend_budget
+        or refinement_profile is not None
+        or max_refinement_tier > 0
+        or ignore_stagnation
+    ):
+        policy = ctx.repo.get_hunger_policy(task_id)
+        if budget_loops is not None:
+            policy.decay_type = DecayType.LOOP_COUNT
+            policy.decay_duration_seconds = float(budget_loops)
+        if spend_budget:
+            policy.completion_mode = CompletionMode.SPEND_BUDGET
+        if refinement_profile is not None:
+            policy.refinement_profile = refinement_profile
+        policy.max_refinement_tier = max_refinement_tier
+        if ignore_stagnation:
+            policy.respect_stagnation = False
+        ctx.repo.set_hunger_policy(task_id, policy)
+
     if refill_loops is not None and refill_loops > 0:
         clock = ctx.repo.get_hunger_clock(task_id)
         before = clock.loop_count
@@ -345,6 +423,30 @@ def _apply_user_overrides(
         )
 
 
+def _validate_budgeted_refinement_flags(
+    *,
+    max_loops: int,
+    budget_loops: int | None,
+    spend_budget: bool,
+    max_refinement_tier: int,
+    ignore_stagnation: bool,
+) -> None:
+    if spend_budget and budget_loops is None:
+        raise click.UsageError("--spend-budget requires --budget-loops.")
+    if spend_budget and max_refinement_tier <= 0:
+        raise click.UsageError(
+            "--spend-budget requires --max-refinement-tier greater than 0."
+        )
+    if ignore_stagnation and not spend_budget:
+        raise click.UsageError("--ignore-stagnation requires --spend-budget.")
+    if budget_loops is not None and budget_loops <= 0:
+        raise click.UsageError("--budget-loops must be a positive integer.")
+    if max_refinement_tier < 0:
+        raise click.UsageError("--max-refinement-tier must be >= 0.")
+    if budget_loops is not None and max_loops < budget_loops:
+        raise click.UsageError("--max-loops must be >= --budget-loops.")
+
+
 def _resolve_model_client(
     ctx: CliContext,
     model_config_path: Path | None,
@@ -375,3 +477,25 @@ def _resolve_model_client(
             ctx.repo,
         )
     raise NotImplementedError(f"Unsupported provider: {config.provider.value}")
+
+
+def _resolve_budget_allocator(model_config_path: Path | None) -> BudgetAllocator:
+    """Honor YAML model max_tokens for real-model runs.
+
+    The default CLI wiring used the stock 4000-token explore/exploit caps even
+    when the operator explicitly configured a larger model ``max_tokens`` in
+    YAML. That left long-code tasks prone to truncated JSON responses. Keep the
+    default behavior for runs without a model config, but let an OpenAI-backed
+    config raise the per-loop request budget.
+    """
+    if model_config_path is None:
+        return BudgetAllocator()
+
+    config = ModelConfigLoader().load(model_config_path)
+    if config.provider != ModelProvider.OPENAI:
+        return BudgetAllocator()
+
+    return BudgetAllocator(
+        explore_max_tokens=config.max_tokens,
+        exploit_max_tokens=config.max_tokens,
+    )

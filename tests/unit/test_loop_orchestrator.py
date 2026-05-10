@@ -6,6 +6,7 @@ from pathlib import Path
 from hungerloop.models.context import ContextPack
 from hungerloop.models.enums import (
     AcceptanceCheckType,
+    CompletionMode,
     HungerItemStatus,
     StopReason,
 )
@@ -31,6 +32,7 @@ from hungerloop.services.hunger_update import HungerUpdateService
 from hungerloop.services.integrator import Integrator
 from hungerloop.services.loop_orchestrator import LoopOrchestrator
 from hungerloop.services.model_client import DummyModelClient
+from hungerloop.services.refinement_compiler import RefinementCompiler
 from hungerloop.services.rule_based_planner import RuleBasedPlanner
 from hungerloop.services.sandbox_runner import SandboxRunner
 from hungerloop.services.stagnation_detector import StagnationDetector
@@ -91,6 +93,7 @@ def _build_orchestrator(
         stagnation_detector=StagnationDetector(
             repo, max_global_no_progress_loops=max_global_no_progress
         ),
+        refinement_compiler=RefinementCompiler(repo),
         max_loops_safety_cap=20,
     )
 
@@ -129,6 +132,7 @@ def _build_full_orchestrator(
         commit_manager=CommitManager(repo, workspace_manager),
         hunger_update=HungerUpdateService(repo),
         stagnation_detector=StagnationDetector(repo),
+        refinement_compiler=RefinementCompiler(repo),
         max_loops_safety_cap=10,
     )
 
@@ -207,6 +211,131 @@ async def test_step_returns_loop_trace_when_progress_made(tmp_path: Path) -> Non
     event_types = [event["event_type"] for event in repo._events]
     assert "loop_started" in event_types
     assert "loop_committed" in event_types
+
+
+async def test_budgeted_mode_adds_refinement_work_instead_of_done(
+    tmp_path: Path,
+) -> None:
+    repo = InMemoryRepository()
+    item = HungerItem(
+        id="H-001",
+        title="base done",
+        status=HungerItemStatus.VALIDATED_SATISFIED,
+        gap_score=0.0,
+    )
+    _seed_task(repo, [item])
+    repo.set_hunger_policy(
+        "t1",
+        HungerPolicy(
+            completion_mode=CompletionMode.SPEND_BUDGET,
+            refinement_profile="python_medium",
+            max_refinement_tier=1,
+            initial_hunger=100.0,
+            decay_duration_seconds=5.0,
+        ),
+    )
+
+    orchestrator = _build_full_orchestrator(
+        tmp_path=tmp_path,
+        repo=repo,
+        model_client=DummyModelClient(),
+    )
+
+    outcome = await orchestrator.step("t1")
+
+    assert isinstance(outcome, LoopTrace)
+    ledger = repo.get_hunger_ledger("t1")
+    added = [item for item in ledger.items if item.refinement_tier == 1]
+    assert [item.id for item in added] == ["H-REF-01-tests"]
+    assert outcome.selected_hunger_item_ids == ["H-REF-01-tests"]
+    event_types = [event["event_type"] for event in repo._events]
+    assert "refinement_tier_started" in event_types
+    assert "refinement_items_added" in event_types
+
+
+async def test_budgeted_mode_emits_budget_exhausted_after_base_done(
+    tmp_path: Path,
+) -> None:
+    repo = InMemoryRepository()
+    item = HungerItem(
+        id="H-001",
+        title="base done",
+        status=HungerItemStatus.VALIDATED_SATISFIED,
+        gap_score=0.0,
+    )
+    _seed_task(repo, [item])
+    repo.set_hunger_policy(
+        "t1",
+        HungerPolicy(
+            completion_mode=CompletionMode.SPEND_BUDGET,
+            refinement_profile="python_medium",
+            max_refinement_tier=1,
+            initial_hunger=100.0,
+            decay_duration_seconds=1.0,
+        ),
+    )
+    clock = repo.get_hunger_clock("t1")
+    clock.loop_count = 1
+    repo.save_hunger_clock(clock)
+    orchestrator = _build_full_orchestrator(
+        tmp_path=tmp_path,
+        repo=repo,
+        model_client=DummyModelClient(),
+    )
+
+    outcome = await orchestrator.step("t1")
+
+    assert isinstance(outcome, StopReport)
+    assert outcome.stop_reason is StopReason.BUDGET_EXHAUSTED
+    assert outcome.goal_status == "completed"
+    assert any(
+        event["event_type"] == "refinement_budget_exhausted"
+        for event in repo._events
+    )
+
+
+async def test_ignore_stagnation_continues_until_budget_exhausted(
+    tmp_path: Path,
+) -> None:
+    repo = InMemoryRepository()
+    item = HungerItem(
+        id="H-001",
+        title="never passes",
+        priority=1.0,
+        gap_score=1.0,
+        acceptance_checks=[
+            AcceptanceCheck(
+                check_type=AcceptanceCheckType.FILE_EXISTS,
+                params={"path": "missing.md"},
+            )
+        ],
+    )
+    _seed_task(repo, [item])
+    repo.set_hunger_policy(
+        "t1",
+        HungerPolicy(
+            completion_mode=CompletionMode.SPEND_BUDGET,
+            refinement_profile="python_medium",
+            max_refinement_tier=1,
+            respect_stagnation=False,
+            initial_hunger=100.0,
+            decay_duration_seconds=2.0,
+        ),
+    )
+    orchestrator = _build_full_orchestrator(
+        tmp_path=tmp_path,
+        repo=repo,
+        model_client=DummyModelClient(),
+    )
+    orchestrator.stagnation_detector.max_global_no_progress = 1
+
+    outcome = await orchestrator.run("t1")
+
+    assert isinstance(outcome, StopReport)
+    assert outcome.stop_reason is StopReason.HUNGER_EXPIRED
+    item_after = repo.get_hunger_item("H-001")
+    assert item_after is not None
+    assert item_after.status is not HungerItemStatus.BLOCKED
 
 
 # ---- empty plan -> BLOCKED via stagnation streak ----

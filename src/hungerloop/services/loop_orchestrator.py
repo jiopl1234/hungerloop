@@ -28,9 +28,9 @@ from pathlib import Path
 from typing import Protocol, runtime_checkable
 
 from hungerloop.models.context import ContextPack
-from hungerloop.models.enums import StopReason
+from hungerloop.models.enums import CompletionMode, LoopPhase, StopReason
 from hungerloop.models.events import EventType
-from hungerloop.models.hunger import HungerSnapshot
+from hungerloop.models.hunger import HungerClockState, HungerLedger, HungerPolicy, HungerSnapshot
 from hungerloop.models.planning import BudgetAllocation, LoopPlan
 from hungerloop.models.tracing import LoopTrace, StopReport
 from hungerloop.models.validation import ValidationReport
@@ -43,6 +43,7 @@ from hungerloop.services.cost_guard import SafetyStopError
 from hungerloop.services.hunger_engine import HungerEngine
 from hungerloop.services.hunger_update import HungerUpdateService
 from hungerloop.services.integrator import Integrator
+from hungerloop.services.refinement_compiler import RefinementCompiler
 from hungerloop.services.rule_based_planner import RuleBasedPlanner
 from hungerloop.services.stagnation_detector import StagnationDetector
 from hungerloop.services.stop_report_builder import build_stop_report
@@ -89,6 +90,7 @@ class LoopOrchestrator:
         commit_manager: CommitManager,
         hunger_update: HungerUpdateService,
         stagnation_detector: StagnationDetector,
+        refinement_compiler: RefinementCompiler,
         memory_manager: _ProposesMemory | None = None,
         max_loops_safety_cap: int = 1000,
     ) -> None:
@@ -104,6 +106,7 @@ class LoopOrchestrator:
         self.commit_manager = commit_manager
         self.hunger_update = hunger_update
         self.stagnation_detector = stagnation_detector
+        self.refinement_compiler = refinement_compiler
         self.memory_manager = memory_manager
         self.max_loops_safety_cap = max_loops_safety_cap
         # Set inside ``_step_inner`` immediately after ``next_loop_id`` is
@@ -149,6 +152,21 @@ class LoopOrchestrator:
         snapshot = self.hunger_engine.tick(
             policy, clock, ledger, previous_phase=previous_phase
         )
+
+        budgeted = self._maybe_expand_or_stop_budgeted_refinement(
+            task_id=task_id,
+            policy=policy,
+            clock=clock,
+            ledger=ledger,
+            previous_phase=previous_phase,
+            snapshot=snapshot,
+        )
+        if isinstance(budgeted, StopReport):
+            self.repo.save_hunger_snapshot(task_id, snapshot)
+            return budgeted
+        if isinstance(budgeted, tuple):
+            ledger, snapshot = budgeted
+
         self.repo.save_hunger_snapshot(task_id, snapshot)
 
         if snapshot.should_stop:
@@ -308,7 +326,12 @@ class LoopOrchestrator:
                 loop_id=loop_id,
             )
         self.hunger_update.apply_validation(task_id, validation)
-        stagnation = self.stagnation_detector.update(task_id, loop_id, validation)
+        stagnation = self.stagnation_detector.update(
+            task_id,
+            loop_id,
+            validation,
+            respect_stagnation=policy.respect_stagnation,
+        )
 
         if self.memory_manager is not None:
             self.memory_manager.propose_from_loop(task_id, loop_id, validation)
@@ -382,6 +405,83 @@ class LoopOrchestrator:
         if stagnation["global_blocked"]:
             return self._emit_stop(task_id, StopReason.BLOCKED)
         return trace
+
+    def _maybe_expand_or_stop_budgeted_refinement(
+        self,
+        *,
+        task_id: str,
+        policy: HungerPolicy,
+        clock: HungerClockState,
+        ledger: HungerLedger,
+        previous_phase: LoopPhase | None,
+        snapshot: HungerSnapshot,
+    ) -> tuple[HungerLedger, HungerSnapshot] | StopReport | None:
+        """Handle spend-budget refinement before the normal DONE stop fires."""
+        if policy.completion_mode != CompletionMode.SPEND_BUDGET:
+            return None
+        if snapshot.stop_reason != StopReason.DONE:
+            return None
+
+        if snapshot.drive_budget <= 0:
+            self.repo.append_event(
+                EventType.REFINEMENT_BUDGET_EXHAUSTED,
+                {
+                    "loop_budget_remaining": snapshot.drive_budget,
+                    "max_refinement_tier": policy.max_refinement_tier,
+                    "profile": policy.refinement_profile,
+                },
+                task_id=task_id,
+            )
+            return self._emit_stop(
+                task_id,
+                StopReason.BUDGET_EXHAUSTED,
+                recommendation=(
+                    "refinement budget exhausted after tier-0 correctness; "
+                    "use --refill to continue refinement or --reset for a new run"
+                ),
+            )
+
+        result = self.refinement_compiler.ensure_next_tier(
+            task_id=task_id,
+            policy=policy,
+            ledger=ledger,
+            best_state=self.repo.get_best_state(task_id),
+        )
+        if not result.added_item_ids:
+            return None
+        best_state = self.repo.get_best_state(task_id)
+        previous_accepted_check_keys_count = (
+            len(best_state.accepted_check_keys) if best_state is not None else 0
+        )
+
+        self.repo.append_event(
+            EventType.REFINEMENT_TIER_STARTED,
+            {
+                "tier": result.active_tier,
+                "profile": policy.refinement_profile,
+                "loop_budget_remaining": snapshot.drive_budget,
+            },
+            task_id=task_id,
+        )
+        self.repo.append_event(
+            EventType.REFINEMENT_ITEMS_ADDED,
+            {
+                "tier": result.active_tier,
+                "profile": policy.refinement_profile,
+                "added_item_ids": list(result.added_item_ids),
+                "previous_accepted_check_keys_count": (
+                    previous_accepted_check_keys_count
+                ),
+                "loop_budget_remaining": snapshot.drive_budget,
+            },
+            task_id=task_id,
+        )
+
+        refreshed_ledger = self.repo.get_hunger_ledger(task_id)
+        refreshed_snapshot = self.hunger_engine.tick(
+            policy, clock, refreshed_ledger, previous_phase=previous_phase
+        )
+        return refreshed_ledger, refreshed_snapshot
 
     def _emit_check_events(
         self, task_id: str, loop_id: int, validation: ValidationReport
