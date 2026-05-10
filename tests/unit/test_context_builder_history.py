@@ -25,6 +25,7 @@ from hungerloop.services.context_builder import (
     MAX_WORKSPACE_FILES_LINE_CHARS,
     READ_ONLY_REJECTED_HINT,
     ContextBuilder,
+    _apply_history_cap,
 )
 from hungerloop.services.execution_worker import ExecutionWorker
 from hungerloop.services.prior_loop_context import render_prior_loop_context_block
@@ -581,3 +582,46 @@ def test_best_summary_clip_does_not_emit_total_truncation_info() -> None:
 def test_real_llm_loop_memory_smoke_is_gated() -> None:
     path = Path("tests/integration/test_real_llm_loop_memory.py")
     assert path.exists()
+
+
+def test_apply_history_cap_does_not_assert_when_static_block_exceeds_cap() -> None:
+    """Static-block-overflow degrades gracefully (post-PR #1 fixup #1).
+
+    Prior to this fix, ``_apply_history_cap`` raised ``AssertionError``
+    when the non-evictable static block (last_summary + best_summary +
+    best_files + headers) alone exceeded ``MAX_HISTORY_CHARS``. The
+    eviction loops cannot help in that case (there's nothing left to
+    drop), and the bare ``assert`` would propagate up to
+    ``LoopOrchestrator._step_inner`` and surface as
+    ``stop_reason=ERROR``.
+
+    The function now returns the over-cap state via TruncationInfo so
+    downstream consumers can audit it, and the loop continues.
+    """
+    # Construct synthetic inputs whose non-evictable static block alone
+    # is already larger than MAX_HISTORY_CHARS so eviction cannot help.
+    huge_last_summary = "L" * (MAX_HISTORY_CHARS // 2)
+    huge_best_summary = "B" * (MAX_HISTORY_CHARS // 2)
+    huge_best_files = ["F" * 100 for _ in range(8)]
+
+    evidence_ids, evidence_lines, failure_lines, info = _apply_history_cap(
+        loop_id=42,
+        last_summary=huge_last_summary,
+        best_summary=huge_best_summary,
+        best_files=huge_best_files,
+        evidence_ids=[],
+        evidence_lines=[],
+        failure_lines=[],
+        best_summary_truncated=False,
+    )
+
+    assert info is not None
+    # chars_after MUST be allowed to exceed MAX_HISTORY_CHARS — the
+    # whole point of this test is that the function does NOT raise.
+    assert info.chars_after > MAX_HISTORY_CHARS
+    # Eviction lists are unchanged (nothing to evict).
+    assert evidence_ids == []
+    assert evidence_lines == []
+    assert failure_lines == []
+    assert info.dropped_evidence == 0
+    assert info.dropped_failures == 0

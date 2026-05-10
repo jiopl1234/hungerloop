@@ -378,7 +378,6 @@ def _apply_history_cap(
         evidence_lines=evidence_lines,
     )
     if len(assembled) <= MAX_HISTORY_CHARS:
-        assert len(assembled) <= MAX_HISTORY_CHARS
         return evidence_ids, evidence_lines, failure_lines, None
 
     chars_before = len(assembled)
@@ -408,11 +407,13 @@ def _apply_history_cap(
             evidence_lines=evidence_lines,
         )
 
+    # If the non-evictable static block (last_summary + best_summary +
+    # best_files + headers) alone exceeds MAX_HISTORY_CHARS, eviction
+    # cannot help. Degrade gracefully: surface the over-cap state via
+    # TruncationInfo.chars_after rather than crashing the loop with an
+    # AssertionError. Downstream consumers (trace export, repair-state)
+    # can detect the over-cap by comparing chars_after to the cap.
     chars_after = len(assembled)
-    assert chars_after <= MAX_HISTORY_CHARS, (
-        "history block cap invariant violated; lower non-evictable section "
-        "caps or update MAX_HISTORY_CHARS"
-    )
 
     return (
         evidence_ids,
