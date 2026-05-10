@@ -1,6 +1,7 @@
 # tests/unit/test_enums.py
 from hungerloop.models.enums import (
     AcceptanceCheckType,
+    CompletionMode,
     DecayType,
     HungerItemStatus,
     HungerItemType,
@@ -15,6 +16,7 @@ def test_stop_reason_includes_all_values() -> None:
     assert values == {
         "done",
         "hunger_expired",
+        "budget_exhausted",
         "blocked",
         "human_required",
         "human_paused",
@@ -53,6 +55,11 @@ def test_decay_type_values() -> None:
     assert DecayType.LINEAR.value == "linear"
     assert DecayType.LOOP_COUNT.value == "loop_count"
     assert DecayType.STAGE_BASED.value == "stage_based"
+
+
+def test_completion_mode_values() -> None:
+    assert CompletionMode.STOP_ON_DONE.value == "stop_on_done"
+    assert CompletionMode.SPEND_BUDGET.value == "spend_budget"
 
 
 def test_loop_phase_values() -> None:

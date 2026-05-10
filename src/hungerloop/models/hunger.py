@@ -28,6 +28,7 @@ from pydantic import BaseModel, Field
 
 from hungerloop.models.enums import (
     AcceptanceCheckType,
+    CompletionMode,
     DecayType,
     HungerItemStatus,
     HungerItemType,
@@ -57,6 +58,10 @@ class HungerItem(BaseModel):
     last_progress_loop_id: int | None = None
     evidence_ids: list[str] = Field(default_factory=list)
     updated_at_loop: int = 0
+    refinement_tier: int = 0
+    refinement_kind: str = "correctness"
+    generated_by: str | None = None
+    source_check_keys: list[str] = Field(default_factory=list)
 
 
 _INACTIVE_STATUSES: frozenset[HungerItemStatus] = frozenset(
@@ -104,6 +109,25 @@ class HungerLedger(BaseModel):
             and item.gap_score > 0
         ]
 
+    def unfinished_items_by_tier(self, max_tier: int) -> list[HungerItem]:
+        return [
+            item
+            for item in self.unfinished_items()
+            if item.refinement_tier <= max_tier
+        ]
+
+    def tier_is_done(self, tier: int) -> bool:
+        tier_items = [
+            item for item in self.items if item.refinement_tier == tier
+        ]
+        return bool(tier_items) and all(
+            item.status in _DONE_STATUSES or item.gap_score <= 0
+            for item in tier_items
+        )
+
+    def all_tiers_done(self, max_tier: int) -> bool:
+        return all(self.tier_is_done(tier) for tier in range(max_tier + 1))
+
     def work_pressure(self) -> float:
         return sum(item.priority * item.gap_score for item in self.active_items())
 
@@ -131,6 +155,10 @@ class HungerPolicy(BaseModel):
     started_at: datetime | None = None
     max_total_cost_usd: float = 10.0
     max_total_tokens: int = 1_000_000
+    completion_mode: CompletionMode = CompletionMode.STOP_ON_DONE
+    refinement_profile: str | None = None
+    max_refinement_tier: int = 0
+    respect_stagnation: bool = True
 
 
 class HungerClockState(BaseModel):

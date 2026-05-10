@@ -110,6 +110,9 @@ class LoopTrace(BaseModel):
 STOP_REASON_HINTS: dict[str, str] = {
     "done": "Task is complete. Use --reset to start a new run.",
     "hunger_expired": "Refill hunger before resuming.",
+    "budget_exhausted": (
+        "Loop budget was intentionally exhausted. Refill loops or reset to continue."
+    ),
     "blocked": "Unblock hunger items before resuming.",
     "human_required": (
         "Resolve the requested human action, then run with --resume."

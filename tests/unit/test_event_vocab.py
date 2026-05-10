@@ -134,6 +134,17 @@ def test_v0_5e_skill_lifecycle_additions_present() -> None:
     assert expected <= actual
 
 
+def test_v0_5f_budgeted_refinement_additions_present() -> None:
+    """v0.5f.4 adds refinement lifecycle audit events."""
+    expected = {
+        "refinement_tier_started",
+        "refinement_items_added",
+        "refinement_budget_exhausted",
+    }
+    actual = {m.value for m in EventType}
+    assert expected <= actual
+
+
 def test_no_shipped_event_value_renamed() -> None:
     """Wire-contract regression net (PRD §7.2) — every value that ever
     shipped to operators must remain in the enum. Adding to this set

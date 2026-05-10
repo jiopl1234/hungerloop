@@ -7,6 +7,7 @@ mapping ``StopReason → GoalStatus`` is fixed in PRD §28.6:
 |-----------------|----------------------------------------------------------------|
 | DONE            | completed                                                      |
 | HUNGER_EXPIRED  | partial (best non-empty + accepted_check_keys) else abandoned  |
+| BUDGET_EXHAUSTED| completed when tier 0 is done; else partial/abandoned by best  |
 | BLOCKED         | blocked                                                        |
 | HUMAN_REQUIRED  | paused                                                         |
 | HUMAN_PAUSED    | paused                                                         |
@@ -24,7 +25,12 @@ from hungerloop.models.tracing import GoalStatus, StopReport
 from hungerloop.repository.protocol import RepositoryProtocol
 
 
-def _goal_status_for(stop_reason: StopReason, *, has_useful_best: bool) -> GoalStatus:
+def _goal_status_for(
+    stop_reason: StopReason,
+    *,
+    has_useful_best: bool,
+    tier0_done: bool,
+) -> GoalStatus:
     """Apply the §28.6 mapping table.
 
     Args:
@@ -36,6 +42,10 @@ def _goal_status_for(stop_reason: StopReason, *, has_useful_best: bool) -> GoalS
     if stop_reason == StopReason.DONE:
         return "completed"
     if stop_reason == StopReason.HUNGER_EXPIRED:
+        return "partial" if has_useful_best else "abandoned"
+    if stop_reason == StopReason.BUDGET_EXHAUSTED:
+        if tier0_done:
+            return "completed"
         return "partial" if has_useful_best else "abandoned"
     if stop_reason == StopReason.BLOCKED:
         return "blocked"
@@ -64,6 +74,7 @@ def build_stop_report(
     has_useful_best = bool(best and accepted_check_keys)
 
     ledger = repo.get_hunger_ledger(task_id)
+    tier0_done = ledger.tier_is_done(0)
     remaining = [item.id for item in ledger.unfinished_items()]
     blocked = [item.id for item in ledger.blocked_items()]
 
@@ -73,7 +84,11 @@ def build_stop_report(
     return StopReport(
         task_id=task_id,
         stop_reason=stop_reason,
-        goal_status=_goal_status_for(stop_reason, has_useful_best=has_useful_best),
+        goal_status=_goal_status_for(
+            stop_reason,
+            has_useful_best=has_useful_best,
+            tier0_done=tier0_done,
+        ),
         final_best_state_id=best.state_id if best else None,
         best_state_summary=best.summary if best else None,
         accepted_check_keys_count=len(accepted_check_keys),

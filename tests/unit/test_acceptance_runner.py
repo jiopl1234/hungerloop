@@ -175,3 +175,34 @@ async def test_file_exists_returns_true_when_file_present(
     assert passed is True
     assert "report.md" in detail
     assert ev_id is None
+
+
+async def test_shell_exit_zero_failure_detail_includes_output_summary(
+    runner_setup: tuple[AcceptanceCheckRunner, WorkspaceManager, InMemoryRepository],
+) -> None:
+    runner, _, repo = runner_setup
+    check = _DummyCheck(
+        AcceptanceCheckType.SHELL_EXIT_ZERO,
+        {
+            "argv": [
+                "python",
+                "-c",
+                (
+                    "import sys; "
+                    "print('stdout clue'); "
+                    "print('stderr traceback clue', file=sys.stderr); "
+                    "raise SystemExit(7)"
+                ),
+            ],
+            "timeout": 10,
+        },
+    )
+
+    passed, detail, ev_id = await runner.run(check, "t1", 1, _DummyCandidate())
+
+    assert passed is False
+    assert "exit=7" in detail
+    assert "stdout=stdout clue" in detail
+    assert "stderr=stderr traceback clue" in detail
+    assert ev_id is not None
+    assert ev_id in repo._evidence

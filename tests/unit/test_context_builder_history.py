@@ -6,8 +6,13 @@ from typing import Literal
 
 from hungerloop.models.blackboard import BestState
 from hungerloop.models.context import ContextPack
-from hungerloop.models.enums import AcceptanceCheckType, LoopPhase, ValidationVerdict
-from hungerloop.models.hunger import AcceptanceCheck, HungerItem
+from hungerloop.models.enums import (
+    AcceptanceCheckType,
+    CompletionMode,
+    LoopPhase,
+    ValidationVerdict,
+)
+from hungerloop.models.hunger import AcceptanceCheck, HungerItem, HungerPolicy
 from hungerloop.models.planning import BudgetAllocation
 from hungerloop.models.tracing import LoopTrace
 from hungerloop.models.validation import CheckResult, ValidationReport
@@ -18,6 +23,7 @@ from hungerloop.services.context_builder import (
     MAX_HISTORY_CHARS,
     MAX_WORKSPACE_FILE_PATH_CHARS,
     MAX_WORKSPACE_FILES_LINE_CHARS,
+    READ_ONLY_REJECTED_HINT,
     ContextBuilder,
 )
 from hungerloop.services.execution_worker import ExecutionWorker
@@ -174,6 +180,37 @@ def _seed_rejected_loop(
     )
 
 
+def _seed_rejected_loop_without_tool_evidence(
+    repo: InMemoryRepository,
+    loop_id: int,
+    *,
+    summary: str = "Explore directory and create fizzbuzz.py module",
+    path: str = "fizzbuzz.py",
+) -> None:
+    report = _failed_report(loop_id, path=path)
+    repo.save_validation_report(report)
+    repo.save_loop_trace(
+        LoopTrace(
+            task_id="t1",
+            loop_id=loop_id,
+            phase="explore",
+            active_hunger=1.0,
+            drive_budget=1.0,
+            work_pressure=1.0,
+            validation_report_id=report.id,
+            committed=False,
+        )
+    )
+    repo.save_worker_result(
+        WorkerResult(
+            agent_id="execution_worker_v1",
+            task_id="t1",
+            loop_id=loop_id,
+            summary=summary,
+        )
+    )
+
+
 def _seed_committed_loop(repo: InMemoryRepository, loop_id: int) -> str:
     repo.save_loop_trace(
         LoopTrace(
@@ -270,12 +307,83 @@ def test_loop3_after_committed_loop2_renders_evidence_summaries() -> None:
     assert pack.last_self_summary == "Wrote fizzbuzz module per spec"
     assert pack.relevant_evidence_ids == [evidence_id]
     assert pack.relevant_evidence_summaries == [
-        "loop 2 tool_call write_file: wrote 175 chars"
+        "loop 2 tool_call write_file fizzbuzz.py: wrote 175 chars"
     ]
     assert any("loop 1: H-001:0 file_exists" in line for line in pack.failure_patterns_to_avoid)
     user_message = ExecutionWorker._messages(pack)[1]["content"]
     assert "successful actions already on record" in user_message
-    assert "loop 2 tool_call write_file:" in user_message
+    assert "loop 2 tool_call write_file fizzbuzz.py:" in user_message
+
+
+def test_loop2_after_rejected_loop1_keeps_read_file_evidence_summary() -> None:
+    repo = InMemoryRepository()
+    _seed_rejected_loop(repo, 1)
+    read_evidence = repo.save_tool_call_as_evidence(
+        task_id="t1",
+        loop_id=1,
+        agent_id="execution_worker_v1",
+        tool_name="read_file",
+        args_summary="path=fizzbuzz.py",
+        result_summary="def fizzbuzz(n): return str(n)",
+        success=True,
+        elapsed_ms=1,
+    )
+
+    pack = _build_pack(repo, loop_id=2, path="fizzbuzz.py")
+
+    assert read_evidence in pack.relevant_evidence_ids
+    assert pack.relevant_evidence_summaries == [
+        "loop 1 tool_call read_file fizzbuzz.py: def fizzbuzz(n): return str(n)"
+    ]
+    user_message = ExecutionWorker._messages(pack)[1]["content"]
+    assert "successful actions already on record" in user_message
+    assert "loop 1 tool_call read_file fizzbuzz.py:" in user_message
+
+
+def test_budgeted_mode_warns_after_two_read_only_rejections() -> None:
+    repo = InMemoryRepository()
+    repo.set_hunger_policy(
+        "t1",
+        HungerPolicy(completion_mode=CompletionMode.SPEND_BUDGET),
+    )
+    for loop_id in (1, 2):
+        _seed_rejected_loop_without_tool_evidence(repo, loop_id)
+        repo.save_tool_call_as_evidence(
+            task_id="t1",
+            loop_id=loop_id,
+            agent_id="execution_worker_v1",
+            tool_name="read_file",
+            args_summary="path=fizzbuzz.py",
+            result_summary="def fizzbuzz(n): return str(n)",
+            success=True,
+            elapsed_ms=1,
+        )
+
+    pack = _build_pack(repo, loop_id=3, path="fizzbuzz.py")
+
+    assert pack.failure_patterns_to_avoid[0] == READ_ONLY_REJECTED_HINT
+    user_message = ExecutionWorker._messages(pack)[1]["content"]
+    assert READ_ONLY_REJECTED_HINT in user_message
+
+
+def test_default_mode_does_not_warn_after_two_read_only_rejections() -> None:
+    repo = InMemoryRepository()
+    for loop_id in (1, 2):
+        _seed_rejected_loop_without_tool_evidence(repo, loop_id)
+        repo.save_tool_call_as_evidence(
+            task_id="t1",
+            loop_id=loop_id,
+            agent_id="execution_worker_v1",
+            tool_name="read_file",
+            args_summary="path=fizzbuzz.py",
+            result_summary="def fizzbuzz(n): return str(n)",
+            success=True,
+            elapsed_ms=1,
+        )
+
+    pack = _build_pack(repo, loop_id=3, path="fizzbuzz.py")
+
+    assert READ_ONLY_REJECTED_HINT not in pack.failure_patterns_to_avoid
 
 
 def test_static_workspace_reader_inventory_sorts_and_truncates() -> None:

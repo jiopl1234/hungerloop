@@ -28,6 +28,7 @@ from hungerloop.services.integrator import Integrator
 from hungerloop.services.loop_orchestrator import LoopOrchestrator
 from hungerloop.services.memory_manager import MemoryManager
 from hungerloop.services.model_client import DummyModelClient, ModelClient
+from hungerloop.services.refinement_compiler import RefinementCompiler
 from hungerloop.services.rule_based_planner import RuleBasedPlanner
 from hungerloop.services.sandbox_runner import SandboxRunner
 from hungerloop.services.stagnation_detector import StagnationDetector
@@ -44,6 +45,7 @@ def build_orchestrator(
     repo: RepositoryProtocol,
     workspace_root: Path,
     model_client: ModelClient | None = None,
+    budget_allocator: BudgetAllocator | None = None,
     max_loops_safety_cap: int = 200,
 ) -> LoopOrchestrator:
     """Wire all v0.5a services into a :class:`LoopOrchestrator`.
@@ -71,7 +73,7 @@ def build_orchestrator(
         repo=repo,
         hunger_engine=HungerEngine(),
         workspace_manager=workspace_manager,
-        budget_allocator=BudgetAllocator(),
+        budget_allocator=budget_allocator or BudgetAllocator(),
         planner=RuleBasedPlanner(repo),
         context_builder=ContextBuilder(
             repo,
@@ -85,6 +87,7 @@ def build_orchestrator(
         commit_manager=CommitManager(repo, workspace_manager),
         hunger_update=HungerUpdateService(repo),
         stagnation_detector=StagnationDetector(repo),
+        refinement_compiler=RefinementCompiler(repo),
         memory_manager=MemoryManager(repo),
         max_loops_safety_cap=max_loops_safety_cap,
     )

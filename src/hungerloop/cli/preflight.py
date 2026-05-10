@@ -6,6 +6,7 @@ run ended in a state that requires *user* action before continuing:
 * ``DONE`` — the task already finished; require ``--reset`` to wipe and
   start over.
 * ``HUNGER_EXPIRED`` — the user must refill loops (or pass ``--refill``).
+* ``BUDGET_EXHAUSTED`` — the user must refill loops or reset the task.
 * ``BLOCKED`` — the user must unblock at least one item (or pass
   ``--unblock-all``).
 * ``HUMAN_REQUIRED`` — the user must resolve whatever input the run was
@@ -90,6 +91,16 @@ def check_resume_preflight(
                 f"Task {task_id} previously stopped with HUNGER_EXPIRED. "
                 "Pass --refill <loops> (or run "
                 f"'hungerloop hunger refill {task_id} --loops <N>') first."
+            )
+
+    elif last == StopReason.BUDGET_EXHAUSTED:
+        if reset:
+            return
+        if refill_loops is None or refill_loops <= 0:
+            raise PreflightError(
+                f"Task {task_id} previously stopped with BUDGET_EXHAUSTED. "
+                "Pass --refill <loops> to continue refinement, or --reset "
+                "to start a new run."
             )
 
     elif last == StopReason.BLOCKED:

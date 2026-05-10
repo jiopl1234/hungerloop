@@ -55,6 +55,21 @@ def _ok_response(payload: dict[str, Any]) -> httpx.Response:
     return httpx.Response(200, json=body)
 
 
+def _stream_response(events: list[dict[str, Any] | str]) -> httpx.Response:
+    lines: list[str] = []
+    for event in events:
+        if isinstance(event, str):
+            lines.append(f"data: {event}")
+        else:
+            lines.append(f"data: {json.dumps(event)}")
+    body = "\n\n".join(lines) + "\n\n"
+    return httpx.Response(
+        200,
+        headers={"content-type": "text/event-stream"},
+        text=body,
+    )
+
+
 @pytest.mark.asyncio
 async def test_complete_json_happy_path(
     monkeypatch: pytest.MonkeyPatch,
@@ -268,6 +283,84 @@ async def test_invalid_json_response_not_retryable(
         )
     # Invalid JSON is non-retryable; only one HTTP call.
     assert calls["n"] == 1
+
+
+@pytest.mark.asyncio
+async def test_http_400_error_includes_response_body_excerpt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            400,
+            text='{"error":{"message":"max_tokens too large for this deployment"}}',
+        )
+
+    client, _ = _make_client(monkeypatch, handler)
+    with pytest.raises(ModelCallError) as exc_info:
+        await client.complete_json(
+            task_id="t1",
+            loop_id=1,
+            agent_id="execution_worker_v1",
+            messages=[{"role": "user", "content": "hi"}],
+            max_tokens=60000,
+        )
+
+    assert exc_info.value.retryable is False
+    assert "provider_http_error:400" in str(exc_info.value)
+    assert "max_tokens too large" in str(exc_info.value)
+
+
+@pytest.mark.asyncio
+async def test_streaming_large_max_tokens_collects_content_and_usage(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        assert body["stream"] is True
+        assert body["stream_options"] == {"include_usage": True}
+        events: list[dict[str, Any] | str] = [
+            {
+                "choices": [
+                    {
+                        "delta": {
+                            "role": "assistant",
+                            "content": (
+                                '<think>considering {"draft":false}</think>\n'
+                            ),
+                        }
+                    }
+                ],
+                "usage": None,
+            },
+            {
+                "choices": [{"delta": {"content": '{"ok":true}'}}],
+                "usage": None,
+            },
+            {
+                "choices": [],
+                "usage": {"prompt_tokens": 17, "completion_tokens": 36},
+            },
+            "[DONE]",
+        ]
+        return _stream_response(events)
+
+    client, repo = _make_client(monkeypatch, handler)
+    response = await client.complete_json(
+        task_id="t1",
+        loop_id=1,
+        agent_id="execution_worker_v1",
+        messages=[{"role": "user", "content": "hi"}],
+        max_tokens=5000,
+    )
+
+    assert response.json_data == {"ok": True}
+    assert response.usage.input_tokens == 17
+    assert response.usage.output_tokens == 36
+    call_evidence = [
+        e for e in repo._evidence.values() if e.get("type") == "model_call"
+    ]
+    assert len(call_evidence) == 1
+    assert '"ok":true' in str(call_evidence[0]["response_preview"])
 
 
 @pytest.mark.asyncio

@@ -68,6 +68,11 @@ class EventType(str, Enum):
     HUMAN_UNBLOCKED_HUNGER_ITEM = "human_unblocked_hunger_item"
     COST_CEILING_RAISED = "cost_ceiling_raised"
 
+    # ----- Budgeted refinement (v0.5f.4) --------------------------------
+    REFINEMENT_TIER_STARTED = "refinement_tier_started"
+    REFINEMENT_ITEMS_ADDED = "refinement_items_added"
+    REFINEMENT_BUDGET_EXHAUSTED = "refinement_budget_exhausted"
+
     # ----- Stops --------------------------------------------------------
     SAFETY_STOP = "safety_stop"
     HUMAN_REQUIRED = "human_required"

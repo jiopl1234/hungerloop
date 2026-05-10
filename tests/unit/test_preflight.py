@@ -51,6 +51,25 @@ def test_hunger_expired_passes_with_refill() -> None:
     check_resume_preflight(repo, "t1", refill_loops=5)
 
 
+def test_budget_exhausted_requires_refill_or_reset() -> None:
+    repo = InMemoryRepository()
+    _seed(repo, last_stop=StopReason.BUDGET_EXHAUSTED)
+    with pytest.raises(PreflightError, match="BUDGET_EXHAUSTED"):
+        check_resume_preflight(repo, "t1")
+
+
+def test_budget_exhausted_passes_with_refill() -> None:
+    repo = InMemoryRepository()
+    _seed(repo, last_stop=StopReason.BUDGET_EXHAUSTED)
+    check_resume_preflight(repo, "t1", refill_loops=5)
+
+
+def test_budget_exhausted_passes_with_reset() -> None:
+    repo = InMemoryRepository()
+    _seed(repo, last_stop=StopReason.BUDGET_EXHAUSTED)
+    check_resume_preflight(repo, "t1", reset=True)
+
+
 def test_blocked_requires_unblock_all_or_open_items() -> None:
     repo = InMemoryRepository()
     _seed(repo, last_stop=StopReason.BLOCKED)
@@ -223,6 +242,10 @@ def test_error_with_skip_repair_check_passes() -> None:
             {"refill_loops": 3},
         ),
         (
+            StopReason.BUDGET_EXHAUSTED,
+            {"refill_loops": 3},
+        ),
+        (
             StopReason.BLOCKED,
             {"unblock_all": True, "resume_human": True},
         ),
@@ -259,6 +282,7 @@ def test_full_matrix_with_required_flags_passes(
     [
         StopReason.DONE,
         StopReason.HUNGER_EXPIRED,
+        StopReason.BUDGET_EXHAUSTED,
         StopReason.BLOCKED,
         StopReason.HUMAN_REQUIRED,
         StopReason.HUMAN_PAUSED,

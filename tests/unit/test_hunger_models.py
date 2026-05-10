@@ -1,5 +1,6 @@
 from hungerloop.models.enums import (
     AcceptanceCheckType,
+    CompletionMode,
     HungerItemStatus,
     HungerItemType,
     LoopPhase,
@@ -8,6 +9,7 @@ from hungerloop.models.hunger import (
     AcceptanceCheck,
     HungerClockState,
     HungerItem,
+    HungerLedger,
     HungerPolicy,
     HungerSnapshot,
 )
@@ -53,6 +55,10 @@ def test_hunger_item_defaults() -> None:
     assert item.last_progress_loop_id is None
     assert item.evidence_ids == []
     assert item.updated_at_loop == 0
+    assert item.refinement_tier == 0
+    assert item.refinement_kind == "correctness"
+    assert item.generated_by is None
+    assert item.source_check_keys == []
 
 
 def test_hunger_policy_defaults() -> None:
@@ -62,6 +68,24 @@ def test_hunger_policy_defaults() -> None:
     )
     assert policy.max_total_cost_usd == 10.0
     assert policy.max_total_tokens == 1_000_000
+    assert policy.completion_mode is CompletionMode.STOP_ON_DONE
+    assert policy.refinement_profile is None
+    assert policy.max_refinement_tier == 0
+    assert policy.respect_stagnation is True
+
+
+def test_hunger_ledger_tier_helpers() -> None:
+    base = _make_item("H-001", status=HungerItemStatus.VALIDATED_SATISFIED, gap_score=0)
+    refinement = _make_item("H-REF-01-tests")
+    refinement.refinement_tier = 1
+    ledger = HungerLedger(task_id="t1", items=[base, refinement])
+
+    assert ledger.tier_is_done(0) is True
+    assert ledger.tier_is_done(1) is False
+    assert ledger.all_tiers_done(0) is True
+    assert ledger.all_tiers_done(1) is False
+    assert ledger.unfinished_items_by_tier(0) == []
+    assert ledger.unfinished_items_by_tier(1) == [refinement]
 
 
 def test_hunger_clock_defaults() -> None:

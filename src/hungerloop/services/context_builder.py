@@ -8,7 +8,7 @@ import json
 from dataclasses import dataclass
 
 from hungerloop.models.context import ContextPack, TruncationInfo
-from hungerloop.models.enums import EvidenceType
+from hungerloop.models.enums import CompletionMode, EvidenceType
 from hungerloop.models.hunger import AcceptanceCheck
 from hungerloop.models.planning import BudgetAllocation
 from hungerloop.repository.evidence_success import is_successful_evidence_payload
@@ -22,7 +22,7 @@ from hungerloop.services.workspace_reader import WorkspaceReader
 
 K_REJECT_WINDOW = 3
 K_EVIDENCE_WINDOW = 2
-MAX_LINE_CHARS = 200
+MAX_LINE_CHARS = 500
 MAX_BEST_SUMMARY_CHARS = 800
 MAX_LAST_SELF_SUMMARY_CHARS = 200
 MAX_WORKSPACE_FILE_PATH_CHARS = 120
@@ -32,6 +32,10 @@ MAX_WORKSPACE_FILES_LINE_CHARS = 700
 # The cap relies on the non-evictable section caps above; _apply_history_cap
 # asserts if those caps drift past the rendered prior-loop block budget.
 MAX_HISTORY_CHARS = 2000
+READ_ONLY_REJECTED_HINT = (
+    "two recent rejected loops only read files; next attempt must patch/write "
+    "or declare a blocker"
+)
 
 
 def _format_check(check: AcceptanceCheck) -> str:
@@ -121,6 +125,8 @@ class ContextBuilder:
         evidence_ids = history.successful_evidence_ids[: K_EVIDENCE_WINDOW * 5]
         evidence_lines = history.successful_evidence_lines[: K_EVIDENCE_WINDOW * 5]
         failure_lines = history.rejected_lines[: K_REJECT_WINDOW * 4]
+        if self._should_emit_read_only_rejected_hint(task_id, loop_id):
+            failure_lines.insert(0, READ_ONLY_REJECTED_HINT)
         evidence_ids, evidence_lines, failure_lines, truncation_info = (
             _apply_history_cap(
                 loop_id=loop_id,
@@ -195,6 +201,9 @@ class ContextBuilder:
                     )
 
         committed_loop_ids = {trace.loop_id for trace in traces if trace.committed}
+        rejected_loop_ids = {
+            trace.loop_id for trace in traces if not trace.committed
+        }
         min_loop_id = current_loop_id - K_EVIDENCE_WINDOW
         evidence_rows: list[tuple[int, int, str, str]] = []
         for index, row in enumerate(
@@ -203,14 +212,17 @@ class ContextBuilder:
             loop_id = _coerce_loop_id(row.get("loop_id"))
             if loop_id is None:
                 continue
-            if loop_id not in committed_loop_ids:
-                continue
             if not (min_loop_id <= loop_id < current_loop_id):
                 continue
             payload_raw = row.get("payload")
             if not isinstance(payload_raw, dict):
                 continue
             payload = dict(payload_raw)
+            if loop_id not in committed_loop_ids and not (
+                loop_id in rejected_loop_ids
+                and _is_prompt_safe_rejected_evidence(payload)
+            ):
+                continue
             evidence_type = str(payload.get("type", row.get("evidence_type", "")))
             if evidence_type != EvidenceType.TOOL_CALL.value:
                 continue
@@ -240,6 +252,35 @@ class ContextBuilder:
             last_self_summary=last_summary,
         )
 
+    def _should_emit_read_only_rejected_hint(
+        self, task_id: str, current_loop_id: int
+    ) -> bool:
+        policy = self.repo.get_hunger_policy(task_id)
+        if policy.completion_mode != CompletionMode.SPEND_BUDGET:
+            return False
+        traces = [
+            trace
+            for trace in self.repo.list_loop_traces(task_id)
+            if not trace.committed and trace.loop_id < current_loop_id
+        ]
+        traces.sort(key=lambda trace: trace.loop_id, reverse=True)
+        recent = traces[:2]
+        if len(recent) < 2:
+            return False
+        evidence_rows = list(self.repo.list_successful_tool_call_evidence(task_id))
+        for trace in recent:
+            names: list[str] = []
+            for row in evidence_rows:
+                payload = row.get("payload")
+                if (
+                    _coerce_loop_id(row.get("loop_id")) == trace.loop_id
+                    and isinstance(payload, dict)
+                ):
+                    names.append(str(payload.get("tool_name", "")))
+            if not names or any(name != "read_file" for name in names):
+                return False
+        return True
+
 
 def _coerce_loop_id(value: object) -> int | None:
     if isinstance(value, int):
@@ -247,6 +288,14 @@ def _coerce_loop_id(value: object) -> int | None:
     if isinstance(value, str) and value.isdigit():
         return int(value)
     return None
+
+
+def _is_prompt_safe_rejected_evidence(payload: dict[str, object]) -> bool:
+    """Allow read-only discoveries from rejected loops into retry context."""
+    if str(payload.get("tool_name", "")) != "read_file":
+        return False
+    result = str(payload.get("result_summary", ""))
+    return bool(result.strip())
 
 
 def _clip_optional(value: str | None, max_chars: int) -> tuple[str | None, bool]:

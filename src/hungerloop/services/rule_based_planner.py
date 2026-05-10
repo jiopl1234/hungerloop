@@ -57,8 +57,13 @@ class RuleBasedPlanner:
             remain (callers must handle empty plans per PRD §5.5).
         """
         ledger = self.repo.get_hunger_ledger(task_id)
+        active_items = ledger.active_items()
+        lowest_tier = min(
+            (item.refinement_tier for item in active_items),
+            default=0,
+        )
         items = sorted(
-            ledger.active_items(),
+            (item for item in active_items if item.refinement_tier == lowest_tier),
             key=lambda item: item.priority * item.gap_score,
             reverse=True,
         )
@@ -112,7 +117,9 @@ class RuleBasedPlanner:
             f"User goal:\n{raw_goal.strip()}\n\n" if raw_goal.strip() else ""
         )
         return (
-            f"[phase={phase.value}] Make progress on {item.id}: {item.title}.\n"
+            f"[phase={phase.value} tier={item.refinement_tier} "
+            f"kind={item.refinement_kind}] Make progress on {item.id}: "
+            f"{item.title}.\n"
             f"{goal_block}"
             f"Acceptance: {checks_summary}."
         )

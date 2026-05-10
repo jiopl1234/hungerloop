@@ -4,6 +4,7 @@ from enum import Enum
 class StopReason(str, Enum):
     DONE = "done"
     HUNGER_EXPIRED = "hunger_expired"
+    BUDGET_EXHAUSTED = "budget_exhausted"
     BLOCKED = "blocked"
     HUMAN_REQUIRED = "human_required"
     HUMAN_PAUSED = "human_paused"
@@ -44,6 +45,11 @@ class DecayType(str, Enum):
     LINEAR = "linear"
     LOOP_COUNT = "loop_count"
     STAGE_BASED = "stage_based"
+
+
+class CompletionMode(str, Enum):
+    STOP_ON_DONE = "stop_on_done"
+    SPEND_BUDGET = "spend_budget"
 
 
 class LoopPhase(str, Enum):

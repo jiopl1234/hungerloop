@@ -82,6 +82,32 @@ def test_picks_highest_priority_times_gap_score(repo: InMemoryRepository) -> Non
     assert plan.assignments[0].target_hunger_item_ids == ["H-002"]
 
 
+def test_prefers_lowest_active_refinement_tier(repo: InMemoryRepository) -> None:
+    tier1 = HungerItem(
+        id="H-REF-01-tests",
+        title="tests",
+        priority=0.1,
+        gap_score=1.0,
+        refinement_tier=1,
+        refinement_kind="tests",
+    )
+    tier2 = HungerItem(
+        id="H-REF-02-ruff",
+        title="ruff",
+        priority=1.0,
+        gap_score=1.0,
+        refinement_tier=2,
+        refinement_kind="quality",
+    )
+    repo.save_hunger_ledger("t1", HungerLedger(task_id="t1", items=[tier2, tier1]))
+
+    plan = RuleBasedPlanner(repo).plan("t1", 1, _snapshot(), _budget())
+
+    assert plan.selected_hunger_item_ids == ["H-REF-01-tests"]
+    assert "tier=1" in plan.assignments[0].mission
+    assert "kind=tests" in plan.assignments[0].mission
+
+
 def test_assignment_routes_to_execution_worker_v1(repo: InMemoryRepository) -> None:
     item = HungerItem(id="H-001", title="Build report", priority=1.0, gap_score=1.0)
     repo.save_hunger_ledger("t1", HungerLedger(task_id="t1", items=[item]))

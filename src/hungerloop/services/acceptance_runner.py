@@ -17,8 +17,10 @@ from typing import Any
 from hungerloop.models.enums import AcceptanceCheckType
 from hungerloop.repository.protocol import RepositoryProtocol
 from hungerloop.services.path_safety import resolve_workspace_path
-from hungerloop.services.sandbox_runner import SandboxRunner
+from hungerloop.services.sandbox_runner import SandboxRunner, SandboxRunResult
 from hungerloop.services.workspace_manager import WorkspaceManager
+
+SHELL_OUTPUT_SECTION_CHARS = 700
 
 
 class AcceptanceCheckRunner:
@@ -81,6 +83,10 @@ class AcceptanceCheckRunner:
                 f"shell_exit_zero(argv={argv}): "
                 f"exit={result.exit_code}, timeout={result.timed_out}"
             )
+            if not ok:
+                output_summary = _summarize_shell_output(result)
+                if output_summary:
+                    detail = f"{detail}; {output_summary}"
             return ok, detail, result.evidence_id
 
         if ct == AcceptanceCheckType.EVIDENCE_COUNT_MIN:
@@ -112,3 +118,42 @@ class AcceptanceCheckRunner:
             )
 
         raise ValueError(f"Unknown check type: {ct}")
+
+
+def _summarize_shell_output(result: SandboxRunResult) -> str:
+    """Return a compact stdout/stderr excerpt for failed shell checks."""
+    parts: list[str] = []
+    if result.stdout.strip():
+        parts.append(
+            "stdout="
+            + _clip_middle(
+                _one_line(result.stdout),
+                SHELL_OUTPUT_SECTION_CHARS,
+            )
+        )
+    if result.stderr.strip():
+        parts.append(
+            "stderr="
+            + _clip_middle(
+                _one_line(result.stderr),
+                SHELL_OUTPUT_SECTION_CHARS,
+            )
+        )
+    return "; ".join(parts)
+
+
+def _one_line(text: str) -> str:
+    """Keep shell output prompt-safe without hiding traceback structure."""
+    normalized = text.replace("\r\n", "\n").replace("\r", "\n")
+    lines = [line.strip() for line in normalized.splitlines() if line.strip()]
+    return r"\n".join(lines)
+
+
+def _clip_middle(text: str, max_chars: int) -> str:
+    if len(text) <= max_chars:
+        return text
+    if max_chars <= 1:
+        return "…"
+    head_chars = max(1, (max_chars - 1) // 2)
+    tail_chars = max(1, max_chars - 1 - head_chars)
+    return f"{text[:head_chars]}…{text[-tail_chars:]}"

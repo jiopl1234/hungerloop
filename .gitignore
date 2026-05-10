@@ -18,3 +18,4 @@ htmlcov/
 *.swo
 .workspaces/
 .hungerloop.db
+benchmark-runs/
