@@ -218,6 +218,7 @@ def run(
         max_loops=max_loops,
         budget_loops=budget_loops,
         spend_budget=spend_budget,
+        refinement_profile=refinement_profile,
         max_refinement_tier=max_refinement_tier,
         ignore_stagnation=ignore_stagnation,
     )
@@ -428,6 +429,7 @@ def _validate_budgeted_refinement_flags(
     max_loops: int,
     budget_loops: int | None,
     spend_budget: bool,
+    refinement_profile: str | None,
     max_refinement_tier: int,
     ignore_stagnation: bool,
 ) -> None:
@@ -436,6 +438,16 @@ def _validate_budgeted_refinement_flags(
     if spend_budget and max_refinement_tier <= 0:
         raise click.UsageError(
             "--spend-budget requires --max-refinement-tier greater than 0."
+        )
+    if spend_budget and refinement_profile is None:
+        # Without a profile, RefinementCompiler.ensure_next_tier returns
+        # exhausted=True at the unsupported-profile branch and the
+        # orchestrator falls back to STOP_ON_DONE behavior. The user paid
+        # the activation cost (--spend-budget --budget-loops --max-tier)
+        # and would silently get DONE on tier 0 — fail loudly instead.
+        raise click.UsageError(
+            "--spend-budget requires --refinement-profile "
+            "(currently 'python_medium' is the only built-in)."
         )
     if ignore_stagnation and not spend_budget:
         raise click.UsageError("--ignore-stagnation requires --spend-budget.")

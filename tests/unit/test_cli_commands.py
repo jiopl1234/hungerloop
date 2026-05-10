@@ -389,6 +389,34 @@ def test_run_ignore_stagnation_requires_spend_budget(context: CliContext) -> Non
     assert "--ignore-stagnation requires --spend-budget" in result.output
 
 
+def test_run_spend_budget_requires_refinement_profile(context: CliContext) -> None:
+    """Post-PR #1 fixup #2: --spend-budget without --refinement-profile.
+
+    Without a profile, RefinementCompiler.ensure_next_tier returns
+    ``exhausted=True`` and the orchestrator falls back to STOP_ON_DONE
+    behavior. The user paid the activation cost (--spend-budget +
+    --budget-loops + --max-refinement-tier) and would silently see
+    DONE on tier 0. We fail loudly at preflight instead.
+    """
+    runner = CliRunner()
+    result = runner.invoke(
+        cli,
+        [
+            "run",
+            "t1",
+            "--budget-loops",
+            "5",
+            "--spend-budget",
+            "--max-refinement-tier",
+            "1",
+        ],
+        obj=context,
+    )
+
+    assert result.exit_code != 0
+    assert "--spend-budget requires --refinement-profile" in result.output
+
+
 def test_run_raise_cost_ceiling_updates_policy(context: CliContext) -> None:
     context.repo.save_hunger_ledger("t1", HungerLedger(task_id="t1", items=[]))
     context.repo.save_stop_report(
