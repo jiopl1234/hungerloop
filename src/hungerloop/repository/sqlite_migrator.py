@@ -20,13 +20,16 @@ exercise migration behavior without instantiating the full repo.
 """
 from __future__ import annotations
 
+import json
 import re
 import shutil
 import sqlite3
 from contextlib import closing
 from datetime import datetime, timezone
 from pathlib import Path
+from time import perf_counter
 
+from hungerloop.models.events import EventType
 from hungerloop.repository.migration_errors import (
     DownMigrationDisallowed,
     MigrationFailedError,
@@ -37,8 +40,9 @@ from hungerloop.repository.migration_errors import (
 # `migrations/v2__memory_candidate_lifecycle.sql`; v3 adds the runtime
 # tables/constraints needed by SQLiteRepository; v4 adds source links for
 # MemoryCandidate predicates; v5 adds the v0.5e.0 memory lifecycle
-# extensions (predicate columns, reviewer audit, promoted_memories).
-LATEST_VERSION: int = 5
+# extensions (predicate columns, reviewer audit, promoted_memories);
+# v6 adds mission-runtime tables for the v0.6 data layer.
+LATEST_VERSION: int = 6
 
 # Migration files: ``v{N}__{slug}.sql`` where N is a positive int and
 # slug is ``[a-z0-9_]+``. Anything else is rejected at startup.
@@ -170,7 +174,32 @@ class SQLiteMigrator:
         backup_path = self._write_backup(current_version)
         try:
             for version, sql_file in pending:
-                self._apply_one(version, sql_file)
+                started_at = perf_counter()
+                try:
+                    self._apply_one(version, sql_file)
+                except MigrationFailedError as exc:
+                    if version == 6:
+                        self._append_migration_event(
+                            EventType.MIGRATION_FAILED,
+                            {
+                                "from_version": version - 1,
+                                "to_version": version,
+                                "error": str(exc.cause),
+                                "statement": exc.statement,
+                            },
+                        )
+                    raise
+                if version == 6:
+                    self._append_migration_event(
+                        EventType.MIGRATION_APPLIED,
+                        {
+                            "from_version": version - 1,
+                            "to_version": version,
+                            "duration_ms": round(
+                                (perf_counter() - started_at) * 1000, 3
+                            ),
+                        },
+                    )
         finally:
             self._prune_backups()
         # Backup retained on success too — ops will prune it on the next
@@ -267,11 +296,55 @@ class SQLiteMigrator:
         for old in siblings[: -_BACKUPS_TO_KEEP]:
             shutil.move(str(old), str(archive / old.name))
 
+    def _append_migration_event(
+        self,
+        event_type: EventType,
+        payload: dict[str, object],
+    ) -> None:
+        try:
+            with closing(
+                sqlite3.connect(str(self.db_path), isolation_level=None)
+            ) as conn:
+                row = conn.execute(
+                    """
+                    SELECT 1
+                    FROM sqlite_master
+                    WHERE type = 'table' AND name = 'events'
+                    """
+                ).fetchone()
+                if row is None:
+                    return
+                conn.execute(
+                    """
+                    INSERT INTO events(task_id, loop_id, event_type, payload_json, created_at)
+                    VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (
+                        None,
+                        None,
+                        event_type.value,
+                        json.dumps(payload),
+                        _utc_now(),
+                    ),
+                )
+                conn.commit()
+        except sqlite3.Error:
+            return
+
 
 class ReadOnlyDbOutdatedError(RuntimeError):
     """Raised when a read-only command opens a DB with ``user_version <
     LATEST_VERSION``. The CLI catches this and exits with code 4 and a
     "run a write command first" remediation."""
+
+
+def _utc_now() -> str:
+    return (
+        datetime.now(timezone.utc)
+        .replace(microsecond=0)
+        .isoformat()
+        .replace("+00:00", "Z")
+    )
 
 
 def _split_sql_statements(text: str) -> list[str]:

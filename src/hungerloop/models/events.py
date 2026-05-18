@@ -87,6 +87,10 @@ class EventType(str, Enum):
     LOCK_STOLEN = "lock_stolen"  # PRD §5.1.1
     REPAIR_STATE_ACTION = "repair_state_action"  # PRD §16.3
 
+    # ----- Schema / migration -------------------------------------------
+    MIGRATION_APPLIED = "migration_applied"
+    MIGRATION_FAILED = "migration_failed"
+
     # ----- Memory / skill -----------------------------------------------
     MEMORY_CANDIDATE_EMITTED = "memory_candidate_emitted"
     # v0.5e.0 — memory lifecycle (PRD §19 / FR-22). Each row corresponds

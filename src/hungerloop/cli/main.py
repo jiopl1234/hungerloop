@@ -33,6 +33,12 @@ from hungerloop.cli.skill_cmd import skill
 from hungerloop.cli.status_cmd import status
 from hungerloop.cli.trace_cmd import trace
 from hungerloop.cli.workspace_cmd import workspace
+from hungerloop.repository.migration_errors import (
+    DownMigrationDisallowed,
+    MigrationFailedError,
+    SchemaTooNewError,
+)
+from hungerloop.repository.sqlite_migrator import ReadOnlyDbOutdatedError
 from hungerloop.repository.sqlite_repo import SQLiteRepository
 
 try:
@@ -49,7 +55,18 @@ def _default_context() -> CliContext:
     persisted in ``hungerloop.sqlite`` next to the workspace directories.
     """
     workspace_root = Path.cwd()
-    repo = SQLiteRepository.open(workspace_root / "hungerloop.sqlite")
+    try:
+        repo = SQLiteRepository.open(workspace_root / "hungerloop.sqlite")
+    except ReadOnlyDbOutdatedError as exc:
+        click.echo(str(exc), err=True)
+        raise click.exceptions.Exit(4) from exc
+    except (
+        DownMigrationDisallowed,
+        MigrationFailedError,
+        SchemaTooNewError,
+    ) as exc:
+        click.echo(str(exc), err=True)
+        raise click.exceptions.Exit(5) from exc
     return CliContext(repo=repo, workspace_root=workspace_root)
 
 
