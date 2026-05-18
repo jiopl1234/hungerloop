@@ -1,10 +1,13 @@
-"""RequirementCompiler for HungerLoop v0.4.1.
+"""RequirementCompiler for HungerLoop.
 
-The RuleBasedCompiler creates a HungerLedger from user goals and hints,
-implementing invariant I-10 (requirement compilation).
+The legacy :class:`RuleBasedCompiler` creates a HungerLedger from user goals
+and hints, while :class:`RequirementCompiler` extends it with mission-aware
+compilation paths. Together they implement invariant I-10 (requirement
+compilation).
 """
 from __future__ import annotations
 
+from collections import Counter
 from typing import Any, Literal, cast
 
 from hungerloop.models.enums import (
@@ -13,6 +16,7 @@ from hungerloop.models.enums import (
     HungerItemType,
 )
 from hungerloop.models.hunger import AcceptanceCheck, HungerItem, HungerLedger
+from hungerloop.models.mission import Mission, MissionFeature
 
 
 class RuleBasedCompiler:
@@ -111,3 +115,40 @@ class RuleBasedCompiler:
             )
 
         return raw_goal, HungerLedger(task_id=task_id, items=items)
+
+
+class RequirementCompiler(RuleBasedCompiler):
+    """Mission-aware requirement compiler for v0.6 features."""
+
+    def compile_mission_features(self, task_id: str, mission: Mission) -> HungerLedger:
+        """Project mission features into a deterministic hunger ledger."""
+        features_per_phase = Counter(
+            feature.phase_id for feature in mission.features
+        )
+        items = [
+            HungerItem(
+                id=feature.hunger_item_id,
+                title=feature.title,
+                item_type=HungerItemType.GOAL_GAP,
+                priority=1.0 / max(1, features_per_phase.get(feature.phase_id, 0)),
+                gap_score=1.0,
+                acceptance_checks=self.compile_checks_for_feature(feature),
+                acceptance_mode="all",
+                refinement_tier=0,
+            )
+            for feature in mission.features
+        ]
+        return HungerLedger(task_id=task_id, items=items)
+
+    def compile_checks_for_feature(
+        self,
+        feature: MissionFeature,
+    ) -> list[AcceptanceCheck]:
+        """Compile default acceptance checks for a mission feature."""
+        return [
+            AcceptanceCheck(
+                check_type=AcceptanceCheckType.EVIDENCE_COUNT_MIN,
+                params={"evidence_type": "any", "min_count": 1},
+                description=f"At least one evidence item for {feature.feature_id}.",
+            )
+        ]
