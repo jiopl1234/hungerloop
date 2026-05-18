@@ -63,3 +63,7 @@ class DownMigrationDisallowed(MigrationError):
     Forward-only is a hard rule; presence of a down-migration file is a
     "code/repo mismatch" signal, not a feature.
     """
+
+
+class IllegalPhaseTransition(MigrationError):
+    """Raised when mission phase or feature status moves through a forbidden edge."""
