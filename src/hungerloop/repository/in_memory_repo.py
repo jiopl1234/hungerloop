@@ -24,14 +24,17 @@ from hungerloop.models.hunger import (
     HungerSnapshot,
 )
 from hungerloop.models.memory import MemoryCandidate, PromotedMemory
+from hungerloop.models.mission import Mission, MissionFeature, MissionPhase
 from hungerloop.models.planning import LoopPlan
 from hungerloop.models.skill import ActiveSkillCard, SkillCard, SkillCardCandidate
 from hungerloop.models.task import TaskRecord
 from hungerloop.models.tracing import LoopTrace, StopReport
 from hungerloop.models.usage import UsageSnapshot
 from hungerloop.models.validation import ValidationReport
+from hungerloop.models.validation_contract import ValidationAssertion, ValidationContract
 from hungerloop.models.worker import AgentSpec, WorkerResult
 from hungerloop.repository.evidence_success import is_successful_evidence_payload
+from hungerloop.repository.migration_errors import IllegalPhaseTransition
 
 
 class InMemoryRepository:
@@ -80,6 +83,17 @@ class InMemoryRepository:
         self._active_skills: dict[str, ActiveSkillCard] = {}
         self._committed_refs: dict[str, int] = {}
 
+        # Mission runtime
+        self._missions: dict[str, Mission] = {}
+        self._mission_ids_by_task: dict[str, str] = {}
+        self._mission_phases: dict[str, MissionPhase] = {}
+        self._phase_mission_ids: dict[str, str] = {}
+        self._mission_features: dict[str, MissionFeature] = {}
+        self._feature_mission_ids: dict[str, str] = {}
+        self._validation_contract_mission_ids: set[str] = set()
+        self._validation_assertions: dict[str, ValidationAssertion] = {}
+        self._assertion_mission_ids: dict[str, str] = {}
+
         # Misc
         self._approvals: set[str] = set()
         self._no_progress_streaks: dict[str, int] = {}
@@ -114,6 +128,8 @@ class InMemoryRepository:
 
     def task_exists(self, task_id: str) -> bool:
         if task_id in self._tasks:
+            return True
+        if task_id in self._mission_ids_by_task:
             return True
         if task_id in self._policies or task_id in self._ledgers:
             return True
@@ -718,7 +734,215 @@ class InMemoryRepository:
         return out
 
     # =====================================================================
-    # Section 8 — Approvals, misc, transactions
+    # Section 8 — Mission runtime
+    # =====================================================================
+    def save_mission(self, mission: Mission) -> None:
+        previous = self._missions.get(mission.mission_id)
+        if previous is not None and previous.task_id != mission.task_id:
+            self._mission_ids_by_task.pop(previous.task_id, None)
+
+        self._missions[mission.mission_id] = mission.model_copy(deep=True)
+        self._mission_ids_by_task[mission.task_id] = mission.mission_id
+
+        phase_ids = {
+            phase_id
+            for phase_id, parent_mission_id in self._phase_mission_ids.items()
+            if parent_mission_id == mission.mission_id
+        }
+        for phase_id in phase_ids:
+            self._phase_mission_ids.pop(phase_id, None)
+            self._mission_phases.pop(phase_id, None)
+
+        feature_ids = {
+            feature_id
+            for feature_id, parent_mission_id in self._feature_mission_ids.items()
+            if parent_mission_id == mission.mission_id
+        }
+        for feature_id in feature_ids:
+            self._feature_mission_ids.pop(feature_id, None)
+            self._mission_features.pop(feature_id, None)
+
+        for phase in mission.phases:
+            self._phase_mission_ids[phase.phase_id] = mission.mission_id
+            self._mission_phases[phase.phase_id] = phase.model_copy(deep=True)
+        for feature in mission.features:
+            self._feature_mission_ids[feature.feature_id] = mission.mission_id
+            self._mission_features[feature.feature_id] = feature.model_copy(deep=True)
+
+    def get_mission(self, task_id: str) -> Mission | None:
+        mission_id = self._mission_ids_by_task.get(task_id)
+        if mission_id is None:
+            return None
+        mission = self._missions.get(mission_id)
+        if mission is None:
+            return None
+        return mission.model_copy(
+            update={
+                "phases": self.list_mission_phases(mission_id),
+                "features": self.list_mission_features(mission_id=mission_id),
+            },
+            deep=True,
+        )
+
+    def save_mission_phase(self, phase: MissionPhase) -> None:
+        mission_id = self._phase_mission_ids.get(phase.phase_id)
+        if mission_id is None:
+            raise KeyError(f"Unknown mission phase: {phase.phase_id}")
+        self._phase_mission_ids[phase.phase_id] = mission_id
+        self._mission_phases[phase.phase_id] = phase.model_copy(deep=True)
+
+    def update_phase_status(
+        self,
+        phase_id: str,
+        status: str,
+        *,
+        completed_at: datetime | None = None,
+    ) -> None:
+        phase = self._mission_phases[phase_id]
+        if phase.status == "done" and status != "done":
+            raise IllegalPhaseTransition(
+                f"Mission phase {phase_id!r} cannot transition from done to {status!r}"
+            )
+        self._mission_phases[phase_id] = phase.model_copy(
+            update={"status": status, "completed_at": completed_at}
+        )
+
+    def list_mission_phases(self, mission_id: str) -> list[MissionPhase]:
+        return [
+            phase
+            for phase in self._mission_phases.values()
+            if self._phase_mission_ids.get(phase.phase_id) == mission_id
+        ]
+
+    def save_mission_feature(self, feature: MissionFeature) -> None:
+        mission_id = self._feature_mission_ids.get(feature.feature_id)
+        if mission_id is None:
+            mission_id = self._phase_mission_ids.get(feature.phase_id)
+        if mission_id is None:
+            raise KeyError(f"Unknown mission feature phase: {feature.phase_id}")
+        self._feature_mission_ids[feature.feature_id] = mission_id
+        self._mission_features[feature.feature_id] = feature.model_copy(deep=True)
+
+    def update_feature_status(
+        self,
+        feature_id: str,
+        status: str,
+        *,
+        completed_at: datetime | None = None,
+    ) -> None:
+        del completed_at
+        feature = self._mission_features[feature_id]
+        if feature.status == "blocked" and status == "done":
+            raise IllegalPhaseTransition(
+                f"Mission feature {feature_id!r} cannot transition from blocked to done"
+            )
+        self._mission_features[feature_id] = feature.model_copy(
+            update={"status": status}
+        )
+
+    def list_mission_features(
+        self,
+        mission_id: str | None = None,
+        phase_id: str | None = None,
+    ) -> list[MissionFeature]:
+        features = list(self._mission_features.values())
+        if mission_id is not None:
+            features = [
+                feature
+                for feature in features
+                if self._feature_mission_ids.get(feature.feature_id) == mission_id
+            ]
+        if phase_id is not None:
+            features = [feature for feature in features if feature.phase_id == phase_id]
+        return features
+
+    def list_features_for_phase(self, phase_id: str) -> list[MissionFeature]:
+        return self.list_mission_features(phase_id=phase_id)
+
+    def save_validation_contract(self, contract: ValidationContract) -> None:
+        self._validation_contract_mission_ids.add(contract.mission_id)
+
+        assertion_ids = {
+            assertion_id
+            for assertion_id, parent_mission_id in self._assertion_mission_ids.items()
+            if parent_mission_id == contract.mission_id
+        }
+        for assertion_id in assertion_ids:
+            self._assertion_mission_ids.pop(assertion_id, None)
+            self._validation_assertions.pop(assertion_id, None)
+
+        for assertion in contract.assertions:
+            self._assertion_mission_ids[assertion.assertion_id] = contract.mission_id
+            self._validation_assertions[assertion.assertion_id] = assertion.model_copy(
+                deep=True
+            )
+
+    def get_validation_contract(self, mission_id: str) -> ValidationContract | None:
+        if mission_id not in self._validation_contract_mission_ids and all(
+            parent_mission_id != mission_id
+            for parent_mission_id in self._assertion_mission_ids.values()
+        ):
+            return None
+        return ValidationContract(
+            mission_id=mission_id,
+            assertions=self.list_validation_assertions(mission_id=mission_id),
+        )
+
+    def save_validation_assertion(self, assertion: ValidationAssertion) -> None:
+        mission_id = self._phase_mission_ids.get(assertion.phase_id)
+        if mission_id is None:
+            raise KeyError(f"Unknown mission phase for assertion: {assertion.phase_id}")
+        self._validation_contract_mission_ids.add(mission_id)
+        self._assertion_mission_ids[assertion.assertion_id] = mission_id
+        self._validation_assertions[assertion.assertion_id] = assertion.model_copy(
+            deep=True
+        )
+
+    def update_assertion_status(
+        self,
+        assertion_id: str,
+        status: str,
+        *,
+        validated_at_loop: int | None = None,
+        evidence_ids: list[str] | None = None,
+    ) -> None:
+        assertion = self._validation_assertions[assertion_id]
+        self._validation_assertions[assertion_id] = assertion.model_copy(
+            update={
+                "status": status,
+                "validated_at_loop": (
+                    validated_at_loop
+                    if validated_at_loop is not None
+                    else assertion.validated_at_loop
+                ),
+                "evidence_ids": (
+                    list(evidence_ids)
+                    if evidence_ids is not None
+                    else list(assertion.evidence_ids)
+                ),
+            }
+        )
+
+    def list_validation_assertions(
+        self,
+        mission_id: str | None = None,
+        phase_id: str | None = None,
+    ) -> list[ValidationAssertion]:
+        assertions = list(self._validation_assertions.values())
+        if mission_id is not None:
+            assertions = [
+                assertion
+                for assertion in assertions
+                if self._assertion_mission_ids.get(assertion.assertion_id) == mission_id
+            ]
+        if phase_id is not None:
+            assertions = [
+                assertion for assertion in assertions if assertion.phase_id == phase_id
+            ]
+        return assertions
+
+    # =====================================================================
+    # Section 9 — Approvals, misc, transactions
     # =====================================================================
     def is_approval_granted(self, approval_id: str) -> bool:
         return approval_id in self._approvals

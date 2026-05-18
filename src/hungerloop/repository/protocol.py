@@ -11,6 +11,7 @@ writes such as ``CommitManager.apply`` execute inside it.
 from __future__ import annotations
 
 from contextlib import AbstractContextManager
+from datetime import datetime
 from typing import Any, Literal, Protocol
 
 from hungerloop.models.blackboard import Artifact, BestState, CandidateState
@@ -24,12 +25,24 @@ from hungerloop.models.hunger import (
     HungerSnapshot,
 )
 from hungerloop.models.memory import MemoryCandidate, PromotedMemory
+from hungerloop.models.mission import (
+    Mission,
+    MissionFeature,
+    MissionFeatureStatus,
+    MissionPhase,
+    MissionPhaseStatus,
+)
 from hungerloop.models.planning import LoopPlan
 from hungerloop.models.skill import ActiveSkillCard, SkillCard, SkillCardCandidate
 from hungerloop.models.task import TaskRecord
 from hungerloop.models.tracing import LoopTrace, StopReport
 from hungerloop.models.usage import UsageSnapshot
 from hungerloop.models.validation import ValidationReport
+from hungerloop.models.validation_contract import (
+    ValidationAssertion,
+    ValidationAssertionStatus,
+    ValidationContract,
+)
 from hungerloop.models.worker import AgentSpec, WorkerResult
 
 
@@ -407,7 +420,57 @@ class RepositoryProtocol(Protocol):
     """List every active/deprecated skill. State filter is optional."""
 
     # =====================================================================
-    # Section 8 — Approvals, misc, transactions, task lock
+    # Section 8 — Mission runtime
+    # =====================================================================
+    def save_mission(self, mission: Mission) -> None: ...
+    def get_mission(self, task_id: str) -> Mission | None: ...
+
+    def save_mission_phase(self, phase: MissionPhase) -> None: ...
+    def update_phase_status(
+        self,
+        phase_id: str,
+        status: MissionPhaseStatus,
+        *,
+        completed_at: datetime | None = None,
+    ) -> None: ...
+    def list_mission_phases(self, mission_id: str) -> list[MissionPhase]: ...
+
+    def save_mission_feature(self, feature: MissionFeature) -> None: ...
+    def update_feature_status(
+        self,
+        feature_id: str,
+        status: MissionFeatureStatus,
+        *,
+        completed_at: datetime | None = None,
+    ) -> None: ...
+    def list_mission_features(
+        self,
+        mission_id: str | None = None,
+        phase_id: str | None = None,
+    ) -> list[MissionFeature]: ...
+    def list_features_for_phase(self, phase_id: str) -> list[MissionFeature]: ...
+
+    def save_validation_contract(self, contract: ValidationContract) -> None: ...
+    def get_validation_contract(
+        self, mission_id: str
+    ) -> ValidationContract | None: ...
+    def save_validation_assertion(self, assertion: ValidationAssertion) -> None: ...
+    def update_assertion_status(
+        self,
+        assertion_id: str,
+        status: ValidationAssertionStatus,
+        *,
+        validated_at_loop: int | None = None,
+        evidence_ids: list[str] | None = None,
+    ) -> None: ...
+    def list_validation_assertions(
+        self,
+        mission_id: str | None = None,
+        phase_id: str | None = None,
+    ) -> list[ValidationAssertion]: ...
+
+    # =====================================================================
+    # Section 9 — Approvals, misc, transactions, task lock
     # =====================================================================
     def is_approval_granted(self, approval_id: str) -> bool: ...
     def reset_no_progress_streak(self, task_id: str) -> None: ...

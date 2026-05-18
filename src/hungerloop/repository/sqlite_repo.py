@@ -23,15 +23,18 @@ from hungerloop.models.hunger import (
     HungerSnapshot,
 )
 from hungerloop.models.memory import MemoryCandidate, PromotedMemory
+from hungerloop.models.mission import Mission, MissionFeature, MissionPhase
 from hungerloop.models.planning import LoopPlan
 from hungerloop.models.skill import ActiveSkillCard, SkillCard, SkillCardCandidate
 from hungerloop.models.task import TaskRecord
 from hungerloop.models.tracing import LoopTrace, StopReport
 from hungerloop.models.usage import UsageSnapshot
 from hungerloop.models.validation import ValidationReport
+from hungerloop.models.validation_contract import ValidationAssertion, ValidationContract
 from hungerloop.models.worker import AgentSpec, WorkerResult
 from hungerloop.repository import migrations as migrations_pkg
 from hungerloop.repository.evidence_success import is_successful_evidence_payload
+from hungerloop.repository.migration_errors import IllegalPhaseTransition
 from hungerloop.repository.sqlite_migrator import SQLiteMigrator
 
 
@@ -1400,7 +1403,260 @@ class SQLiteRepository:
         ]
 
     # =====================================================================
-    # Section 8 — Approvals, misc, transactions, task lock
+    # Section 8 — Mission runtime
+    # =====================================================================
+    def save_mission(self, mission: Mission) -> None:
+        with self.transaction():
+            self.conn.execute(
+                """
+                INSERT INTO missions(mission_id, task_id, payload_json, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(mission_id) DO UPDATE SET
+                  task_id=excluded.task_id,
+                  payload_json=excluded.payload_json,
+                  created_at=excluded.created_at,
+                  updated_at=excluded.updated_at
+                """,
+                (
+                    mission.mission_id,
+                    mission.task_id,
+                    _model_json(mission),
+                    mission.created_at.isoformat().replace("+00:00", "Z"),
+                    _utc_now(),
+                ),
+            )
+            self.conn.execute(
+                "DELETE FROM mission_features WHERE mission_id = ?",
+                (mission.mission_id,),
+            )
+            self.conn.execute(
+                "DELETE FROM mission_phases WHERE mission_id = ?",
+                (mission.mission_id,),
+            )
+            for phase in mission.phases:
+                self._upsert_mission_phase(phase, mission.mission_id)
+            for feature in mission.features:
+                self._upsert_mission_feature(feature, mission.mission_id)
+
+    def get_mission(self, task_id: str) -> Mission | None:
+        row = self.conn.execute(
+            """
+            SELECT mission_id, payload_json FROM missions
+            WHERE task_id = ?
+            """,
+            (task_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        mission = Mission.model_validate(_loads(str(row["payload_json"])))
+        mission_id = str(row["mission_id"])
+        return mission.model_copy(
+            update={
+                "phases": self.list_mission_phases(mission_id),
+                "features": self.list_mission_features(mission_id=mission_id),
+            },
+            deep=True,
+        )
+
+    def save_mission_phase(self, phase: MissionPhase) -> None:
+        mission_id = self._mission_id_for_phase(phase.phase_id)
+        self._upsert_mission_phase(phase, mission_id)
+
+    def update_phase_status(
+        self,
+        phase_id: str,
+        status: str,
+        *,
+        completed_at: datetime | None = None,
+    ) -> None:
+        row = self.conn.execute(
+            """
+            SELECT payload_json FROM mission_phases
+            WHERE phase_id = ?
+            """,
+            (phase_id,),
+        ).fetchone()
+        if row is None:
+            raise KeyError(f"Unknown mission phase: {phase_id}")
+        phase = MissionPhase.model_validate(_loads(str(row["payload_json"])))
+        if phase.status == "done" and status != "done":
+            raise IllegalPhaseTransition(
+                f"Mission phase {phase_id!r} cannot transition from done to {status!r}"
+            )
+        updated = phase.model_copy(
+            update={"status": status, "completed_at": completed_at}
+        )
+        self.conn.execute(
+            """
+            UPDATE mission_phases
+            SET status = ?, payload_json = ?
+            WHERE phase_id = ?
+            """,
+            (updated.status, _model_json(updated), phase_id),
+        )
+
+    def list_mission_phases(self, mission_id: str) -> list[MissionPhase]:
+        rows = self.conn.execute(
+            """
+            SELECT payload_json FROM mission_phases
+            WHERE mission_id = ?
+            ORDER BY rowid ASC
+            """,
+            (mission_id,),
+        ).fetchall()
+        return [
+            MissionPhase.model_validate(_loads(str(row["payload_json"])))
+            for row in rows
+        ]
+
+    def save_mission_feature(self, feature: MissionFeature) -> None:
+        mission_id = self._phase_mission_id(feature.phase_id)
+        self._upsert_mission_feature(feature, mission_id)
+
+    def update_feature_status(
+        self,
+        feature_id: str,
+        status: str,
+        *,
+        completed_at: datetime | None = None,
+    ) -> None:
+        del completed_at
+        row = self.conn.execute(
+            """
+            SELECT payload_json FROM mission_features
+            WHERE feature_id = ?
+            """,
+            (feature_id,),
+        ).fetchone()
+        if row is None:
+            raise KeyError(f"Unknown mission feature: {feature_id}")
+        feature = MissionFeature.model_validate(_loads(str(row["payload_json"])))
+        if feature.status == "blocked" and status == "done":
+            raise IllegalPhaseTransition(
+                f"Mission feature {feature_id!r} cannot transition from blocked to done"
+            )
+        updated = feature.model_copy(update={"status": status})
+        self.conn.execute(
+            """
+            UPDATE mission_features
+            SET status = ?, payload_json = ?
+            WHERE feature_id = ?
+            """,
+            (updated.status, _model_json(updated), feature_id),
+        )
+
+    def list_mission_features(
+        self,
+        mission_id: str | None = None,
+        phase_id: str | None = None,
+    ) -> list[MissionFeature]:
+        clauses: list[str] = []
+        params: list[object] = []
+        if mission_id is not None:
+            clauses.append("mission_id = ?")
+            params.append(mission_id)
+        if phase_id is not None:
+            clauses.append("phase_id = ?")
+            params.append(phase_id)
+        sql = "SELECT payload_json FROM mission_features"
+        if clauses:
+            sql += " WHERE " + " AND ".join(clauses)
+        sql += " ORDER BY rowid ASC"
+        rows = self.conn.execute(sql, tuple(params)).fetchall()
+        return [
+            MissionFeature.model_validate(_loads(str(row["payload_json"])))
+            for row in rows
+        ]
+
+    def list_features_for_phase(self, phase_id: str) -> list[MissionFeature]:
+        return self.list_mission_features(phase_id=phase_id)
+
+    def save_validation_contract(self, contract: ValidationContract) -> None:
+        with self.transaction():
+            self.conn.execute(
+                "DELETE FROM validation_assertions WHERE mission_id = ?",
+                (contract.mission_id,),
+            )
+            for assertion in contract.assertions:
+                self._upsert_validation_assertion(assertion, contract.mission_id)
+
+    def get_validation_contract(self, mission_id: str) -> ValidationContract | None:
+        assertions = self.list_validation_assertions(mission_id=mission_id)
+        if not assertions:
+            return None
+        return ValidationContract(mission_id=mission_id, assertions=assertions)
+
+    def save_validation_assertion(self, assertion: ValidationAssertion) -> None:
+        mission_id = self._phase_mission_id(assertion.phase_id)
+        self._upsert_validation_assertion(assertion, mission_id)
+
+    def update_assertion_status(
+        self,
+        assertion_id: str,
+        status: str,
+        *,
+        validated_at_loop: int | None = None,
+        evidence_ids: list[str] | None = None,
+    ) -> None:
+        row = self.conn.execute(
+            """
+            SELECT payload_json FROM validation_assertions
+            WHERE assertion_id = ?
+            """,
+            (assertion_id,),
+        ).fetchone()
+        if row is None:
+            raise KeyError(f"Unknown validation assertion: {assertion_id}")
+        assertion = ValidationAssertion.model_validate(_loads(str(row["payload_json"])))
+        updated = assertion.model_copy(
+            update={
+                "status": status,
+                "validated_at_loop": (
+                    validated_at_loop
+                    if validated_at_loop is not None
+                    else assertion.validated_at_loop
+                ),
+                "evidence_ids": (
+                    list(evidence_ids)
+                    if evidence_ids is not None
+                    else list(assertion.evidence_ids)
+                ),
+            }
+        )
+        self.conn.execute(
+            """
+            UPDATE validation_assertions
+            SET status = ?, payload_json = ?
+            WHERE assertion_id = ?
+            """,
+            (updated.status, _model_json(updated), assertion_id),
+        )
+
+    def list_validation_assertions(
+        self,
+        mission_id: str | None = None,
+        phase_id: str | None = None,
+    ) -> list[ValidationAssertion]:
+        clauses: list[str] = []
+        params: list[object] = []
+        if mission_id is not None:
+            clauses.append("mission_id = ?")
+            params.append(mission_id)
+        if phase_id is not None:
+            clauses.append("phase_id = ?")
+            params.append(phase_id)
+        sql = "SELECT payload_json FROM validation_assertions"
+        if clauses:
+            sql += " WHERE " + " AND ".join(clauses)
+        sql += " ORDER BY rowid ASC"
+        rows = self.conn.execute(sql, tuple(params)).fetchall()
+        return [
+            ValidationAssertion.model_validate(_loads(str(row["payload_json"])))
+            for row in rows
+        ]
+
+    # =====================================================================
+    # Section 9 — Approvals, misc, transactions, task lock
     # =====================================================================
     def is_approval_granted(self, approval_id: str) -> bool:
         row = self.conn.execute(
@@ -1610,6 +1866,101 @@ class SQLiteRepository:
                 item.consecutive_failure_count,
                 item.last_progress_loop_id,
                 _model_json(item),
+            ),
+        )
+
+    def _mission_id_for_phase(self, phase_id: str) -> str:
+        row = self.conn.execute(
+            """
+            SELECT mission_id FROM mission_phases
+            WHERE phase_id = ?
+            """,
+            (phase_id,),
+        ).fetchone()
+        if row is not None:
+            return str(row["mission_id"])
+
+        rows = self.conn.execute(
+            "SELECT mission_id, payload_json FROM missions ORDER BY rowid ASC"
+        ).fetchall()
+        for mission_row in rows:
+            mission = Mission.model_validate(_loads(str(mission_row["payload_json"])))
+            if any(phase.phase_id == phase_id for phase in mission.phases):
+                return str(mission_row["mission_id"])
+        raise KeyError(f"Unknown mission phase: {phase_id}")
+
+    def _phase_mission_id(self, phase_id: str) -> str:
+        row = self.conn.execute(
+            """
+            SELECT mission_id FROM mission_phases
+            WHERE phase_id = ?
+            """,
+            (phase_id,),
+        ).fetchone()
+        if row is None:
+            raise KeyError(f"Unknown mission phase: {phase_id}")
+        return str(row["mission_id"])
+
+    def _upsert_mission_phase(self, phase: MissionPhase, mission_id: str) -> None:
+        self.conn.execute(
+            """
+            INSERT INTO mission_phases(phase_id, mission_id, status, payload_json)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(phase_id) DO UPDATE SET
+              mission_id=excluded.mission_id,
+              status=excluded.status,
+              payload_json=excluded.payload_json
+            """,
+            (phase.phase_id, mission_id, phase.status, _model_json(phase)),
+        )
+
+    def _upsert_mission_feature(
+        self, feature: MissionFeature, mission_id: str
+    ) -> None:
+        self.conn.execute(
+            """
+            INSERT INTO mission_features(
+              feature_id, mission_id, phase_id, hunger_item_id, status, payload_json
+            )
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(feature_id) DO UPDATE SET
+              mission_id=excluded.mission_id,
+              phase_id=excluded.phase_id,
+              hunger_item_id=excluded.hunger_item_id,
+              status=excluded.status,
+              payload_json=excluded.payload_json
+            """,
+            (
+                feature.feature_id,
+                mission_id,
+                feature.phase_id,
+                feature.hunger_item_id,
+                feature.status,
+                _model_json(feature),
+            ),
+        )
+
+    def _upsert_validation_assertion(
+        self, assertion: ValidationAssertion, mission_id: str
+    ) -> None:
+        self.conn.execute(
+            """
+            INSERT INTO validation_assertions(
+              assertion_id, mission_id, phase_id, status, payload_json
+            )
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(assertion_id) DO UPDATE SET
+              mission_id=excluded.mission_id,
+              phase_id=excluded.phase_id,
+              status=excluded.status,
+              payload_json=excluded.payload_json
+            """,
+            (
+                assertion.assertion_id,
+                mission_id,
+                assertion.phase_id,
+                assertion.status,
+                _model_json(assertion),
             ),
         )
 
