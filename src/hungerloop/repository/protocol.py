@@ -43,7 +43,7 @@ from hungerloop.models.validation_contract import (
     ValidationAssertionStatus,
     ValidationContract,
 )
-from hungerloop.models.worker import AgentSpec, WorkerResult
+from hungerloop.models.worker import AgentSpec, WorkerHandoff, WorkerResult
 
 
 class RepositoryProtocol(Protocol):
@@ -255,6 +255,27 @@ class RepositoryProtocol(Protocol):
 
     def save_worker_result(self, result: WorkerResult) -> None: ...
     """New in v0.5a (§28 / N2)."""
+
+    def save_worker_handoff(self, handoff: WorkerHandoff) -> str: ...
+    """New in v0.6 M2 (REQ-M2-010): persist a WorkerHandoff row."""
+
+    def list_worker_handoffs(
+        self,
+        task_id: str,
+        *,
+        since_loop_id: int | None = None,
+        limit: int | None = None,
+    ) -> list[WorkerHandoff]: ...
+    """New in v0.6 M2 (REQ-M2-010): list persisted handoffs for a task."""
+
+    def get_last_worker_handoff(
+        self,
+        task_id: str,
+        agent_id: str,
+        *,
+        before_loop_id: int,
+    ) -> WorkerHandoff | None: ...
+    """New in v0.6 M2 (REQ-M2-010): latest prior handoff for one agent."""
 
     def get_last_worker_result(
         self,

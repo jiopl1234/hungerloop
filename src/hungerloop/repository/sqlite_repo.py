@@ -31,7 +31,7 @@ from hungerloop.models.tracing import LoopTrace, StopReport
 from hungerloop.models.usage import UsageSnapshot
 from hungerloop.models.validation import ValidationReport
 from hungerloop.models.validation_contract import ValidationAssertion, ValidationContract
-from hungerloop.models.worker import AgentSpec, WorkerResult
+from hungerloop.models.worker import AgentSpec, WorkerHandoff, WorkerResult
 from hungerloop.repository import migrations as migrations_pkg
 from hungerloop.repository.evidence_success import is_successful_evidence_payload
 from hungerloop.repository.migration_errors import IllegalPhaseTransition
@@ -808,12 +808,91 @@ class SQLiteRepository:
             ),
         )
 
+    def save_worker_handoff(self, handoff: WorkerHandoff) -> str:
+        self._ensure_task(handoff.task_id)
+        handoff_id = f"WH-{uuid.uuid4()}"
+        self.conn.execute(
+            """
+            INSERT INTO worker_handoffs(
+              handoff_id, task_id, loop_id, agent_id, payload_json, created_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                handoff_id,
+                handoff.task_id,
+                handoff.loop_id,
+                handoff.agent_id,
+                _model_json(handoff),
+                _utc_now(),
+            ),
+        )
+        return handoff_id
+
+    def list_worker_handoffs(
+        self,
+        task_id: str,
+        *,
+        since_loop_id: int | None = None,
+        limit: int | None = None,
+    ) -> list[WorkerHandoff]:
+        query = [
+            """
+            SELECT payload_json
+            FROM worker_handoffs
+            WHERE task_id = ?
+            """
+        ]
+        params: list[object] = [task_id]
+        if since_loop_id is not None:
+            query.append("AND loop_id >= ?")
+            params.append(since_loop_id)
+        query.append("ORDER BY loop_id ASC, rowid ASC")
+        if limit is not None:
+            query.append("LIMIT ?")
+            params.append(limit)
+        rows = self.conn.execute("\n".join(query), params).fetchall()
+        return [
+            WorkerHandoff.model_validate_json(str(row["payload_json"])) for row in rows
+        ]
+
+    def get_last_worker_handoff(
+        self,
+        task_id: str,
+        agent_id: str,
+        *,
+        before_loop_id: int,
+    ) -> WorkerHandoff | None:
+        row = self.conn.execute(
+            """
+            SELECT payload_json
+            FROM worker_handoffs
+            WHERE task_id = ?
+              AND agent_id = ?
+              AND loop_id < ?
+            ORDER BY loop_id DESC, rowid DESC
+            LIMIT 1
+            """,
+            (task_id, agent_id, before_loop_id),
+        ).fetchone()
+        if row is None:
+            return None
+        return WorkerHandoff.model_validate_json(str(row["payload_json"]))
+
     def get_last_worker_result(
         self,
         task_id: str,
         agent_id: str,
         before_loop_id: int,
     ) -> WorkerResult | None:
+        handoff = self.get_last_worker_handoff(
+            task_id,
+            agent_id,
+            before_loop_id=before_loop_id,
+        )
+        if handoff is not None:
+            return handoff.as_worker_result()
+
         row = self.conn.execute(
             """
             SELECT payload_json

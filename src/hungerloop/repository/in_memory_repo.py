@@ -32,7 +32,7 @@ from hungerloop.models.tracing import LoopTrace, StopReport
 from hungerloop.models.usage import UsageSnapshot
 from hungerloop.models.validation import ValidationReport
 from hungerloop.models.validation_contract import ValidationAssertion, ValidationContract
-from hungerloop.models.worker import AgentSpec, WorkerResult
+from hungerloop.models.worker import AgentSpec, WorkerHandoff, WorkerResult
 from hungerloop.repository.evidence_success import is_successful_evidence_payload
 from hungerloop.repository.migration_errors import IllegalPhaseTransition
 
@@ -68,6 +68,8 @@ class InMemoryRepository:
         # Worker / planning
         self._agent_specs: dict[str, AgentSpec] = {}
         self._worker_results: dict[str, WorkerResult] = {}
+        self._worker_handoffs: dict[str, WorkerHandoff] = {}
+        self._worker_handoff_order: list[str] = []
         self._loop_plans: dict[tuple[str, int], LoopPlan] = {}
 
         # Trace / stop
@@ -495,12 +497,66 @@ class InMemoryRepository:
         rid = f"WR-{result.task_id}-{result.loop_id}-{result.agent_id}"
         self._worker_results[rid] = result
 
+    def save_worker_handoff(self, handoff: WorkerHandoff) -> str:
+        handoff_id = f"WH-{uuid.uuid4()}"
+        self._worker_handoffs[handoff_id] = handoff
+        self._worker_handoff_order.append(handoff_id)
+        return handoff_id
+
+    def list_worker_handoffs(
+        self,
+        task_id: str,
+        *,
+        since_loop_id: int | None = None,
+        limit: int | None = None,
+    ) -> list[WorkerHandoff]:
+        matches = [
+            (index, self._worker_handoffs[handoff_id])
+            for index, handoff_id in enumerate(self._worker_handoff_order)
+            if self._worker_handoffs[handoff_id].task_id == task_id
+            and (
+                since_loop_id is None
+                or self._worker_handoffs[handoff_id].loop_id >= since_loop_id
+            )
+        ]
+        matches.sort(key=lambda item: (item[1].loop_id, item[0]))
+        handoffs = [handoff for _index, handoff in matches]
+        if limit is not None:
+            return handoffs[:limit]
+        return handoffs
+
+    def get_last_worker_handoff(
+        self,
+        task_id: str,
+        agent_id: str,
+        *,
+        before_loop_id: int,
+    ) -> WorkerHandoff | None:
+        matches = [
+            (index, self._worker_handoffs[handoff_id])
+            for index, handoff_id in enumerate(self._worker_handoff_order)
+            if self._worker_handoffs[handoff_id].task_id == task_id
+            and self._worker_handoffs[handoff_id].agent_id == agent_id
+            and self._worker_handoffs[handoff_id].loop_id < before_loop_id
+        ]
+        if not matches:
+            return None
+        return max(matches, key=lambda item: (item[1].loop_id, item[0]))[1]
+
     def get_last_worker_result(
         self,
         task_id: str,
         agent_id: str,
         before_loop_id: int,
     ) -> WorkerResult | None:
+        handoff = self.get_last_worker_handoff(
+            task_id,
+            agent_id,
+            before_loop_id=before_loop_id,
+        )
+        if handoff is not None:
+            return handoff.as_worker_result()
+
         matches = [
             result
             for result in self._worker_results.values()
