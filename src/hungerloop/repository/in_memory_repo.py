@@ -16,6 +16,7 @@ from typing import Any, Literal
 from hungerloop.models.blackboard import Artifact, BestState, CandidateState
 from hungerloop.models.enums import EvidenceType, HungerItemStatus, LoopPhase, StopReason
 from hungerloop.models.events import EventType
+from hungerloop.models.handoff import HandoffProcessingResult
 from hungerloop.models.hunger import (
     HungerClockState,
     HungerItem,
@@ -70,6 +71,7 @@ class InMemoryRepository:
         self._worker_results: dict[str, WorkerResult] = {}
         self._worker_handoffs: dict[str, WorkerHandoff] = {}
         self._worker_handoff_order: list[str] = []
+        self._handoff_processing_results: dict[str, HandoffProcessingResult] = {}
         self._loop_plans: dict[tuple[str, int], LoopPlan] = {}
 
         # Trace / stop
@@ -548,6 +550,13 @@ class InMemoryRepository:
         self._worker_handoff_order.append(handoff_id)
         return handoff_id
 
+    def save_handoff_processing_result(
+        self,
+        task_id: str,
+        result: HandoffProcessingResult,
+    ) -> None:
+        self._handoff_processing_results[task_id] = result
+
     def list_worker_handoffs(
         self,
         task_id: str,
@@ -612,6 +621,12 @@ class InMemoryRepository:
         if not matches:
             return None
         return max(matches, key=lambda result: result.loop_id)
+
+    def get_latest_handoff_processing_result(
+        self,
+        task_id: str,
+    ) -> HandoffProcessingResult | None:
+        return self._handoff_processing_results.get(task_id)
 
     def save_loop_plan(self, plan: LoopPlan) -> None:
         self._loop_plans[(plan.task_id, plan.loop_id)] = plan

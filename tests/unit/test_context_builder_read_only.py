@@ -15,6 +15,7 @@ def test_context_builder_does_not_call_repo_write_apis(
 ) -> None:
     repo = MagicMock()
     repo.get_best_state.return_value = None
+    repo.get_latest_handoff_processing_result.return_value = None
     repo.get_last_worker_result.return_value = None
     repo.list_loop_traces.return_value = []
     repo.list_successful_tool_call_evidence.return_value = []

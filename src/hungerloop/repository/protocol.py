@@ -17,6 +17,7 @@ from typing import Any, Literal, Protocol
 from hungerloop.models.blackboard import Artifact, BestState, CandidateState
 from hungerloop.models.enums import EvidenceType, HungerItemStatus, LoopPhase, StopReason
 from hungerloop.models.events import EventType
+from hungerloop.models.handoff import HandoffProcessingResult
 from hungerloop.models.hunger import (
     HungerClockState,
     HungerItem,
@@ -275,6 +276,13 @@ class RepositoryProtocol(Protocol):
     def save_worker_handoff(self, handoff: WorkerHandoff) -> str: ...
     """New in v0.6 M2 (REQ-M2-010): persist a WorkerHandoff row."""
 
+    def save_handoff_processing_result(
+        self,
+        task_id: str,
+        result: HandoffProcessingResult,
+    ) -> None: ...
+    """New in v0.6 M2 (REQ-M2-030): cache the latest handoff summary."""
+
     def list_worker_handoffs(
         self,
         task_id: str,
@@ -305,6 +313,12 @@ class RepositoryProtocol(Protocol):
     add an explicit cross-agent read path rather than broadening this method
     silently.
     """
+
+    def get_latest_handoff_processing_result(
+        self,
+        task_id: str,
+    ) -> HandoffProcessingResult | None: ...
+    """New in v0.6 M2 (REQ-M2-030): latest cached handoff-processing result."""
 
     def save_loop_plan(self, plan: LoopPlan) -> None: ...
     """New in v0.5a (§28 / N2)."""

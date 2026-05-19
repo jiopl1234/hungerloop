@@ -15,6 +15,7 @@ from pydantic import BaseModel
 from hungerloop.models.blackboard import Artifact, BestState, CandidateState
 from hungerloop.models.enums import EvidenceType, HungerItemStatus, LoopPhase, StopReason
 from hungerloop.models.events import EventType
+from hungerloop.models.handoff import HandoffProcessingResult
 from hungerloop.models.hunger import (
     HungerClockState,
     HungerItem,
@@ -85,6 +86,7 @@ class SQLiteRepository:
         self._clock_task_ids: dict[int, str] = {}
         self._item_task_ids: dict[str, str] = {}
         self._snapshot_loop_ids: dict[tuple[str, int], int] = {}
+        self._handoff_processing_results: dict[str, HandoffProcessingResult] = {}
         self._tx_depth = 0
 
     @classmethod
@@ -880,6 +882,13 @@ class SQLiteRepository:
         )
         return handoff_id
 
+    def save_handoff_processing_result(
+        self,
+        task_id: str,
+        result: HandoffProcessingResult,
+    ) -> None:
+        self._handoff_processing_results[task_id] = result
+
     def list_worker_handoffs(
         self,
         task_id: str,
@@ -959,6 +968,12 @@ class SQLiteRepository:
         if row is None:
             return None
         return WorkerResult.model_validate_json(str(row["payload_json"]))
+
+    def get_latest_handoff_processing_result(
+        self,
+        task_id: str,
+    ) -> HandoffProcessingResult | None:
+        return self._handoff_processing_results.get(task_id)
 
     def save_loop_plan(self, plan: LoopPlan) -> None:
         self._ensure_task(plan.task_id)

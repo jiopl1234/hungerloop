@@ -157,6 +157,7 @@ class ExecutionWorker:
         return render_prior_loop_context_block(
             loop_id=context.loop_id,
             last_self_summary=context.last_self_summary,
+            prior_handoff_summary=context.prior_handoff_summary,
             best_state_summary=context.best_state_summary,
             best_workspace_files=context.best_workspace_files,
             failure_patterns_to_avoid=context.failure_patterns_to_avoid,

@@ -108,12 +108,14 @@ class HandoffProcessor:
                 if item.item_type == "critical_context":
                     critical_lines.insert(0, f"[CRITICAL] {self._handoff_text(item)}")
 
-        return HandoffProcessingResult(
+        result = HandoffProcessingResult(
             prior_handoff_summary="\n".join([*critical_lines, *summary_lines]).strip(),
             discovered_issues=discovered_issues,
             blocked_item_ids=blocked_item_ids,
             injected_hunger_item_ids=injected_hunger_item_ids,
         )
+        self.repo.save_handoff_processing_result(task_id, result)
+        return result
 
     @staticmethod
     def _source_handoff_id(handoff: WorkerHandoff, item_index: int) -> str:

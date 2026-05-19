@@ -110,13 +110,13 @@ class ContextBuilder:
             MAX_BEST_SUMMARY_CHARS,
         )
         history = self._loop_history(task_id, agent_id, loop_id)
+        handoff_result = self.repo.get_latest_handoff_processing_result(task_id)
         last_summary, _ = _clip_optional(
             history.last_self_summary,
             MAX_LAST_SELF_SUMMARY_CHARS,
         )
-        prior_handoff_summary, last_summary = _clip_recent_summaries(
-            prior_handoff_summary="",
-            last_summary=last_summary,
+        prior_handoff_summary = (
+            handoff_result.prior_handoff_summary if handoff_result else ""
         )
         best_files = _shape_workspace_files(
             self.workspace_reader.list_workspace_files(task_id, ref="best"),
@@ -131,9 +131,17 @@ class ContextBuilder:
         failure_lines = history.rejected_lines[: K_REJECT_WINDOW * 4]
         if self._should_emit_read_only_rejected_hint(task_id, loop_id):
             failure_lines.insert(0, READ_ONLY_REJECTED_HINT)
-        evidence_ids, evidence_lines, failure_lines, truncation_info = (
+        (
+            prior_handoff_summary,
+            last_summary,
+            evidence_ids,
+            evidence_lines,
+            failure_lines,
+            truncation_info,
+        ) = (
             _apply_history_cap(
                 loop_id=loop_id,
+                prior_handoff_summary=prior_handoff_summary,
                 last_summary=last_summary,
                 best_summary=best_summary,
                 best_files=best_files,
@@ -359,6 +367,7 @@ def _shape_workspace_files(
 def _assemble_history(
     *,
     loop_id: int,
+    prior_handoff_summary: str,
     last_summary: str | None,
     best_summary: str | None,
     best_files: list[str],
@@ -368,6 +377,7 @@ def _assemble_history(
     return render_prior_loop_context_block(
         loop_id=loop_id,
         last_self_summary=last_summary,
+        prior_handoff_summary=prior_handoff_summary,
         best_state_summary=best_summary,
         best_workspace_files=best_files,
         failure_patterns_to_avoid=failure_lines,
@@ -378,6 +388,7 @@ def _assemble_history(
 def _apply_history_cap(
     *,
     loop_id: int,
+    prior_handoff_summary: str,
     last_summary: str | None,
     best_summary: str | None,
     best_files: list[str],
@@ -385,9 +396,14 @@ def _apply_history_cap(
     evidence_lines: list[str],
     failure_lines: list[str],
     best_summary_truncated: bool,
-) -> tuple[list[str], list[str], list[str], TruncationInfo | None]:
+) -> tuple[str, str | None, list[str], list[str], list[str], TruncationInfo | None]:
+    prior_handoff_summary, last_summary = _clip_recent_summaries(
+        prior_handoff_summary=prior_handoff_summary,
+        last_summary=last_summary,
+    )
     assembled = _assemble_history(
         loop_id=loop_id,
+        prior_handoff_summary=prior_handoff_summary,
         last_summary=last_summary,
         best_summary=best_summary,
         best_files=best_files,
@@ -395,7 +411,14 @@ def _apply_history_cap(
         evidence_lines=evidence_lines,
     )
     if len(assembled) <= MAX_HISTORY_CHARS:
-        return evidence_ids, evidence_lines, failure_lines, None
+        return (
+            prior_handoff_summary,
+            last_summary,
+            evidence_ids,
+            evidence_lines,
+            failure_lines,
+            None,
+        )
 
     chars_before = len(assembled)
     dropped_evidence = 0
@@ -406,6 +429,7 @@ def _apply_history_cap(
         dropped_evidence += 1
         assembled = _assemble_history(
             loop_id=loop_id,
+            prior_handoff_summary=prior_handoff_summary,
             last_summary=last_summary,
             best_summary=best_summary,
             best_files=best_files,
@@ -417,6 +441,7 @@ def _apply_history_cap(
         dropped_failures += 1
         assembled = _assemble_history(
             loop_id=loop_id,
+            prior_handoff_summary=prior_handoff_summary,
             last_summary=last_summary,
             best_summary=best_summary,
             best_files=best_files,
@@ -433,6 +458,8 @@ def _apply_history_cap(
     chars_after = len(assembled)
 
     return (
+        prior_handoff_summary,
+        last_summary,
         evidence_ids,
         evidence_lines,
         failure_lines,

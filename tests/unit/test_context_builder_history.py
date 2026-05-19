@@ -548,6 +548,7 @@ def test_history_truncation_info_and_determinism() -> None:
     rendered_history = render_prior_loop_context_block(
         loop_id=pack1.loop_id,
         last_self_summary=pack1.last_self_summary,
+        prior_handoff_summary=pack1.prior_handoff_summary,
         best_state_summary=pack1.best_state_summary,
         best_workspace_files=pack1.best_workspace_files,
         failure_patterns_to_avoid=pack1.failure_patterns_to_avoid,
@@ -604,8 +605,16 @@ def test_apply_history_cap_does_not_assert_when_static_block_exceeds_cap() -> No
     huge_best_summary = "B" * (MAX_HISTORY_CHARS // 2)
     huge_best_files = ["F" * 100 for _ in range(8)]
 
-    evidence_ids, evidence_lines, failure_lines, info = _apply_history_cap(
+    (
+        _prior_handoff_summary,
+        _last_summary,
+        evidence_ids,
+        evidence_lines,
+        failure_lines,
+        info,
+    ) = _apply_history_cap(
         loop_id=42,
+        prior_handoff_summary="",
         last_summary=huge_last_summary,
         best_summary=huge_best_summary,
         best_files=huge_best_files,
