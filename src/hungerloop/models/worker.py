@@ -12,9 +12,21 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 AgentKind = Literal["execution", "learning", "research", "planner"]
+HandoffItemType = Literal[
+    "blocker",
+    "follow_up",
+    "discovered_issue",
+    "incomplete_work",
+    "critical_context",
+]
+
+
+def _clip_text(value: str, max_length: int) -> str:
+    """Clip text fields to the maximum schema length."""
+    return value[:max_length]
 
 
 class AgentSpec(BaseModel):
@@ -45,3 +57,44 @@ class WorkerResult(BaseModel):
     error_type: str | None = None
     requires_human: bool = False
     retryable: bool = False
+
+
+class HandoffItem(BaseModel):
+    """Structured worker handoff item (REQ-M2-002)."""
+
+    item_type: HandoffItemType
+    summary: str = ""
+    detail: str = ""
+    related_feature_ids: list[str] = Field(default_factory=list)
+    related_check_keys: list[str] = Field(default_factory=list)
+    related_item_ids: list[str] = Field(default_factory=list)
+    requires_orchestrator_action: bool = False
+
+    @field_validator("summary")
+    @classmethod
+    def _clip_summary(cls, value: str) -> str:
+        return _clip_text(value, 200)
+
+    @field_validator("detail")
+    @classmethod
+    def _clip_detail(cls, value: str) -> str:
+        return _clip_text(value, 2000)
+
+
+class WorkerHandoff(WorkerResult):
+    """Field-additive worker handoff model (REQ-M2-003)."""
+
+    handoff_items: list[HandoffItem] = Field(default_factory=list)
+    what_was_done: list[str] = Field(default_factory=list)
+    what_was_left_undone: list[str] = Field(default_factory=list)
+    verification_commands: list[str] = Field(default_factory=list)
+    next_worker_hint: str | None = None
+
+    def as_worker_result(self) -> WorkerResult:
+        """Return the v0.5f-compatible WorkerResult view (REQ-M2-004)."""
+        return WorkerResult(
+            **{
+                field_name: getattr(self, field_name)
+                for field_name in WorkerResult.model_fields
+            }
+        )
