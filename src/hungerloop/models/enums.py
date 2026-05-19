@@ -72,3 +72,4 @@ class EvidenceType(str, Enum):
     VALIDATION_CHECK = "validation_check"
     TOOL_CALL = "tool_call"
     HUMAN_INPUT = "human_input"
+    DISCOVERED_FACT_COMPILED = "discovered_fact_compiled"

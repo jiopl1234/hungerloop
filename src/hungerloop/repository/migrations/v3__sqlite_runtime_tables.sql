@@ -65,7 +65,8 @@ CREATE TABLE evidence_checked (
       'model_error',
       'validation_check',
       'tool_call',
-      'human_input'
+      'human_input',
+      'discovered_fact_compiled'
     )
   ),
   payload_json TEXT NOT NULL

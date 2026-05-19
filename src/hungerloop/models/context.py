@@ -47,6 +47,7 @@ class ContextPack(BaseModel):
     relevant_evidence_ids: list[str] = Field(default_factory=list)
     failure_patterns_to_avoid: list[str] = Field(default_factory=list)
     last_self_summary: str | None = None
+    prior_handoff_summary: str = ""
     relevant_evidence_summaries: list[str] = Field(default_factory=list)
     best_workspace_files: list[str] = Field(default_factory=list)
     truncation_info: TruncationInfo | None = None

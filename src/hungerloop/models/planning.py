@@ -59,6 +59,7 @@ class BudgetAllocation(BaseModel):
 
     # Concurrency
     max_workers_per_loop: int = Field(default=1, ge=1)
+    max_new_items_per_loop: int = Field(default=3, ge=0)
 
     # Retry policy (read by ModelClient.complete_json)
     max_model_retries: int = Field(default=2, ge=0)

@@ -78,7 +78,7 @@ def hunger_unblock(ctx: CliContext, task_id: str, item_id: str) -> None:
     item.status = HungerItemStatus.OPEN
     item.consecutive_failure_count = 0
     item.last_progress_loop_id = None
-    ctx.repo.save_hunger_item(item)
+    ctx.repo.save_hunger_ledger(task_id, ledger)
     ctx.repo.append_event(
         EventType.HUMAN_UNBLOCKED_HUNGER_ITEM,
         {"item_id": item_id, "via": "hunger unblock"},
@@ -104,13 +104,14 @@ def hunger_unblock_all(ctx: CliContext, task_id: str) -> None:
             item.status = HungerItemStatus.OPEN
             item.consecutive_failure_count = 0
             item.last_progress_loop_id = None
-            ctx.repo.save_hunger_item(item)
             ctx.repo.append_event(
                 EventType.HUMAN_UNBLOCKED_HUNGER_ITEM,
                 {"item_id": item.id, "via": "hunger unblock-all"},
                 task_id=task_id,
             )
             flipped.append(item.id)
+    if flipped:
+        ctx.repo.save_hunger_ledger(task_id, ledger)
     ctx.repo.reset_no_progress_streak(task_id)
     if not flipped:
         click.echo(

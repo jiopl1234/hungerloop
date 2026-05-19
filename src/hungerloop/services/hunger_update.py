@@ -61,8 +61,11 @@ class HungerUpdateService:
             item_id, _ = key.split(":", 1)
             progress_by_item[item_id] = progress_by_item.get(item_id, 0) + 1
 
+        ledger = self.repo.get_hunger_ledger(task_id)
+        items_by_id = {item.id: item for item in ledger.items}
+        mutated = False
         for item_id, new_count in progress_by_item.items():
-            item = self.repo.get_hunger_item(item_id)
+            item = items_by_id.get(item_id)
             if not item:
                 continue
 
@@ -84,4 +87,7 @@ class HungerUpdateService:
             else:
                 item.status = HungerItemStatus.WORKING
 
-            self.repo.save_hunger_item(item)
+            mutated = True
+
+        if mutated:
+            self.repo.save_hunger_ledger(task_id, ledger)

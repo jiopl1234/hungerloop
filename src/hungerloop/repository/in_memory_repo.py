@@ -14,7 +14,7 @@ from datetime import datetime, timezone
 from typing import Any, Literal
 
 from hungerloop.models.blackboard import Artifact, BestState, CandidateState
-from hungerloop.models.enums import EvidenceType, LoopPhase, StopReason
+from hungerloop.models.enums import EvidenceType, HungerItemStatus, LoopPhase, StopReason
 from hungerloop.models.events import EventType
 from hungerloop.models.hunger import (
     HungerClockState,
@@ -193,6 +193,29 @@ class InMemoryRepository:
 
     def save_hunger_item(self, item: HungerItem) -> None:
         self._items[item.id] = item
+
+    def update_hunger_item_status(
+        self,
+        task_id: str,
+        item_id: str,
+        status: HungerItemStatus | str,
+    ) -> None:
+        current = self._items.get(item_id)
+        if current is None:
+            raise KeyError(f"Unknown hunger item: {item_id}")
+        normalized = (
+            status if isinstance(status, HungerItemStatus) else HungerItemStatus(status)
+        )
+        updated = current.model_copy(update={"status": normalized})
+        self._items[item_id] = updated
+        ledger = self.get_hunger_ledger(task_id)
+        self._ledgers[task_id] = HungerLedger(
+            task_id=task_id,
+            items=[
+                updated if existing.id == item_id else existing
+                for existing in ledger.items
+            ],
+        )
 
     def get_items_for_check_keys(
         self, task_id: str, check_keys: list[str]
@@ -411,6 +434,28 @@ class InMemoryRepository:
         }
         usage = self._usage.setdefault(task_id, UsageSnapshot(task_id=task_id))
         usage.tool_calls += 1
+        return eid
+
+    def save_evidence(
+        self,
+        *,
+        task_id: str,
+        loop_id: int | None,
+        evidence_type: EvidenceType | str,
+        payload: dict[str, object],
+    ) -> str:
+        actual_type = (
+            evidence_type.value
+            if isinstance(evidence_type, EvidenceType)
+            else evidence_type
+        )
+        eid = f"ev-{uuid.uuid4().hex[:8]}"
+        self._evidence[eid] = {
+            **payload,
+            "task_id": task_id,
+            "loop_id": loop_id,
+            "type": actual_type,
+        }
         return eid
 
     def count_evidence_by_type(
@@ -651,7 +696,7 @@ class InMemoryRepository:
 
     def append_event(
         self,
-        event_type: EventType,
+        event_type: EventType | str,
         payload: dict[str, object],
         *,
         task_id: str | None = None,
@@ -662,9 +707,12 @@ class InMemoryRepository:
         # eventual TEXT column stays plain. ``created_at`` mirrors the v1
         # ``events.created_at`` column shape (ISO8601 UTC with the 'Z'
         # suffix) so ``hungerloop trace export`` can stream rows directly.
+        actual_event_type = (
+            event_type.value if isinstance(event_type, EventType) else event_type
+        )
         self._events.append(
             {
-                "event_type": event_type.value,
+                "event_type": actual_event_type,
                 "payload": payload,
                 "task_id": task_id,
                 "loop_id": loop_id,

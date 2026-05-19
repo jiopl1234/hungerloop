@@ -386,17 +386,20 @@ def _apply_user_overrides(
         ledger = ctx.repo.get_hunger_ledger(task_id)
         from hungerloop.models.enums import HungerItemStatus
 
+        changed = False
         for item in ledger.items:
             if item.status == HungerItemStatus.BLOCKED:
                 item.status = HungerItemStatus.OPEN
                 item.consecutive_failure_count = 0
                 item.last_progress_loop_id = None
-                ctx.repo.save_hunger_item(item)
+                changed = True
                 ctx.repo.append_event(
                     EventType.HUMAN_UNBLOCKED_HUNGER_ITEM,
                     {"item_id": item.id, "via": "--unblock-all"},
                     task_id=task_id,
                 )
+        if changed:
+            ctx.repo.save_hunger_ledger(task_id, ledger)
         ctx.repo.reset_no_progress_streak(task_id)
 
     if resume_human:

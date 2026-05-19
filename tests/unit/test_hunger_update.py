@@ -7,7 +7,7 @@ from hungerloop.models.enums import (
     HungerItemType,
     ValidationVerdict,
 )
-from hungerloop.models.hunger import AcceptanceCheck, HungerItem
+from hungerloop.models.hunger import AcceptanceCheck, HungerItem, HungerLedger
 from hungerloop.models.validation import ValidationReport
 from hungerloop.services.hunger_update import HungerUpdateService
 
@@ -49,10 +49,15 @@ def _report(
     )
 
 
+def _mock_repo_with_item(item: HungerItem) -> MagicMock:
+    repo = MagicMock()
+    repo.get_hunger_ledger.return_value = HungerLedger(task_id="t1", items=[item])
+    return repo
+
+
 def test_partial_progress_decrements_gap() -> None:
     h1 = _item("H-001", num_checks=2)
-    repo = MagicMock()
-    repo.get_hunger_item.return_value = h1
+    repo = _mock_repo_with_item(h1)
 
     svc = HungerUpdateService(repo)
     report = _report(ValidationVerdict.PARTIAL, newly_passed=["H-001:0"])
@@ -63,8 +68,7 @@ def test_partial_progress_decrements_gap() -> None:
 
 def test_full_progress_sets_validated_satisfied() -> None:
     h1 = _item("H-001", num_checks=2, gap=0.5)
-    repo = MagicMock()
-    repo.get_hunger_item.return_value = h1
+    repo = _mock_repo_with_item(h1)
 
     svc = HungerUpdateService(repo)
     report = _report(
@@ -81,8 +85,7 @@ def test_full_progress_sets_validated_satisfied() -> None:
 def test_epsilon_snap_to_zero_after_repeated_decrements() -> None:
     """PRD §14: residual ~1e-17 after fractional decrements must snap to 0.0."""
     h1 = _item("H-001", num_checks=3, gap=1.0)
-    repo = MagicMock()
-    repo.get_hunger_item.return_value = h1
+    repo = _mock_repo_with_item(h1)
 
     svc = HungerUpdateService(repo)
     # Three rounds of single-check progress; 1.0 - 3 * (1/3) leaves a float dust.
@@ -101,8 +104,7 @@ def test_epsilon_snap_to_zero_after_repeated_decrements() -> None:
 def test_satisfied_force_zeroes_gap_even_if_decrement_falls_short() -> None:
     """PRD §14.3: items in satisfied_hunger_item_ids are force-zeroed."""
     h1 = _item("H-001", num_checks=4, gap=0.75)
-    repo = MagicMock()
-    repo.get_hunger_item.return_value = h1
+    repo = _mock_repo_with_item(h1)
 
     svc = HungerUpdateService(repo)
     # Only one new check, but validator says the whole item is satisfied.
@@ -119,15 +121,14 @@ def test_satisfied_force_zeroes_gap_even_if_decrement_falls_short() -> None:
 
 def test_fail_verdict_no_update() -> None:
     h1 = _item("H-001")
-    repo = MagicMock()
-    repo.get_hunger_item.return_value = h1
+    repo = _mock_repo_with_item(h1)
 
     svc = HungerUpdateService(repo)
     report = _report(ValidationVerdict.FAIL, newly_passed=[])
     svc.apply_validation("t1", report)
 
     assert h1.gap_score == 1.0
-    repo.save_hunger_item.assert_not_called()
+    repo.save_hunger_ledger.assert_not_called()
 
 
 def test_malformed_check_key_is_skipped_not_crashing(caplog) -> None:  # type: ignore[no-untyped-def]
@@ -135,8 +136,7 @@ def test_malformed_check_key_is_skipped_not_crashing(caplog) -> None:  # type: i
     `item_id, _ = key.split(":", 1)`. The service must skip the bad key,
     log a warning, and still apply progress for well-formed siblings."""
     h1 = _item("H-001", num_checks=2)
-    repo = MagicMock()
-    repo.get_hunger_item.return_value = h1
+    repo = _mock_repo_with_item(h1)
 
     svc = HungerUpdateService(repo)
     report = _report(
@@ -158,8 +158,7 @@ def test_subepsilon_gap_snaps_to_zero_and_satisfies() -> None:
     a multi-loop fractional decrement leaves the item stuck in WORKING.
     """
     h1 = _item("H-001", num_checks=4, gap=5e-10)
-    repo = MagicMock()
-    repo.get_hunger_item.return_value = h1
+    repo = _mock_repo_with_item(h1)
 
     svc = HungerUpdateService(repo)
     # One newly-passed check; the proportional decrement (1/4 = 0.25)

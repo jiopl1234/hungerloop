@@ -14,6 +14,10 @@ def test_evidence_type_values_match_repository_taxonomy() -> None:
     assert EvidenceType.VALIDATION_CHECK.value == "validation_check"
     assert EvidenceType.TOOL_CALL.value == "tool_call"
     assert EvidenceType.HUMAN_INPUT.value == "human_input"
+    assert (
+        EvidenceType.DISCOVERED_FACT_COMPILED.value
+        == "discovered_fact_compiled"
+    )
 
 
 def test_evidence_type_is_str_enum() -> None:
@@ -31,6 +35,7 @@ def test_evidence_type_membership_is_complete() -> None:
         "validation_check",
         "tool_call",
         "human_input",
+        "discovered_fact_compiled",
     }
     assert {e.value for e in EvidenceType} == expected
 

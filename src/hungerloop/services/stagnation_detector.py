@@ -70,9 +70,12 @@ class StagnationDetector:
             newly_progressed.add(item_id)
 
         blocked_items: list[str] = []
+        ledger = self.repo.get_hunger_ledger(task_id)
+        items_by_id = {item.id: item for item in ledger.items}
+        mutated = False
 
         for iid in attempted:
-            item = self.repo.get_hunger_item(iid)
+            item = items_by_id.get(iid)
             if item is None:
                 continue
 
@@ -89,7 +92,10 @@ class StagnationDetector:
                 item.status = HungerItemStatus.BLOCKED
                 blocked_items.append(iid)
 
-            self.repo.save_hunger_item(item)
+            mutated = True
+
+        if mutated:
+            self.repo.save_hunger_ledger(task_id, ledger)
 
         if validation_report.has_real_progress:
             self.repo.reset_no_progress_streak(task_id)

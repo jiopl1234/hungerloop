@@ -114,6 +114,10 @@ class ContextBuilder:
             history.last_self_summary,
             MAX_LAST_SELF_SUMMARY_CHARS,
         )
+        prior_handoff_summary, last_summary = _clip_recent_summaries(
+            prior_handoff_summary="",
+            last_summary=last_summary,
+        )
         best_files = _shape_workspace_files(
             self.workspace_reader.list_workspace_files(task_id, ref="best"),
             path_cap=MAX_WORKSPACE_FILE_PATH_CHARS,
@@ -159,6 +163,7 @@ class ContextBuilder:
             relevant_evidence_ids=evidence_ids,
             failure_patterns_to_avoid=failure_lines,
             last_self_summary=last_summary,
+            prior_handoff_summary=prior_handoff_summary,
             relevant_evidence_summaries=evidence_lines,
             best_workspace_files=best_files,
             truncation_info=truncation_info,
@@ -310,6 +315,18 @@ def _clip_required(value: str, max_chars: int) -> str:
     if len(value) <= max_chars:
         return value
     return f"{value[: max_chars - 1]}…"
+
+
+def _clip_recent_summaries(
+    *,
+    prior_handoff_summary: str,
+    last_summary: str | None,
+) -> tuple[str, str | None]:
+    clipped_prior = prior_handoff_summary[:MAX_HISTORY_CHARS]
+    if last_summary is None:
+        return clipped_prior, None
+    remaining = max(0, MAX_HISTORY_CHARS - len(clipped_prior))
+    return clipped_prior, last_summary[:remaining]
 
 
 def _shape_workspace_files(

@@ -15,7 +15,7 @@ from datetime import datetime
 from typing import Any, Literal, Protocol
 
 from hungerloop.models.blackboard import Artifact, BestState, CandidateState
-from hungerloop.models.enums import EvidenceType, LoopPhase, StopReason
+from hungerloop.models.enums import EvidenceType, HungerItemStatus, LoopPhase, StopReason
 from hungerloop.models.events import EventType
 from hungerloop.models.hunger import (
     HungerClockState,
@@ -77,6 +77,12 @@ class RepositoryProtocol(Protocol):
     def get_hunger_item(self, item_id: str) -> HungerItem | None: ...
     def get_hunger_items(self, item_ids: list[str]) -> list[HungerItem]: ...
     def save_hunger_item(self, item: HungerItem) -> None: ...
+    def update_hunger_item_status(
+        self,
+        task_id: str,
+        item_id: str,
+        status: HungerItemStatus | str,
+    ) -> None: ...
     def get_items_for_check_keys(
         self, task_id: str, check_keys: list[str]
     ) -> list[HungerItem]: ...
@@ -212,6 +218,16 @@ class RepositoryProtocol(Protocol):
     ) -> str: ...
     """New in v0.5a (§28.5 / M18): ToolHarness writes one row per tool call."""
 
+    def save_evidence(
+        self,
+        *,
+        task_id: str,
+        loop_id: int | None,
+        evidence_type: EvidenceType | str,
+        payload: dict[str, object],
+    ) -> str: ...
+    """Generic additive evidence write path for non-tool/model/shell flows."""
+
     def count_evidence_by_type(
         self,
         task_id: str,
@@ -342,7 +358,7 @@ class RepositoryProtocol(Protocol):
 
     def append_event(
         self,
-        event_type: EventType,
+        event_type: EventType | str,
         payload: dict[str, object],
         *,
         task_id: str | None = None,
@@ -351,10 +367,10 @@ class RepositoryProtocol(Protocol):
     """v0.5a (§28.14 / M15): ``task_id`` and ``loop_id`` are kwargs; pass
     ``None`` for global events.
 
-    v0.5b (PRD §22.8): ``event_type`` is an :class:`EventType` enum
-    member. Implementations store ``event_type.value`` so the SQL column
-    stays plain TEXT. Adding new enum members is additive; renaming or
-    removing requires a coordinated schema migration."""
+    v0.5b (PRD §22.8): callers usually pass an :class:`EventType` enum
+    member, but raw strings remain allowed for forward-compatible mission
+    events. Implementations store the resolved string so the SQL column
+    stays plain TEXT."""
 
     def list_events(
         self,

@@ -96,8 +96,6 @@ def new(
 
     ctx.repo.set_hunger_policy(final_task_id, ctx.repo.get_hunger_policy(final_task_id))
     ctx.repo.save_hunger_ledger(final_task_id, ledger)
-    for item in ledger.items:
-        ctx.repo.save_hunger_item(item)
 
     click.echo(f"Created task: {final_task_id}")
     click.echo(f"  goal: {goal}")

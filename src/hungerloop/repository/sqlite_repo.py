@@ -13,7 +13,7 @@ from typing import Any, Literal
 from pydantic import BaseModel
 
 from hungerloop.models.blackboard import Artifact, BestState, CandidateState
-from hungerloop.models.enums import EvidenceType, LoopPhase, StopReason
+from hungerloop.models.enums import EvidenceType, HungerItemStatus, LoopPhase, StopReason
 from hungerloop.models.events import EventType
 from hungerloop.models.hunger import (
     HungerClockState,
@@ -278,6 +278,41 @@ class SQLiteRepository:
             WHERE task_id = ?
             """,
             (_model_json(HungerLedger(task_id=task_id, items=updated)), task_id),
+        )
+
+    def update_hunger_item_status(
+        self,
+        task_id: str,
+        item_id: str,
+        status: HungerItemStatus | str,
+    ) -> None:
+        item = self.get_hunger_item(item_id)
+        if item is None:
+            raise KeyError(f"Unknown hunger item: {item_id}")
+        normalized = (
+            status if isinstance(status, HungerItemStatus) else HungerItemStatus(status)
+        )
+        updated_item = item.model_copy(update={"status": normalized})
+        self._save_hunger_item_for_task(task_id, updated_item)
+        ledger = self.get_hunger_ledger(task_id)
+        self.conn.execute(
+            """
+            UPDATE hunger_ledgers
+            SET payload_json = ?
+            WHERE task_id = ?
+            """,
+            (
+                _model_json(
+                    HungerLedger(
+                        task_id=task_id,
+                        items=[
+                            updated_item if existing.id == item_id else existing
+                            for existing in ledger.items
+                        ],
+                    )
+                ),
+                task_id,
+            ),
         )
 
     def get_items_for_check_keys(
@@ -657,6 +692,22 @@ class SQLiteRepository:
         usage.tool_calls += 1
         self._upsert_usage(usage)
         return eid
+
+    def save_evidence(
+        self,
+        *,
+        task_id: str,
+        loop_id: int | None,
+        evidence_type: EvidenceType | str,
+        payload: dict[str, object],
+    ) -> str:
+        actual_type = (
+            evidence_type.value
+            if isinstance(evidence_type, EvidenceType)
+            else evidence_type
+        )
+        evidence_payload = {"type": actual_type, **payload}
+        return self._insert_evidence(task_id, loop_id, actual_type, evidence_payload)
 
     def count_evidence_by_type(
         self,
@@ -1088,7 +1139,7 @@ class SQLiteRepository:
 
     def append_event(
         self,
-        event_type: EventType,
+        event_type: EventType | str,
         payload: dict[str, object],
         *,
         task_id: str | None = None,
@@ -1096,12 +1147,15 @@ class SQLiteRepository:
     ) -> None:
         if task_id is not None:
             self._ensure_task(task_id)
+        actual_event_type = (
+            event_type.value if isinstance(event_type, EventType) else event_type
+        )
         self.conn.execute(
             """
             INSERT INTO events(task_id, loop_id, event_type, payload_json, created_at)
             VALUES (?, ?, ?, ?, ?)
             """,
-            (task_id, loop_id, event_type.value, json.dumps(payload), _utc_now()),
+            (task_id, loop_id, actual_event_type, json.dumps(payload), _utc_now()),
         )
 
     def list_events(
@@ -2058,17 +2112,22 @@ class SQLiteRepository:
         self,
         task_id: str,
         loop_id: int | None,
-        evidence_type: EvidenceType,
+        evidence_type: EvidenceType | str,
         payload: dict[str, object],
     ) -> str:
         self._ensure_task(task_id)
         eid = f"ev-{uuid.uuid4().hex[:8]}"
+        actual_type = (
+            evidence_type.value
+            if isinstance(evidence_type, EvidenceType)
+            else evidence_type
+        )
         self.conn.execute(
             """
             INSERT INTO evidence(evidence_id, task_id, loop_id, evidence_type, payload_json)
             VALUES (?, ?, ?, ?, ?)
             """,
-            (eid, task_id, loop_id, evidence_type.value, json.dumps(payload)),
+            (eid, task_id, loop_id, actual_type, json.dumps(payload)),
         )
         return eid
 

@@ -20,4 +20,6 @@ def is_successful_evidence_payload(
         return payload.get("success") is True
     if ev_type == EvidenceType.SANDBOX_RUN.value:
         return payload.get("exit_code") == 0 and payload.get("timed_out") is False
+    if "success" in payload:
+        return payload.get("success") is True
     return False

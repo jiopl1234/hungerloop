@@ -7,7 +7,7 @@ from hungerloop.models.enums import (
     HungerItemType,
     ValidationVerdict,
 )
-from hungerloop.models.hunger import AcceptanceCheck, HungerItem
+from hungerloop.models.hunger import AcceptanceCheck, HungerItem, HungerLedger
 from hungerloop.models.validation import ValidationReport
 from hungerloop.services.stagnation_detector import StagnationDetector
 
@@ -30,7 +30,10 @@ def _item(item_id: str, failures: int = 0) -> HungerItem:
 
 def _mock_repo(items: dict[str, HungerItem]) -> MagicMock:
     repo = MagicMock()
-    repo.get_hunger_item.side_effect = lambda iid: items.get(iid)
+    repo.get_hunger_ledger.return_value = HungerLedger(
+        task_id="t1",
+        items=list(items.values()),
+    )
     repo.increment_no_progress_streak.return_value = 1
     return repo
 
@@ -104,4 +107,4 @@ def test_unattempted_item_not_counted() -> None:
     detector.update("t1", 1, report)
 
     assert h2.consecutive_failure_count == 0
-    repo.get_hunger_item.assert_any_call("H-001")
+    repo.get_hunger_ledger.assert_called_once_with("t1")
