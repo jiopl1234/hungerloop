@@ -178,3 +178,50 @@ def test_handoff_blocker_recorded_event_emitted_per_blocked_item(
     )
     assert len(events) == 2
     assert [event["payload"]["item_id"] for event in events] == ["H-001", "H-002"]
+
+
+def test_blocker_on_closed_item_warns_without_reopening(
+    repo: InMemoryRepository | SQLiteRepository,
+) -> None:
+    from hungerloop.services.handoff_processor import HandoffProcessor
+
+    repo.save_hunger_ledger(
+        "task-1",
+        HungerLedger(
+            task_id="task-1",
+            items=[
+                HungerItem(
+                    id="H-001",
+                    title="Already closed",
+                    status=HungerItemStatus.CLOSED,
+                )
+            ],
+        ),
+    )
+    processor = HandoffProcessor(repo, requirement_compiler=RequirementCompiler(repo))
+
+    processor.process_handoffs(
+        "task-1",
+        2,
+        [
+            _handoff(
+                HandoffItem(
+                    item_type="blocker",
+                    summary="Late blocker",
+                    related_item_ids=["H-001"],
+                )
+            )
+        ],
+        mission=None,
+        budget=_budget(),
+    )
+
+    item = repo.get_hunger_item("H-001")
+    assert item is not None
+    assert item.status == HungerItemStatus.CLOSED
+    events = repo.list_events(
+        "task-1",
+        event_types=["HANDOFF_BLOCKER_ON_CLOSED_ITEM"],
+    )
+    assert len(events) == 1
+    assert events[0]["payload"]["item_id"] == "H-001"

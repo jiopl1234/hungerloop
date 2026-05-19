@@ -1,9 +1,9 @@
 """EventType vocabulary tests (PRD §22.8).
 
-Pin the wire-contract: every enum member is a snake_case string, the
-v0.5a-era literal strings still resolve through the enum, and storage
-goes through ``.value`` so SQLite TEXT columns and JSON output stay
-plain.
+Pin the wire-contract: every enum member uses a supported event wire
+format, the v0.5a-era literal strings still resolve through the enum,
+and storage goes through ``.value`` so SQLite TEXT columns and JSON
+output stay plain.
 """
 from __future__ import annotations
 
@@ -25,11 +25,14 @@ LEGACY_EVENT_NAMES = {
 }
 
 
-def test_every_event_value_is_snake_case() -> None:
-    pattern = re.compile(r"^[a-z][a-z0-9_]*$")
+def test_every_event_value_uses_supported_wire_format() -> None:
+    pattern = re.compile(
+        r"^([a-z][a-z0-9_]*|worker\.handoff_[a-z0-9_]+|"
+        r"HANDOFF_BLOCKER_ON_CLOSED_ITEM)$"
+    )
     for member in EventType:
         assert pattern.match(member.value), (
-            f"{member.name} value {member.value!r} is not snake_case"
+            f"{member.name} value {member.value!r} has an unsupported format"
         )
 
 
@@ -140,6 +143,18 @@ def test_v0_5f_budgeted_refinement_additions_present() -> None:
         "refinement_tier_started",
         "refinement_items_added",
         "refinement_budget_exhausted",
+    }
+    actual = {m.value for m in EventType}
+    assert expected <= actual
+
+
+def test_v0_6_m2_handoff_additions_present() -> None:
+    """v0.6 M2 adds structured worker handoff audit events."""
+    expected = {
+        "worker.handoff_emitted",
+        "worker.handoff_received",
+        "worker.handoff_blocker_recorded",
+        "HANDOFF_BLOCKER_ON_CLOSED_ITEM",
     }
     actual = {m.value for m in EventType}
     assert expected <= actual

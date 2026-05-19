@@ -5,6 +5,7 @@ from typing import Literal
 from pydantic import ValidationError
 
 from hungerloop.models.enums import HungerItemStatus
+from hungerloop.models.events import EventType
 from hungerloop.models.handoff import DiscoveredFact, HandoffProcessingResult
 from hungerloop.models.mission import Mission
 from hungerloop.models.planning import BudgetAllocation
@@ -34,7 +35,6 @@ class HandoffProcessor:
         mission: Mission | None,
         budget: BudgetAllocation,
     ) -> HandoffProcessingResult:
-        del mission
         blocked_item_ids: list[str] = []
         discovered_issues: list[DiscoveredFact] = []
         injected_hunger_item_ids: list[str] = []
@@ -47,6 +47,21 @@ class HandoffProcessor:
             for item_index, item in enumerate(handoff.handoff_items):
                 if item.item_type == "blocker":
                     for related_item_id in item.related_item_ids:
+                        scope = self._scope_payload(mission, item)
+                        current = self.repo.get_hunger_item(related_item_id)
+                        if current is not None and current.status is HungerItemStatus.CLOSED:
+                            self.repo.append_event(
+                                EventType.HANDOFF_BLOCKER_ON_CLOSED_ITEM,
+                                {
+                                    **scope,
+                                    "agent_id": handoff.agent_id,
+                                    "item_id": related_item_id,
+                                    "source_summary": self._handoff_text(item),
+                                },
+                                task_id=task_id,
+                                loop_id=loop_id,
+                            )
+                            continue
                         self.repo.update_hunger_item_status(
                             task_id,
                             related_item_id,
@@ -55,8 +70,9 @@ class HandoffProcessor:
                         if related_item_id not in blocked_item_ids:
                             blocked_item_ids.append(related_item_id)
                         self.repo.append_event(
-                            "worker.handoff_blocker_recorded",
+                            EventType.WORKER_HANDOFF_BLOCKER_RECORDED,
                             {
+                                **scope,
                                 "agent_id": handoff.agent_id,
                                 "item_id": related_item_id,
                                 "source_summary": self._handoff_text(item),
@@ -116,6 +132,31 @@ class HandoffProcessor:
         )
         self.repo.save_handoff_processing_result(task_id, result)
         return result
+
+    @staticmethod
+    def _scope_payload(
+        mission: Mission | None,
+        item: HandoffItem,
+    ) -> dict[str, object]:
+        payload: dict[str, object] = {
+            "mission_id": mission.mission_id if mission is not None else None,
+            "phase_id": None,
+            "feature_id": None,
+        }
+        if mission is None:
+            return payload
+
+        related_features = set(item.related_feature_ids)
+        related_items = set(item.related_item_ids)
+        for feature in mission.features:
+            if (
+                feature.feature_id in related_features
+                or feature.hunger_item_id in related_items
+            ):
+                payload["phase_id"] = feature.phase_id
+                payload["feature_id"] = feature.feature_id
+                return payload
+        return payload
 
     @staticmethod
     def _source_handoff_id(handoff: WorkerHandoff, item_index: int) -> str:

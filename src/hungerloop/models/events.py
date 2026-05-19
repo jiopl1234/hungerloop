@@ -36,6 +36,10 @@ class EventType(str, Enum):
     WORKER_FINISHED = "worker_finished"
     WORKER_FAILED = "worker_failed"
     CONTEXT_TRUNCATED = "context_truncated"
+    WORKER_HANDOFF_EMITTED = "worker.handoff_emitted"
+    WORKER_HANDOFF_RECEIVED = "worker.handoff_received"
+    WORKER_HANDOFF_BLOCKER_RECORDED = "worker.handoff_blocker_recorded"
+    HANDOFF_BLOCKER_ON_CLOSED_ITEM = "HANDOFF_BLOCKER_ON_CLOSED_ITEM"
 
     # ----- Model calls (v0.5d.0) ----------------------------------------
     MODEL_CALL_STARTED = "model_call_started"

@@ -1,8 +1,12 @@
 """End-to-end tests for LoopOrchestrator (PRD §12)."""
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from pathlib import Path
 
+import pytest
+
+from hungerloop.cli.orchestrator_factory import build_orchestrator
 from hungerloop.models.context import ContextPack
 from hungerloop.models.enums import (
     AcceptanceCheckType,
@@ -10,12 +14,14 @@ from hungerloop.models.enums import (
     HungerItemStatus,
     StopReason,
 )
+from hungerloop.models.handoff import HandoffProcessingResult
 from hungerloop.models.hunger import (
     AcceptanceCheck,
     HungerItem,
     HungerLedger,
     HungerPolicy,
 )
+from hungerloop.models.mission import Mission, MissionFeature, MissionPhase
 from hungerloop.models.tracing import LoopTrace, StopReport
 from hungerloop.models.worker import WorkerResult
 from hungerloop.repository.in_memory_repo import InMemoryRepository
@@ -27,6 +33,7 @@ from hungerloop.services.commit_manager import CommitManager
 from hungerloop.services.context_builder import ContextBuilder
 from hungerloop.services.cost_guard import CostGuard, SafetyStopError
 from hungerloop.services.execution_worker import ExecutionWorker
+from hungerloop.services.handoff_processor import HandoffProcessor
 from hungerloop.services.hunger_engine import HungerEngine
 from hungerloop.services.hunger_update import HungerUpdateService
 from hungerloop.services.integrator import Integrator
@@ -89,6 +96,7 @@ def _build_orchestrator(
             repo, AcceptanceCheckRunner(repo, workspace_manager, sandbox)
         ),
         commit_manager=CommitManager(repo, workspace_manager),
+        handoff_processor=HandoffProcessor(repo),
         hunger_update=HungerUpdateService(repo),
         stagnation_detector=StagnationDetector(
             repo, max_global_no_progress_loops=max_global_no_progress
@@ -130,11 +138,55 @@ def _build_full_orchestrator(
             repo, AcceptanceCheckRunner(repo, workspace_manager, sandbox)
         ),
         commit_manager=CommitManager(repo, workspace_manager),
+        handoff_processor=HandoffProcessor(repo),
         hunger_update=HungerUpdateService(repo),
         stagnation_detector=StagnationDetector(repo),
         refinement_compiler=RefinementCompiler(repo),
         max_loops_safety_cap=10,
     )
+
+
+def _mission_for_item(item_id: str = "H-001") -> Mission:
+    return Mission(
+        mission_id="mission-1",
+        task_id="t1",
+        title="Mission",
+        description="Exercise orchestrator handoff events.",
+        created_at=datetime.now(timezone.utc),
+        phases=[
+            MissionPhase(
+                phase_id="phase-1",
+                title="Phase",
+                description="Phase one",
+                feature_ids=["feature-1"],
+            )
+        ],
+        features=[
+            MissionFeature(
+                feature_id="feature-1",
+                hunger_item_id=item_id,
+                phase_id="phase-1",
+                title="Feature",
+                description="Feature one",
+            )
+        ],
+    )
+
+
+def _save_mission_graph(repo: InMemoryRepository, mission: Mission) -> None:
+    repo.save_mission(mission)
+    for phase in mission.phases:
+        repo.save_mission_phase(phase)
+    for feature in mission.features:
+        repo.save_mission_feature(feature)
+
+
+def test_factory_injects_handoff_processor(tmp_path: Path) -> None:
+    repo = InMemoryRepository()
+
+    orchestrator = build_orchestrator(repo=repo, workspace_root=tmp_path)
+
+    assert isinstance(orchestrator.handoff_processor, HandoffProcessor)
 
 
 # ---- happy-path end-to-end ----
@@ -211,6 +263,126 @@ async def test_step_returns_loop_trace_when_progress_made(tmp_path: Path) -> Non
     event_types = [event["event_type"] for event in repo._events]
     assert "loop_started" in event_types
     assert "loop_committed" in event_types
+
+
+async def test_step_persists_handoff_and_emits_scoped_events(
+    tmp_path: Path,
+) -> None:
+    repo = InMemoryRepository()
+    item = HungerItem(
+        id="H-001",
+        title="produce report",
+        priority=1.0,
+        gap_score=1.0,
+        acceptance_checks=[
+            AcceptanceCheck(
+                check_type=AcceptanceCheckType.FILE_EXISTS,
+                params={"path": "report.md"},
+            ),
+        ],
+    )
+    _seed_task(repo, [item])
+    _save_mission_graph(repo, _mission_for_item())
+    actions = [
+        {
+            "tool_name": "write_file",
+            "args": {"path": "report.md", "content": "ok"},
+        }
+    ]
+    orchestrator = _build_full_orchestrator(
+        tmp_path=tmp_path,
+        repo=repo,
+        model_client=DummyModelClient.with_actions(actions),
+    )
+
+    outcome = await orchestrator.step("t1")
+
+    assert isinstance(outcome, LoopTrace)
+    handoffs = repo.list_worker_handoffs("t1", since_loop_id=1)
+    assert len(handoffs) == 1
+
+    emitted = repo.list_events("t1", event_types=["worker.handoff_emitted"])
+    received = repo.list_events("t1", event_types=["worker.handoff_received"])
+    assert len(emitted) == 1
+    assert len(received) == 1
+
+    emitted_payload = emitted[0]["payload"]
+    assert emitted_payload["mission_id"] == "mission-1"
+    assert emitted_payload["phase_id"] == "phase-1"
+    assert emitted_payload["feature_id"] == "feature-1"
+    assert emitted_payload["handoff_id"]
+    assert emitted_payload["assignment_id"]
+
+    received_payload = received[0]["payload"]
+    assert received_payload["mission_id"] == "mission-1"
+    assert received_payload["phase_id"] == "phase-1"
+    assert received_payload["feature_id"] == "feature-1"
+    assert received_payload["assignment_id"] == emitted_payload["assignment_id"]
+    assert received_payload["handoff_count"] == 1
+    assert received_payload["handoff_ids"] == [emitted_payload["handoff_id"]]
+
+
+async def test_process_handoffs_runs_before_integration_and_validation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo = InMemoryRepository()
+    item = HungerItem(
+        id="H-001",
+        title="produce report",
+        priority=1.0,
+        gap_score=1.0,
+        acceptance_checks=[
+            AcceptanceCheck(
+                check_type=AcceptanceCheckType.FILE_EXISTS,
+                params={"path": "report.md"},
+            ),
+        ],
+    )
+    _seed_task(repo, [item])
+    actions = [
+        {
+            "tool_name": "write_file",
+            "args": {"path": "report.md", "content": "ok"},
+        }
+    ]
+    orchestrator = _build_full_orchestrator(
+        tmp_path=tmp_path,
+        repo=repo,
+        model_client=DummyModelClient.with_actions(actions),
+    )
+    call_order: list[str] = []
+
+    original_process = orchestrator.handoff_processor.process_handoffs
+
+    def process_spy(*args: object, **kwargs: object) -> HandoffProcessingResult:
+        call_order.append("process_handoffs")
+        return original_process(*args, **kwargs)
+
+    original_integrate = orchestrator.integrator.integrate
+
+    def integrate_spy(*args: object, **kwargs: object) -> object:
+        call_order.append("integrate")
+        return original_integrate(*args, **kwargs)
+
+    original_validate = orchestrator.validation_gate.validate
+
+    async def validate_spy(*args: object, **kwargs: object) -> object:
+        call_order.append("validate")
+        return await original_validate(*args, **kwargs)
+
+    monkeypatch.setattr(
+        orchestrator.handoff_processor,
+        "process_handoffs",
+        process_spy,
+    )
+    monkeypatch.setattr(orchestrator.integrator, "integrate", integrate_spy)
+    monkeypatch.setattr(orchestrator.validation_gate, "validate", validate_spy)
+
+    outcome = await orchestrator.step("t1")
+
+    assert isinstance(outcome, LoopTrace)
+    assert call_order[:3] == ["process_handoffs", "integrate", "validate"]
 
 
 async def test_budgeted_mode_adds_refinement_work_instead_of_done(

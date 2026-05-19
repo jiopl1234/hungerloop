@@ -31,15 +31,17 @@ from hungerloop.models.context import ContextPack
 from hungerloop.models.enums import CompletionMode, LoopPhase, StopReason
 from hungerloop.models.events import EventType
 from hungerloop.models.hunger import HungerClockState, HungerLedger, HungerPolicy, HungerSnapshot
-from hungerloop.models.planning import BudgetAllocation, LoopPlan
+from hungerloop.models.mission import Mission, MissionFeature
+from hungerloop.models.planning import Assignment, BudgetAllocation, LoopPlan
 from hungerloop.models.tracing import LoopTrace, StopReport
 from hungerloop.models.validation import ValidationReport
-from hungerloop.models.worker import WorkerResult
+from hungerloop.models.worker import WorkerHandoff, WorkerResult
 from hungerloop.repository.protocol import RepositoryProtocol
 from hungerloop.services.budget_allocator import BudgetAllocator
 from hungerloop.services.commit_manager import CommitManager
 from hungerloop.services.context_builder import ContextBuilder
 from hungerloop.services.cost_guard import SafetyStopError
+from hungerloop.services.handoff_processor import HandoffProcessor
 from hungerloop.services.hunger_engine import HungerEngine
 from hungerloop.services.hunger_update import HungerUpdateService
 from hungerloop.services.integrator import Integrator
@@ -88,6 +90,7 @@ class LoopOrchestrator:
         integrator: Integrator,
         validation_gate: ValidationGate,
         commit_manager: CommitManager,
+        handoff_processor: HandoffProcessor,
         hunger_update: HungerUpdateService,
         stagnation_detector: StagnationDetector,
         refinement_compiler: RefinementCompiler,
@@ -104,6 +107,7 @@ class LoopOrchestrator:
         self.integrator = integrator
         self.validation_gate = validation_gate
         self.commit_manager = commit_manager
+        self.handoff_processor = handoff_processor
         self.hunger_update = hunger_update
         self.stagnation_detector = stagnation_detector
         self.refinement_compiler = refinement_compiler
@@ -256,6 +260,31 @@ class LoopOrchestrator:
                 loop_id=loop_id,
             )
             return self._emit_stop(task_id, StopReason.SAFETY_STOP)
+
+        mission = self.repo.get_mission(task_id)
+        worker_handoffs, handoff_payloads = self._save_and_emit_handoffs(
+            task_id=task_id,
+            loop_id=loop_id,
+            plan=plan,
+            worker_results=worker_results,
+            mission=mission,
+        )
+        self.handoff_processor.process_handoffs(
+            task_id,
+            loop_id,
+            worker_handoffs,
+            mission=mission,
+            budget=budget,
+        )
+        self.repo.append_event(
+            EventType.WORKER_HANDOFF_RECEIVED,
+            self._handoff_received_payload(
+                mission=mission,
+                emitted_payloads=handoff_payloads,
+            ),
+            task_id=task_id,
+            loop_id=loop_id,
+        )
 
         if any(r.requires_human for r in worker_results):
             self.workspace_manager.reject_candidate(task_id, loop_id)
@@ -414,6 +443,145 @@ class LoopOrchestrator:
         if stagnation["global_blocked"]:
             return self._emit_stop(task_id, StopReason.BLOCKED)
         return trace
+
+    def _save_and_emit_handoffs(
+        self,
+        *,
+        task_id: str,
+        loop_id: int,
+        plan: LoopPlan,
+        worker_results: list[WorkerResult],
+        mission: Mission | None,
+    ) -> tuple[list[WorkerHandoff], list[dict[str, object]]]:
+        handoffs: list[WorkerHandoff] = []
+        emitted_payloads: list[dict[str, object]] = []
+        for index, (assignment, result) in enumerate(
+            zip(plan.assignments, worker_results, strict=False)
+        ):
+            handoff = WorkerHandoff(**result.model_dump())
+            handoff_id = self.repo.save_worker_handoff(handoff)
+            payload = self._handoff_event_payload(
+                mission=mission,
+                assignment=assignment,
+                assignment_index=index,
+                task_id=task_id,
+                loop_id=loop_id,
+                handoff=handoff,
+                handoff_id=handoff_id,
+            )
+            self.repo.append_event(
+                EventType.WORKER_HANDOFF_EMITTED,
+                payload,
+                task_id=task_id,
+                loop_id=loop_id,
+            )
+            handoffs.append(handoff)
+            emitted_payloads.append(payload)
+        return handoffs, emitted_payloads
+
+    def _handoff_event_payload(
+        self,
+        *,
+        mission: Mission | None,
+        assignment: Assignment,
+        assignment_index: int,
+        task_id: str,
+        loop_id: int,
+        handoff: WorkerHandoff,
+        handoff_id: str,
+    ) -> dict[str, object]:
+        feature = self._feature_for_assignment(mission, assignment)
+        assignment_id = self._assignment_id(
+            assignment,
+            task_id=task_id,
+            loop_id=loop_id,
+            assignment_index=assignment_index,
+        )
+        return {
+            "mission_id": mission.mission_id if mission is not None else None,
+            "phase_id": feature.phase_id if feature is not None else None,
+            "feature_id": feature.feature_id if feature is not None else None,
+            "assignment_id": assignment_id,
+            "agent_id": handoff.agent_id,
+            "handoff_id": handoff_id,
+            "target_hunger_item_ids": list(assignment.target_hunger_item_ids),
+        }
+
+    @staticmethod
+    def _feature_for_assignment(
+        mission: Mission | None,
+        assignment: Assignment,
+    ) -> MissionFeature | None:
+        if mission is None:
+            return None
+        target_feature_ids = set(getattr(assignment, "target_feature_ids", []))
+        target_hunger_item_ids = set(assignment.target_hunger_item_ids)
+        for feature in mission.features:
+            if (
+                feature.feature_id in target_feature_ids
+                or feature.hunger_item_id in target_hunger_item_ids
+            ):
+                return feature
+        return None
+
+    @staticmethod
+    def _assignment_id(
+        assignment: Assignment,
+        *,
+        task_id: str,
+        loop_id: int,
+        assignment_index: int,
+    ) -> str:
+        assignment_id = getattr(assignment, "assignment_id", None)
+        if isinstance(assignment_id, str) and assignment_id:
+            return assignment_id
+        return f"ASGN-{task_id}-{loop_id}-{assignment_index}"
+
+    @staticmethod
+    def _handoff_received_payload(
+        *,
+        mission: Mission | None,
+        emitted_payloads: list[dict[str, object]],
+    ) -> dict[str, object]:
+        phase_ids = LoopOrchestrator._unique_payload_strings(
+            emitted_payloads,
+            "phase_id",
+        )
+        feature_ids = LoopOrchestrator._unique_payload_strings(
+            emitted_payloads,
+            "feature_id",
+        )
+        assignment_ids = LoopOrchestrator._unique_payload_strings(
+            emitted_payloads,
+            "assignment_id",
+        )
+        handoff_ids = LoopOrchestrator._unique_payload_strings(
+            emitted_payloads,
+            "handoff_id",
+        )
+        return {
+            "mission_id": mission.mission_id if mission is not None else None,
+            "phase_id": phase_ids[0] if len(phase_ids) == 1 else None,
+            "feature_id": feature_ids[0] if len(feature_ids) == 1 else None,
+            "assignment_id": assignment_ids[0] if len(assignment_ids) == 1 else None,
+            "phase_ids": phase_ids,
+            "feature_ids": feature_ids,
+            "assignment_ids": assignment_ids,
+            "handoff_ids": handoff_ids,
+            "handoff_count": len(emitted_payloads),
+        }
+
+    @staticmethod
+    def _unique_payload_strings(
+        payloads: list[dict[str, object]],
+        key: str,
+    ) -> list[str]:
+        values: list[str] = []
+        for payload in payloads:
+            value = payload.get(key)
+            if isinstance(value, str) and value and value not in values:
+                values.append(value)
+        return values
 
     def _maybe_expand_or_stop_budgeted_refinement(
         self,

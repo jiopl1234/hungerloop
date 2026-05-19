@@ -22,6 +22,7 @@ from hungerloop.services.commit_manager import CommitManager
 from hungerloop.services.context_builder import ContextBuilder
 from hungerloop.services.cost_guard import CostGuard
 from hungerloop.services.execution_worker import ExecutionWorker
+from hungerloop.services.handoff_processor import HandoffProcessor
 from hungerloop.services.hunger_engine import HungerEngine
 from hungerloop.services.hunger_update import HungerUpdateService
 from hungerloop.services.integrator import Integrator
@@ -85,6 +86,7 @@ def build_orchestrator(
             repo, AcceptanceCheckRunner(repo, workspace_manager, sandbox)
         ),
         commit_manager=CommitManager(repo, workspace_manager),
+        handoff_processor=HandoffProcessor(repo),
         hunger_update=HungerUpdateService(repo),
         stagnation_detector=StagnationDetector(repo),
         refinement_compiler=RefinementCompiler(repo),

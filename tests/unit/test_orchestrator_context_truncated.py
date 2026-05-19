@@ -15,6 +15,7 @@ from hungerloop.services.budget_allocator import BudgetAllocator
 from hungerloop.services.budget_guard import BudgetGuard
 from hungerloop.services.commit_manager import CommitManager
 from hungerloop.services.cost_guard import CostGuard
+from hungerloop.services.handoff_processor import HandoffProcessor
 from hungerloop.services.hunger_engine import HungerEngine
 from hungerloop.services.hunger_update import HungerUpdateService
 from hungerloop.services.integrator import Integrator
@@ -81,6 +82,7 @@ def _orchestrator(
             AcceptanceCheckRunner(repo, workspace_manager, sandbox),
         ),
         commit_manager=CommitManager(repo, workspace_manager),
+        handoff_processor=HandoffProcessor(repo),
         hunger_update=HungerUpdateService(repo),
         stagnation_detector=StagnationDetector(repo),
         refinement_compiler=RefinementCompiler(repo),
