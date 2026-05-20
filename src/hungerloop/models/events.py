@@ -68,6 +68,7 @@ class EventType(str, Enum):
     VALIDATION_SCRUTINY_STARTED = "validation.scrutiny_started"
     VALIDATION_SCRUTINY_COMPLETED = "validation.scrutiny_completed"
     VALIDATION_SCRUTINY_SKIPPED = "validation.scrutiny_skipped"
+    VALIDATION_SCRUTINY_TIMEOUT = "validation.scrutiny_timeout"
     VALIDATION_USER_TESTING_SKIPPED = "validation.user_testing_skipped"
     CHECK_PASSED = "check_passed"
     CHECK_FAILED = "check_failed"
