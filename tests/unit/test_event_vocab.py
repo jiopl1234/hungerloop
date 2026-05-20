@@ -27,8 +27,8 @@ LEGACY_EVENT_NAMES = {
 
 def test_every_event_value_uses_supported_wire_format() -> None:
     pattern = re.compile(
-        r"^([a-z][a-z0-9_]*|worker\.handoff_[a-z0-9_]+|"
-        r"HANDOFF_BLOCKER_ON_CLOSED_ITEM)$"
+        r"^([a-z][a-z0-9_]*|worker\.(handoff|assignment)_[a-z0-9_]+|"
+        r"HANDOFF_BLOCKER_ON_CLOSED_ITEM|WORKSPACE_WRITE_COLLISION)$"
     )
     for member in EventType:
         assert pattern.match(member.value), (
@@ -155,6 +155,20 @@ def test_v0_6_m2_handoff_additions_present() -> None:
         "worker.handoff_received",
         "worker.handoff_blocker_recorded",
         "HANDOFF_BLOCKER_ON_CLOSED_ITEM",
+    }
+    actual = {m.value for m in EventType}
+    assert expected <= actual
+
+
+def test_v0_6_m3_assignment_scheduler_additions_present() -> None:
+    """v0.6 M3 adds per-assignment scheduler audit events."""
+    expected = {
+        "worker.assignment_started",
+        "worker.assignment_completed",
+        "worker.assignment_failed",
+        "worker.assignment_skipped",
+        "worker.assignment_retried",
+        "WORKSPACE_WRITE_COLLISION",
     }
     actual = {m.value for m in EventType}
     assert expected <= actual

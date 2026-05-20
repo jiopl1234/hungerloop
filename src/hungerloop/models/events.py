@@ -40,6 +40,12 @@ class EventType(str, Enum):
     WORKER_HANDOFF_RECEIVED = "worker.handoff_received"
     WORKER_HANDOFF_BLOCKER_RECORDED = "worker.handoff_blocker_recorded"
     HANDOFF_BLOCKER_ON_CLOSED_ITEM = "HANDOFF_BLOCKER_ON_CLOSED_ITEM"
+    WORKER_ASSIGNMENT_STARTED = "worker.assignment_started"
+    WORKER_ASSIGNMENT_COMPLETED = "worker.assignment_completed"
+    WORKER_ASSIGNMENT_FAILED = "worker.assignment_failed"
+    WORKER_ASSIGNMENT_SKIPPED = "worker.assignment_skipped"
+    WORKER_ASSIGNMENT_RETRIED = "worker.assignment_retried"
+    WORKSPACE_WRITE_COLLISION = "WORKSPACE_WRITE_COLLISION"
 
     # ----- Model calls (v0.5d.0) ----------------------------------------
     MODEL_CALL_STARTED = "model_call_started"
