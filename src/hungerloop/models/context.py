@@ -37,6 +37,7 @@ class ContextPack(BaseModel):
     phase: str
 
     target_hunger_item_ids: list[str]
+    target_feature_ids: list[str] = Field(default_factory=list)
     acceptance_criteria: list[str] = Field(default_factory=list)
 
     best_state_summary: str | None = None

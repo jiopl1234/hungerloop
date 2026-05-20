@@ -10,7 +10,8 @@ from dataclasses import dataclass
 from hungerloop.models.context import ContextPack, TruncationInfo
 from hungerloop.models.enums import CompletionMode, EvidenceType
 from hungerloop.models.hunger import AcceptanceCheck
-from hungerloop.models.planning import BudgetAllocation
+from hungerloop.models.planning import Assignment, BudgetAllocation
+from hungerloop.models.worker import WorkerHandoff
 from hungerloop.repository.evidence_success import is_successful_evidence_payload
 from hungerloop.repository.protocol import RepositoryProtocol
 from hungerloop.services.evidence_render import (
@@ -78,19 +79,24 @@ class ContextBuilder:
 
     def build_for_agent(
         self,
+        assignment: Assignment | None = None,
+        *,
         task_id: str,
         loop_id: int,
-        agent_id: str,
-        mission: str,
-        target_hunger_item_ids: list[str],
         budget: BudgetAllocation,
-        allowed_tools: list[str],
         output_schema_name: str,
-        candidate_workspace_ref: str,
+        agent_id: str | None = None,
+        mission: str | None = None,
+        target_hunger_item_ids: list[str] | None = None,
+        allowed_tools: list[str] | None = None,
+        candidate_workspace_ref: str | None = None,
     ) -> ContextPack:
         """Build a context pack for an agent.
 
         Args:
+            assignment: Optional M3 assignment. When provided, assignment-scoped
+                fields override the legacy keyword arguments and the candidate
+                workspace reference is the shared loop workspace.
             task_id: Task identifier.
             loop_id: Loop iteration.
             agent_id: Agent identifier.
@@ -104,19 +110,40 @@ class ContextBuilder:
         Returns:
             A context pack for the agent.
         """
+        target_feature_ids: list[str] = []
+        if assignment is not None:
+            agent_id = assignment.agent_id
+            mission = assignment.mission
+            target_hunger_item_ids = list(assignment.target_hunger_item_ids)
+            target_feature_ids = list(assignment.target_feature_ids)
+            allowed_tools = list(assignment.allowed_tools)
+            candidate_workspace_ref = f"candidates/loop_{loop_id:03d}"
+        if (
+            agent_id is None
+            or mission is None
+            or target_hunger_item_ids is None
+            or allowed_tools is None
+            or candidate_workspace_ref is None
+        ):
+            raise ValueError(
+                "agent_id, mission, target_hunger_item_ids, allowed_tools, and "
+                "candidate_workspace_ref are required when assignment is absent"
+            )
+
         best = self.repo.get_best_state(task_id)
         best_summary, best_summary_truncated = _clip_optional(
             best.summary if best else None,
             MAX_BEST_SUMMARY_CHARS,
         )
         history = self._loop_history(task_id, agent_id, loop_id)
-        handoff_result = self.repo.get_latest_handoff_processing_result(task_id)
         last_summary, _ = _clip_optional(
             history.last_self_summary,
             MAX_LAST_SELF_SUMMARY_CHARS,
         )
-        prior_handoff_summary = (
-            handoff_result.prior_handoff_summary if handoff_result else ""
+        prior_handoff_summary = self._prior_handoff_summary(
+            task_id=task_id,
+            loop_id=loop_id,
+            assignment=assignment,
         )
         best_files = _shape_workspace_files(
             self.workspace_reader.list_workspace_files(task_id, ref="best"),
@@ -165,6 +192,7 @@ class ContextBuilder:
             mission=mission,
             phase=budget.phase.value,
             target_hunger_item_ids=target_hunger_item_ids,
+            target_feature_ids=target_feature_ids,
             acceptance_criteria=acceptance_criteria,
             best_state_summary=best_summary,
             candidate_workspace_ref=candidate_workspace_ref,
@@ -265,6 +293,59 @@ class ContextBuilder:
             last_self_summary=last_summary,
         )
 
+    def _prior_handoff_summary(
+        self,
+        *,
+        task_id: str,
+        loop_id: int,
+        assignment: Assignment | None,
+    ) -> str:
+        """Return cross-loop plus upstream same-loop handoff text.
+
+        M2 stores the latest processed cross-loop handoff summary in a transient
+        repository cache. M3 adds same-loop topology: downstream assignments see
+        handoffs already persisted by completed upstream assignments in the
+        current shared loop workspace. The combined text is trimmed from the
+        oldest lines so the normal M2 history cap can apply across the union.
+        """
+        lines: list[str] = []
+        handoff_result = self.repo.get_latest_handoff_processing_result(task_id)
+        if handoff_result is not None and handoff_result.prior_handoff_summary:
+            lines.extend(handoff_result.prior_handoff_summary.splitlines())
+
+        if assignment is not None:
+            for handoff in self.repo.list_worker_handoffs(
+                task_id,
+                since_loop_id=loop_id,
+            ):
+                if not self._is_upstream_same_loop_handoff(
+                    handoff,
+                    loop_id=loop_id,
+                    assignment=assignment,
+                ):
+                    continue
+                summary = _clip_required(handoff.summary.strip(), MAX_LINE_CHARS)
+                if summary:
+                    label = handoff.assignment_id or handoff.agent_id
+                    lines.append(f"Upstream {label}: {summary}")
+
+        return _clip_oldest_lines(lines, MAX_HISTORY_CHARS)
+
+    @staticmethod
+    def _is_upstream_same_loop_handoff(
+        handoff: WorkerHandoff,
+        *,
+        loop_id: int,
+        assignment: Assignment,
+    ) -> bool:
+        if handoff.loop_id != loop_id:
+            return False
+        if handoff.assignment_id == assignment.assignment_id:
+            return False
+        if handoff.error or handoff.error_type:
+            return False
+        return True
+
     def _should_emit_read_only_rejected_hint(
         self, task_id: str, current_loop_id: int
     ) -> bool:
@@ -335,6 +416,18 @@ def _clip_recent_summaries(
         return clipped_prior, None
     remaining = max(0, MAX_HISTORY_CHARS - len(clipped_prior))
     return clipped_prior, last_summary[:remaining]
+
+
+def _clip_oldest_lines(lines: list[str], max_chars: int) -> str:
+    """Clip a newline-joined block by evicting oldest lines first."""
+    kept = list(lines)
+    rendered = "\n".join(kept).strip()
+    while len(rendered) > max_chars and len(kept) > 1:
+        kept.pop(0)
+        rendered = "\n".join(kept).strip()
+    if len(rendered) <= max_chars:
+        return rendered
+    return rendered[-max_chars:]
 
 
 def _shape_workspace_files(
