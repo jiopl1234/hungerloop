@@ -85,6 +85,7 @@ class RuleBasedPlanner:
         task = self.repo.get_task(task_id)
         raw_goal = task.raw_goal if task is not None else ""
         assignment = Assignment(
+            assignment_id=f"ASGN-{task_id}-{loop_id}-0",
             agent_id=EXECUTION_WORKER_V1.agent_id,
             mission=self._mission_for(item, snapshot.phase, raw_goal),
             target_hunger_item_ids=[item.id],

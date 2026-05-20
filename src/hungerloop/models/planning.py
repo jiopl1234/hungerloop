@@ -7,18 +7,30 @@ fields covering wall-clock, retry, and side-effect policy gates (PRD §4.2,
 """
 from __future__ import annotations
 
+from typing import Literal
+
 from pydantic import BaseModel, Field, model_validator
 
 from hungerloop.models.enums import LoopPhase
+
+WorkerRole = Literal["executor", "validator"]
 
 
 class Assignment(BaseModel):
     """Agent assignment within a loop plan."""
 
+    assignment_id: str = Field(
+        description="Assignment identifier in ASGN-<task_id>-<loop_id>-<index> format."
+    )
     agent_id: str
     mission: str
     target_hunger_item_ids: list[str] = Field(default_factory=list)
+    target_feature_ids: list[str] = Field(default_factory=list)
     allowed_tools: list[str] = Field(default_factory=list)
+    depends_on: list[str] = Field(default_factory=list)
+    role: WorkerRole = "executor"
+    max_retries: int = Field(default=0, ge=0)
+    retry_count: int = Field(default=0, ge=0)
 
 
 class LoopPlan(BaseModel):
@@ -27,7 +39,10 @@ class LoopPlan(BaseModel):
     task_id: str
     loop_id: int
     selected_hunger_item_ids: list[str] = Field(default_factory=list)
-    assignments: list[Assignment] = Field(default_factory=list)
+    assignments: list[Assignment] = Field(
+        default_factory=list,
+        description="Assignments in topological order; dependencies appear before dependents.",
+    )
     phase: LoopPhase = LoopPhase.EXPLORE
     rationale: str = ""
 
