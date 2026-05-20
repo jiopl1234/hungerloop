@@ -28,6 +28,7 @@ LEGACY_EVENT_NAMES = {
 def test_every_event_value_uses_supported_wire_format() -> None:
     pattern = re.compile(
         r"^([a-z][a-z0-9_]*|worker\.(handoff|assignment)_[a-z0-9_]+|"
+        r"validation\.[a-z0-9_]+|"
         r"HANDOFF_BLOCKER_ON_CLOSED_ITEM|WORKSPACE_WRITE_COLLISION|"
         r"PLANNER_CYCLE_DETECTED)$"
     )
@@ -171,6 +172,20 @@ def test_v0_6_m3_assignment_scheduler_additions_present() -> None:
         "worker.assignment_retried",
         "WORKSPACE_WRITE_COLLISION",
         "PLANNER_CYCLE_DETECTED",
+    }
+    actual = {m.value for m in EventType}
+    assert expected <= actual
+
+
+def test_v0_6_m4_validation_pipeline_additions_present() -> None:
+    """v0.6 M4 adds validation pipeline and scrutiny audit events."""
+    expected = {
+        "validation.pipeline_started",
+        "validation.pipeline_completed",
+        "validation.scrutiny_started",
+        "validation.scrutiny_completed",
+        "validation.scrutiny_skipped",
+        "validation.user_testing_skipped",
     }
     actual = {m.value for m in EventType}
     assert expected <= actual

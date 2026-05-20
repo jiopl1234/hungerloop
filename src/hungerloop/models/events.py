@@ -63,6 +63,12 @@ class EventType(str, Enum):
     # ----- Validation + check-level verdicts (v0.5d.0) ------------------
     VALIDATION_STARTED = "validation_started"
     VALIDATION_FINISHED = "validation_finished"
+    VALIDATION_PIPELINE_STARTED = "validation.pipeline_started"
+    VALIDATION_PIPELINE_COMPLETED = "validation.pipeline_completed"
+    VALIDATION_SCRUTINY_STARTED = "validation.scrutiny_started"
+    VALIDATION_SCRUTINY_COMPLETED = "validation.scrutiny_completed"
+    VALIDATION_SCRUTINY_SKIPPED = "validation.scrutiny_skipped"
+    VALIDATION_USER_TESTING_SKIPPED = "validation.user_testing_skipped"
     CHECK_PASSED = "check_passed"
     CHECK_FAILED = "check_failed"
     CHECK_REGRESSED = "check_regressed"
