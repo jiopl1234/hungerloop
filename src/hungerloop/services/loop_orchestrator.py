@@ -30,7 +30,7 @@ from hungerloop.models.context import ContextPack
 from hungerloop.models.enums import CompletionMode, LoopPhase, StopReason
 from hungerloop.models.events import EventType
 from hungerloop.models.hunger import HungerClockState, HungerLedger, HungerPolicy, HungerSnapshot
-from hungerloop.models.mission import Mission, MissionFeature
+from hungerloop.models.mission import Mission, MissionFeature, MissionPhase
 from hungerloop.models.planning import Assignment, BudgetAllocation, LoopPlan
 from hungerloop.models.tracing import LoopTrace, StopReport
 from hungerloop.models.validation import ValidationReport
@@ -51,6 +51,7 @@ from hungerloop.services.rule_based_planner import RuleBasedPlanner
 from hungerloop.services.stagnation_detector import StagnationDetector
 from hungerloop.services.stop_report_builder import build_stop_report
 from hungerloop.services.validation_gate import ValidationGate
+from hungerloop.services.validation_pipeline import ValidationPipeline
 from hungerloop.services.worker_runtime import WorkerRuntime
 from hungerloop.services.worker_scheduler import SchedulerResult, WorkerScheduler
 from hungerloop.services.workspace_manager import WorkspaceManager
@@ -98,6 +99,7 @@ class LoopOrchestrator:
         hunger_update: HungerUpdateService,
         stagnation_detector: StagnationDetector,
         refinement_compiler: RefinementCompiler,
+        validation_pipeline: ValidationPipeline | None = None,
         memory_manager: _ProposesMemory | None = None,
         max_loops_safety_cap: int = 1000,
     ) -> None:
@@ -119,6 +121,14 @@ class LoopOrchestrator:
         self.worker_runtime = worker_runtime
         self.integrator = integrator
         self.validation_gate = validation_gate
+        self.validation_pipeline = (
+            validation_pipeline
+            or ValidationPipeline.from_validation_gate(
+                repo=repo,
+                cost_guard=worker_runtime.cost_guard,
+                validation_gate=validation_gate,
+            )
+        )
         self.commit_manager = commit_manager
         self.handoff_processor = handoff_processor
         self.hunger_update = hunger_update
@@ -382,12 +392,27 @@ class LoopOrchestrator:
             task_id=task_id,
             loop_id=loop_id,
         )
-        validation = await self.validation_gate.validate(
-            task_id=task_id,
-            loop_id=loop_id,
-            candidate=candidate,
-            target_hunger_item_ids=attempted_hunger_item_ids,
-        )
+        validation_phase = self._phase_for_validation(mission, plan)
+        try:
+            pipeline_result = await self.validation_pipeline.run(
+                task_id=task_id,
+                loop_id=loop_id,
+                candidate=candidate,
+                target_hunger_item_ids=attempted_hunger_item_ids,
+                mission=mission,
+                phase=validation_phase,
+                budget=budget,
+            )
+        except SafetyStopError:
+            self.workspace_manager.reject_candidate(task_id, loop_id)
+            self.repo.append_event(
+                EventType.SAFETY_STOP,
+                {"loop_id": loop_id, "stage": "validation_pipeline"},
+                task_id=task_id,
+                loop_id=loop_id,
+            )
+            return self._emit_stop(task_id, StopReason.SAFETY_STOP)
+        validation = pipeline_result.deterministic_report
         self.repo.save_validation_report(validation)
         self._emit_check_events(task_id, loop_id, validation)
         self.repo.append_event(
@@ -402,7 +427,7 @@ class LoopOrchestrator:
             loop_id=loop_id,
         )
 
-        commit_decision = self.commit_manager.apply(candidate, validation)
+        commit_decision = self.commit_manager.apply(candidate, pipeline_result)
         if commit_decision["committed"]:
             self.repo.append_event(
                 EventType.CANDIDATE_COMMITTED,
@@ -437,6 +462,18 @@ class LoopOrchestrator:
             self.memory_manager.propose_from_loop(task_id, loop_id, validation)
         # SkillCard generation is end-of-task only (PRD §20.2); the CLI calls
         # SkillManager.maybe_create_skill_card after the StopReport is built.
+
+        self.hunger_engine.tick(
+            policy,
+            self.repo.get_hunger_clock(task_id),
+            self.repo.get_hunger_ledger(task_id),
+            previous_phase=previous_phase,
+            task_id=task_id,
+            validation_result=pipeline_result,
+            validation_phase_id=(
+                validation_phase.phase_id if validation_phase is not None else None
+            ),
+        )
 
         # best_state may have been promoted by CommitManager.apply.
         best_after = self.repo.get_best_state(task_id)
@@ -642,6 +679,31 @@ class LoopOrchestrator:
             "handoff_ids": handoff_ids,
             "handoff_count": len(emitted_payloads),
         }
+
+    @staticmethod
+    def _phase_for_validation(
+        mission: Mission | None,
+        plan: LoopPlan,
+    ) -> MissionPhase | None:
+        if mission is None:
+            return None
+        target_feature_ids: set[str] = set()
+        target_hunger_item_ids: set[str] = set()
+        for assignment in plan.assignments:
+            target_feature_ids.update(assignment.target_feature_ids)
+            target_hunger_item_ids.update(assignment.target_hunger_item_ids)
+        for feature in mission.features:
+            if (
+                feature.feature_id in target_feature_ids
+                or feature.hunger_item_id in target_hunger_item_ids
+            ):
+                for phase in mission.phases:
+                    if phase.phase_id == feature.phase_id:
+                        return phase
+        for phase in mission.phases:
+            if phase.status == "validating":
+                return phase
+        return None
 
     @staticmethod
     def _unique_payload_strings(

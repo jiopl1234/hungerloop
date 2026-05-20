@@ -36,6 +36,8 @@ from hungerloop.services.stagnation_detector import StagnationDetector
 from hungerloop.services.tool_harness import ToolHarness
 from hungerloop.services.tools import default_tool_registry
 from hungerloop.services.validation_gate import ValidationGate
+from hungerloop.services.validation_pipeline import ValidationPipeline
+from hungerloop.services.validators.scrutiny_validator import ScrutinyValidator
 from hungerloop.services.worker_runtime import WorkerRuntime
 from hungerloop.services.workspace_manager import WorkspaceManager
 from hungerloop.services.workspace_reader import WorkspaceReader
@@ -69,6 +71,21 @@ def build_orchestrator(
     runtime = WorkerRuntime(
         {"execution_worker_v1": worker}, cost_guard, budget_guard, repo
     )
+    handoff_processor = HandoffProcessor(repo)
+    validation_gate = ValidationGate(
+        repo, AcceptanceCheckRunner(repo, workspace_manager, sandbox)
+    )
+    validation_pipeline = ValidationPipeline.from_validation_gate(
+        repo=repo,
+        cost_guard=cost_guard,
+        validation_gate=validation_gate,
+        scrutiny_validator=ScrutinyValidator(
+            repo=repo,
+            sandbox_runner=sandbox,
+            workspace_manager=workspace_manager,
+            handoff_processor=handoff_processor,
+        ),
+    )
 
     return LoopOrchestrator(
         repo=repo,
@@ -82,11 +99,10 @@ def build_orchestrator(
         ),
         worker_runtime=runtime,
         integrator=Integrator(),
-        validation_gate=ValidationGate(
-            repo, AcceptanceCheckRunner(repo, workspace_manager, sandbox)
-        ),
+        validation_gate=validation_gate,
+        validation_pipeline=validation_pipeline,
         commit_manager=CommitManager(repo, workspace_manager),
-        handoff_processor=HandoffProcessor(repo),
+        handoff_processor=handoff_processor,
         hunger_update=HungerUpdateService(repo),
         stagnation_detector=StagnationDetector(repo),
         refinement_compiler=RefinementCompiler(repo),

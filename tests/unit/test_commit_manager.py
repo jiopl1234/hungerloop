@@ -9,6 +9,7 @@ from hungerloop.models.blackboard import CandidateState
 from hungerloop.models.enums import ValidationVerdict
 from hungerloop.models.validation import ValidationReport
 from hungerloop.services.commit_manager import CommitManager
+from hungerloop.services.validation_pipeline import ValidationPipelineResult
 from hungerloop.services.workspace_manager import WorkspaceManager
 
 
@@ -82,6 +83,30 @@ def test_partial_with_new_checks_commits(cm: CommitManager, ws: WorkspaceManager
         currently_passed=["H-001:0"],
     )
     result = cm.apply(candidate, report)
+    assert result["committed"] is True
+
+
+def test_pipeline_result_commit_gate_uses_deterministic_report(
+    cm: CommitManager,
+    ws: WorkspaceManager,
+) -> None:
+    ws.create_candidate_workspace("t1", 1)
+    deterministic_report = _report(
+        verdict=ValidationVerdict.PASS,
+        newly_passed=["H-001:0"],
+        currently_passed=["H-001:0"],
+    )
+    scrutiny_report = _report(verdict=ValidationVerdict.FAIL)
+    pipeline_result = ValidationPipelineResult(
+        deterministic_report=deterministic_report,
+        scrutiny_report=scrutiny_report,
+        user_testing_report=None,
+        pipeline_verdict="fail",
+        stages_run=["deterministic", "scrutiny"],
+    )
+
+    result = cm.apply(_candidate(), pipeline_result)
+
     assert result["committed"] is True
 
 

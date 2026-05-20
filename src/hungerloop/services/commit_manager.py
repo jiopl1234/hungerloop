@@ -17,6 +17,7 @@ from hungerloop.models.enums import ValidationVerdict
 from hungerloop.models.validation import ValidationReport
 from hungerloop.repository.protocol import RepositoryProtocol
 from hungerloop.services.validation_gate import make_check_key
+from hungerloop.services.validation_pipeline import ValidationPipelineResult
 from hungerloop.services.workspace_manager import WorkspaceManager
 
 
@@ -35,12 +36,18 @@ class CommitManager:
         self.repo = repo
         self.workspace_manager = workspace_manager
 
-    def apply(self, candidate: CandidateState, report: ValidationReport) -> CommitDecision:
-        """Apply a validation report: promote if I-3 conditions hold, else reject.
+    def apply(
+        self,
+        candidate: CandidateState,
+        validation: ValidationReport | ValidationPipelineResult,
+    ) -> CommitDecision:
+        """Apply validation: promote if I-3 conditions hold, else reject.
 
         Args:
             candidate: The candidate state.
-            report: The validation report.
+            validation: Either the legacy deterministic validation report or the
+                v0.6 validation pipeline result. Pipeline commits are still gated
+                only by the deterministic report to preserve I-3.
 
         Returns:
             A decision with ``committed: bool`` and ``reason: str``.
@@ -52,6 +59,7 @@ class CommitManager:
             participate in SQLite atomicity); recovery on restart is the
             Orchestrator's job.
         """
+        report = self._deterministic_report(validation)
         if self._can_commit(report):
             self.workspace_manager.promote_candidate_to_best(
                 task_id=candidate.task_id,
@@ -105,6 +113,14 @@ class CommitManager:
             "committed": False,
             "reason": self._reject_reason(report),
         }
+
+    @staticmethod
+    def _deterministic_report(
+        validation: ValidationReport | ValidationPipelineResult,
+    ) -> ValidationReport:
+        if isinstance(validation, ValidationPipelineResult):
+            return validation.deterministic_report
+        return validation
 
     @staticmethod
     def _evidence_by_check_key(report: ValidationReport) -> dict[str, str | None]:

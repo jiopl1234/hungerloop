@@ -13,6 +13,7 @@ from hungerloop.models.enums import (
     CompletionMode,
     HungerItemStatus,
     StopReason,
+    ValidationVerdict,
 )
 from hungerloop.models.handoff import HandoffProcessingResult
 from hungerloop.models.hunger import (
@@ -23,6 +24,7 @@ from hungerloop.models.hunger import (
 )
 from hungerloop.models.mission import Mission, MissionFeature, MissionPhase
 from hungerloop.models.tracing import LoopTrace, StopReport
+from hungerloop.models.validation import ValidationReport
 from hungerloop.models.worker import WorkerResult
 from hungerloop.repository.in_memory_repo import InMemoryRepository
 from hungerloop.services.acceptance_runner import AcceptanceCheckRunner
@@ -46,6 +48,7 @@ from hungerloop.services.stagnation_detector import StagnationDetector
 from hungerloop.services.tool_harness import ToolHarness
 from hungerloop.services.tools import default_tool_registry
 from hungerloop.services.validation_gate import ValidationGate
+from hungerloop.services.validation_pipeline import ValidationPipelineResult
 from hungerloop.services.worker_runtime import Worker, WorkerRuntime
 from hungerloop.services.workspace_manager import WorkspaceManager
 
@@ -179,6 +182,28 @@ def _save_mission_graph(repo: InMemoryRepository, mission: Mission) -> None:
         repo.save_mission_phase(phase)
     for feature in mission.features:
         repo.save_mission_feature(feature)
+
+
+def _deterministic_report(
+    *,
+    report_id: str = "VAL-pipeline-deterministic",
+    loop_id: int = 1,
+    verdict: ValidationVerdict = ValidationVerdict.PASS,
+) -> ValidationReport:
+    return ValidationReport(
+        id=report_id,
+        task_id="t1",
+        loop_id=loop_id,
+        candidate_state_id=f"CAND-t1-{loop_id}",
+        baseline_state_id=None,
+        verdict=verdict,
+        attempted_hunger_item_ids=["H-001"],
+        evidence_ids=["ev-pipeline"],
+        newly_passed_check_keys=["H-001:0"],
+        currently_passed_check_keys=["H-001:0"],
+        satisfied_hunger_item_ids=["H-001"],
+        has_real_progress=True,
+    )
 
 
 def test_factory_injects_handoff_processor(tmp_path: Path) -> None:
@@ -365,11 +390,11 @@ async def test_process_handoffs_runs_before_integration_and_validation(
         call_order.append("integrate")
         return original_integrate(*args, **kwargs)
 
-    original_validate = orchestrator.validation_gate.validate
+    original_run = orchestrator.validation_pipeline.run
 
     async def validate_spy(*args: object, **kwargs: object) -> object:
         call_order.append("validate")
-        return await original_validate(*args, **kwargs)
+        return await original_run(*args, **kwargs)
 
     monkeypatch.setattr(
         orchestrator.handoff_processor,
@@ -377,12 +402,85 @@ async def test_process_handoffs_runs_before_integration_and_validation(
         process_spy,
     )
     monkeypatch.setattr(orchestrator.integrator, "integrate", integrate_spy)
-    monkeypatch.setattr(orchestrator.validation_gate, "validate", validate_spy)
+    monkeypatch.setattr(orchestrator.validation_pipeline, "run", validate_spy)
 
     outcome = await orchestrator.step("t1")
 
     assert isinstance(outcome, LoopTrace)
     assert call_order[:3] == ["process_handoffs", "integrate", "validate"]
+
+
+async def test_orchestrator_uses_validation_pipeline_and_commit_receives_result(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo = InMemoryRepository()
+    item = HungerItem(
+        id="H-001",
+        title="produce report",
+        priority=1.0,
+        gap_score=1.0,
+        acceptance_checks=[
+            AcceptanceCheck(
+                check_type=AcceptanceCheckType.FILE_EXISTS,
+                params={"path": "report.md"},
+            ),
+        ],
+    )
+    _seed_task(repo, [item])
+    _save_mission_graph(repo, _mission_for_item())
+    actions = [
+        {
+            "tool_name": "write_file",
+            "args": {"path": "report.md", "content": "ok"},
+        }
+    ]
+    orchestrator = _build_full_orchestrator(
+        tmp_path=tmp_path,
+        repo=repo,
+        model_client=DummyModelClient.with_actions(actions),
+    )
+    pipeline_result = ValidationPipelineResult(
+        deterministic_report=_deterministic_report(),
+        scrutiny_report=None,
+        user_testing_report=None,
+        pipeline_verdict="pass",
+        stages_run=["deterministic"],
+    )
+    calls: list[dict[str, object]] = []
+
+    class _PipelineSpy:
+        async def run(self, *args: object, **kwargs: object) -> ValidationPipelineResult:
+            calls.append({"args": args, "kwargs": kwargs})
+            return pipeline_result
+
+    commit_inputs: list[object] = []
+
+    def apply_spy(candidate: object, report: object) -> dict[str, object]:
+        del candidate
+        commit_inputs.append(report)
+        return {"committed": False, "reason": "spy_reject"}
+
+    monkeypatch.setattr(orchestrator, "validation_pipeline", _PipelineSpy())
+    monkeypatch.setattr(orchestrator.commit_manager, "apply", apply_spy)
+
+    outcome = await orchestrator.step("t1")
+
+    assert isinstance(outcome, LoopTrace)
+    assert len(calls) == 1
+    assert calls[0]["args"] == ()
+    kwargs = calls[0]["kwargs"]
+    assert kwargs["task_id"] == "t1"
+    assert kwargs["loop_id"] == 1
+    assert kwargs["target_hunger_item_ids"] == ["H-001"]
+    assert isinstance(kwargs["mission"], Mission)
+    assert kwargs["mission"].mission_id == "mission-1"
+    assert isinstance(kwargs["phase"], MissionPhase)
+    assert kwargs["phase"].phase_id == "phase-1"
+    assert kwargs["budget"] is not None
+    assert commit_inputs == [pipeline_result]
+    assert outcome.validation_report_id == pipeline_result.deterministic_report.id
+    assert outcome.verdict == "pass"
 
 
 async def test_budgeted_mode_adds_refinement_work_instead_of_done(
