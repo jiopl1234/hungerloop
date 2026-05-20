@@ -76,25 +76,23 @@ class WorkerScheduler:
                 skipped_ids=assignment_ids,
                 cycle_detected=True,
             )
+        ordered_assignments = self._topologically_order_assignments(assignments)
 
         self.workspace_manager.ensure_task_workspace(task_id)
         workspace_root = self.workspace_manager.candidate_files_dir(task_id, loop_id)
         workspace_root.mkdir(parents=True, exist_ok=True)
 
-        completed_ids: set[str] = set()
         failed_ids: set[str] = set()
         skipped_ids: list[str] = []
         skipped_id_set: set[str] = set()
         final_handoffs: list[WorkerHandoff] = []
         evidence_by_assignment: dict[str, set[str]] = {}
 
-        for index, assignment in enumerate(assignments):
+        for index, assignment in enumerate(ordered_assignments):
             blocked_by = self._blocked_by(
                 assignment,
-                completed_ids=completed_ids,
                 failed_ids=failed_ids,
                 skipped_ids=skipped_id_set,
-                all_assignment_ids=set(assignment_ids),
             )
             if blocked_by is not None:
                 skipped_ids.append(assignment.assignment_id)
@@ -118,7 +116,7 @@ class WorkerScheduler:
                 )
             except _SchedulerSafetyStop as exc:
                 start = index + 1 if exc.current_completed else index
-                for remaining in assignments[start:]:
+                for remaining in ordered_assignments[start:]:
                     if remaining.assignment_id in skipped_id_set:
                         continue
                     skipped_ids.append(remaining.assignment_id)
@@ -134,8 +132,6 @@ class WorkerScheduler:
             final_handoffs.append(handoff)
             if self._handoff_failed(handoff):
                 failed_ids.add(assignment.assignment_id)
-            else:
-                completed_ids.add(assignment.assignment_id)
 
         self._emit_write_collisions(
             task_id=task_id,
@@ -351,22 +347,52 @@ class WorkerScheduler:
         return any(visit(assignment_id) for assignment_id in assignment_ids)
 
     @staticmethod
+    def _topologically_order_assignments(
+        assignments: list[Assignment],
+    ) -> list[Assignment]:
+        assignment_by_id = {
+            assignment.assignment_id: assignment for assignment in assignments
+        }
+        ordered: list[Assignment] = []
+        ordered_ids: set[str] = set()
+        remaining = list(assignments)
+
+        while remaining:
+            next_remaining: list[Assignment] = []
+            progressed = False
+            for assignment in remaining:
+                local_dependencies = [
+                    dependency_id
+                    for dependency_id in assignment.depends_on
+                    if dependency_id in assignment_by_id
+                ]
+                if all(
+                    dependency_id in ordered_ids
+                    for dependency_id in local_dependencies
+                ):
+                    ordered.append(assignment)
+                    ordered_ids.add(assignment.assignment_id)
+                    progressed = True
+                else:
+                    next_remaining.append(assignment)
+
+            if not progressed:
+                ordered.extend(next_remaining)
+                break
+            remaining = next_remaining
+
+        return ordered
+
+    @staticmethod
     def _blocked_by(
         assignment: Assignment,
         *,
-        completed_ids: set[str],
         failed_ids: set[str],
         skipped_ids: set[str],
-        all_assignment_ids: set[str],
     ) -> str | None:
         for dependency_id in assignment.depends_on:
-            if dependency_id in completed_ids:
-                continue
             if dependency_id in failed_ids or dependency_id in skipped_ids:
                 return dependency_id
-            if dependency_id in all_assignment_ids:
-                return dependency_id
-            return dependency_id
         return None
 
     def _emit_assignment_skipped(

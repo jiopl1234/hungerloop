@@ -203,6 +203,36 @@ async def test_topology_execution_serial(
     )
 
 
+async def test_out_of_order_acyclic_assignments_run_after_dependencies(
+    repo: InMemoryRepository,
+    tmp_path: Path,
+) -> None:
+    assignments = [
+        _assignment("B", depends_on=["A"]),
+        _assignment("A"),
+        _assignment("C", depends_on=["B"]),
+    ]
+    runtime = _RecordingRuntime(
+        {
+            "A": [_handoff("A")],
+            "B": [_handoff("B")],
+            "C": [_handoff("C")],
+        }
+    )
+
+    result = await _scheduler(repo=repo, tmp_path=tmp_path, runtime=runtime).execute_assignments(
+        TASK_ID,
+        LOOP_ID,
+        assignments,
+        _context_factory([]),
+    )
+
+    assert runtime.order == ["A", "B", "C"]
+    assert result.skipped_ids == []
+    assert [handoff.assignment_id for handoff in result.handoffs] == ["A", "B", "C"]
+    assert repo.list_events(TASK_ID, event_types=["worker.assignment_skipped"]) == []
+
+
 async def test_retry_succeeds_with_same_assignment_id_and_persists_audit(
     repo: InMemoryRepository,
     tmp_path: Path,
@@ -304,6 +334,38 @@ async def test_retry_exhaustion_skips_downstream_and_emits_lifecycle_events(
         failed_audit.read_text(encoding="utf-8")
     )
     assert failed_handoff.error_type == "model_call_error"
+
+
+async def test_prior_invocation_dependency_is_not_skipped_as_pending(
+    repo: InMemoryRepository,
+    tmp_path: Path,
+) -> None:
+    runtime = _RecordingRuntime(
+        {
+            "A": [_handoff("A")],
+            "B": [_handoff("B")],
+        }
+    )
+    scheduler = _scheduler(repo=repo, tmp_path=tmp_path, runtime=runtime)
+
+    first_result = await scheduler.execute_assignments(
+        TASK_ID,
+        LOOP_ID,
+        [_assignment("A")],
+        _context_factory([]),
+    )
+    second_result = await scheduler.execute_assignments(
+        TASK_ID,
+        LOOP_ID + 1,
+        [_assignment("B", depends_on=["A"])],
+        _context_factory([]),
+    )
+
+    assert runtime.order == ["A", "B"]
+    assert first_result.skipped_ids == []
+    assert second_result.skipped_ids == []
+    assert [handoff.assignment_id for handoff in second_result.handoffs] == ["B"]
+    assert repo.list_events(TASK_ID, event_types=["worker.assignment_skipped"]) == []
 
 
 async def test_failure_does_not_skip_independent_siblings(
