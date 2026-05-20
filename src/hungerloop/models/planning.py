@@ -55,10 +55,12 @@ class BudgetAllocation(BaseModel):
     1. **Resources** — ``max_tokens``, ``max_tool_calls``, ``max_wall_clock_seconds``.
        Enforced by :class:`~hungerloop.services.budget_guard.BudgetGuard` (M12 / ADR-002).
     2. **Concurrency** — ``max_workers_per_loop`` (planner-side; v0.5a fixed to 1).
-    3. **Retry policy** — ``max_model_retries``, ``retry_base_delay_seconds``,
-       ``retry_max_delay_seconds``. Consumed by ``ModelClient.complete_json``
-       (M6 / ADR-004); ``retry_max_delay_seconds`` is also the ceiling for
-       ``Retry-After``-driven sleeps.
+    3. **Retry policy** — ``max_assignment_retries``, ``max_model_retries``,
+       ``retry_base_delay_seconds``, ``retry_max_delay_seconds``. Assignment
+       retries are consumed by the M3 worker scheduler; model retries are
+       consumed by ``ModelClient.complete_json`` (M6 / ADR-004);
+       ``retry_max_delay_seconds`` is also the ceiling for ``Retry-After``-driven
+       sleeps.
     4. **Side-effect policy** — ``allow_shell``, ``allow_file_write``,
        ``allow_network``. Enforced by :class:`ToolHarness` (PRD §28.11).
 
@@ -77,6 +79,7 @@ class BudgetAllocation(BaseModel):
     max_new_items_per_loop: int = Field(default=3, ge=0)
 
     # Retry policy (read by ModelClient.complete_json)
+    max_assignment_retries: int = Field(default=1, ge=0)
     max_model_retries: int = Field(default=2, ge=0)
     retry_base_delay_seconds: float = Field(default=1.0, ge=0.0)
     retry_max_delay_seconds: float = Field(default=20.0, ge=0.0)
