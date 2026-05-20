@@ -2,13 +2,14 @@
 from __future__ import annotations
 
 from datetime import datetime
+from pathlib import Path
 
 import pytest
 
-from hungerloop.models.enums import LoopPhase
+from hungerloop.cli.orchestrator_factory import build_orchestrator
+from hungerloop.models.enums import LoopPhase, StopReason
 from hungerloop.models.events import EventType
 from hungerloop.models.hunger import (
-    HungerClockState,
     HungerItem,
     HungerLedger,
     HungerPolicy,
@@ -17,7 +18,7 @@ from hungerloop.models.hunger import (
 from hungerloop.models.mission import Mission, MissionFeature, MissionPhase
 from hungerloop.models.planning import BudgetAllocation
 from hungerloop.repository.in_memory_repo import InMemoryRepository
-from hungerloop.services.hunger_engine import HungerEngine
+from hungerloop.services.budget_allocator import BudgetAllocator
 from hungerloop.services.mission_planner import MissionPlanner, PlannerCycleError
 
 
@@ -104,28 +105,56 @@ def test_planner_raises_cycle_error() -> None:
     assert "F-B" in str(exc_info.value)
 
 
-def test_cycle_maps_to_safety_stop() -> None:
+async def test_cycle_maps_to_safety_stop(tmp_path: Path) -> None:
     repo = InMemoryRepository()
     repo.create_task("task-1", "cycle")
-    cycle = ["F-A", "F-B"]
-
-    repo.append_event(
-        EventType.PLANNER_CYCLE_DETECTED,
-        {"loop_id": 1, "cycle": cycle},
-        task_id="task-1",
-        loop_id=1,
+    repo.set_hunger_policy(
+        "task-1",
+        HungerPolicy(max_total_cost_usd=10.0, max_total_tokens=100_000),
     )
-    policy = HungerPolicy(max_total_cost_usd=0.0)
-    snapshot = HungerEngine().tick(
-        policy,
-        HungerClockState(),
+    repo.get_hunger_clock("task-1")
+    cycle_nodes = {"F-A", "F-B"}
+    features = [
+        _feature("F-A", "H-A", preconditions=["F-B"]),
+        _feature("F-B", "H-B", preconditions=["F-A"]),
+    ]
+    repo.save_hunger_ledger(
+        "task-1",
         HungerLedger(
             task_id="task-1",
-            items=[HungerItem(id="H-A", title="A")],
+            items=[
+                HungerItem(id="H-A", title="A"),
+                HungerItem(id="H-B", title="B"),
+            ],
         ),
     )
+    repo.save_mission(_mission(features))
 
-    events = repo.list_events("task-1", event_types=["PLANNER_CYCLE_DETECTED"])
-    assert events[0]["payload"]["cycle"] == cycle
-    assert snapshot.stop_reason is not None
-    assert snapshot.stop_reason.value == "safety_stop"
+    orchestrator = build_orchestrator(
+        repo=repo,
+        workspace_root=tmp_path,
+        budget_allocator=BudgetAllocator(max_workers_per_loop=2),
+        max_loops_safety_cap=1,
+    )
+
+    report = await orchestrator.run("task-1")
+
+    cycle_events = repo.list_events(
+        "task-1",
+        event_types=[EventType.PLANNER_CYCLE_DETECTED.value],
+    )
+    assert len(cycle_events) == 1
+    payload = cycle_events[0]["payload"]
+    assert isinstance(payload, dict)
+    reported_cycle = payload["cycle"]
+    assert isinstance(reported_cycle, list)
+    assert set(reported_cycle) == cycle_nodes
+    assert report.stop_reason is StopReason.SAFETY_STOP
+
+    event_types = [event["event_type"] for event in repo.list_events("task-1")]
+    assert event_types.index(
+        EventType.PLANNER_CYCLE_DETECTED.value
+    ) < event_types.index(EventType.SAFETY_STOP.value)
+    assert event_types.index(EventType.SAFETY_STOP.value) < event_types.index(
+        EventType.STOP_REPORT_CREATED.value
+    )
