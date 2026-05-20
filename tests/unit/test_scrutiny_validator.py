@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from hungerloop.models.blackboard import CandidateState
-from hungerloop.models.enums import LoopPhase, ValidationVerdict
+from hungerloop.models.enums import EvidenceType, LoopPhase, ValidationVerdict
 from hungerloop.models.hunger import HungerLedger
 from hungerloop.models.mission import Mission, MissionPhase
 from hungerloop.models.planning import BudgetAllocation
@@ -126,6 +126,8 @@ def _budget(
 def _setup(
     tmp_path: Path,
     results: list[SandboxRunResult],
+    *,
+    create_candidate_files: bool = True,
 ) -> tuple[
     ScrutinyValidator,
     InMemoryRepository,
@@ -145,7 +147,8 @@ def _setup(
 
     workspace_manager = WorkspaceManager(tmp_path)
     candidate_files = workspace_manager.candidate_files_dir(TASK_ID, LOOP_ID)
-    candidate_files.mkdir(parents=True, exist_ok=True)
+    if create_candidate_files:
+        candidate_files.mkdir(parents=True, exist_ok=True)
 
     sandbox = _RecordingSandboxRunner(results)
     validator = ScrutinyValidator(
@@ -173,6 +176,52 @@ async def test_pytest_invoked_via_sandbox(tmp_path: Path) -> None:
 
     assert sandbox.calls[0]["argv"] == PYTEST_ARGV
     assert sandbox.calls[0]["cwd"] == candidate_files.resolve()
+
+
+async def test_missing_candidate_workspace_blocks_without_creating_directory(
+    tmp_path: Path,
+) -> None:
+    validator, repo, sandbox, candidate, contract, phase, candidate_files = _setup(
+        tmp_path,
+        _success_results(),
+        create_candidate_files=False,
+    )
+
+    report = await validator.validate(
+        TASK_ID,
+        LOOP_ID,
+        candidate,
+        contract=contract,
+        phase=phase,
+        budget=_budget(),
+    )
+
+    assertions = repo.list_validation_assertions(
+        mission_id=MISSION_ID,
+        phase_id=PHASE_ID,
+    )
+    missing_workspace_events = repo.list_events(
+        TASK_ID,
+        event_types=["validation.scrutiny_workspace_missing"],
+    )
+
+    assert candidate_files.exists() is False
+    assert sandbox.calls == []
+    assert report.verdict is ValidationVerdict.FAIL
+    assert len(assertions) == 1
+    assert assertions[0].check_type == "scrutiny_workspace"
+    assert assertions[0].status == "blocked"
+    assert assertions[0].evidence_ids == report.evidence_ids
+    assert len(report.evidence_ids) == 1
+    evidence = repo._evidence[report.evidence_ids[0]]
+    assert evidence["type"] == EvidenceType.VALIDATION_CHECK.value
+    assert evidence["reason"] == "candidate_workspace_missing"
+    assert evidence["candidate_state_id"] == candidate.id
+    assert len(missing_workspace_events) == 1
+    assert missing_workspace_events[0]["payload"]["reason"] == (
+        "candidate_workspace_missing"
+    )
+    assert missing_workspace_events[0]["payload"]["phase_id"] == PHASE_ID
 
 
 async def test_ruff_invoked_via_sandbox(tmp_path: Path) -> None:

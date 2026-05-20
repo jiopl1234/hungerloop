@@ -1,8 +1,10 @@
 """Deterministic scrutiny validator for HungerLoop v0.6."""
 from __future__ import annotations
 
+from pathlib import Path
+
 from hungerloop.models.blackboard import CandidateState
-from hungerloop.models.enums import ValidationVerdict
+from hungerloop.models.enums import EvidenceType, ValidationVerdict
 from hungerloop.models.events import EventType
 from hungerloop.models.handoff import HandoffProcessingResult
 from hungerloop.models.mission import MissionPhase
@@ -25,6 +27,7 @@ _SCRUTINY_COMMANDS: list[tuple[str, list[str], str]] = [
     ("scrutiny_lint", ["ruff", "check", "src", "tests"], "ruff"),
     ("scrutiny_typecheck", ["mypy", "--strict", "src/"], "mypy"),
 ]
+_WORKSPACE_CHECK_TYPE = "scrutiny_workspace"
 _MAX_EVENT_OUTPUT_CHARS = 5000
 
 
@@ -59,7 +62,6 @@ class ScrutinyValidator:
             self.workspace_manager.root,
             f"tasks/{task_id}/candidates/loop_{loop_id:03d}/files",
         )
-        candidate_root.mkdir(parents=True, exist_ok=True)
 
         assertions: list[ValidationAssertion] = []
         evidence_ids: list[str] = []
@@ -78,6 +80,40 @@ class ScrutinyValidator:
                 task_id=task_id,
                 loop_id=loop_id,
             )
+
+        if not candidate_root.is_dir():
+            report = self._missing_workspace_report(
+                task_id=task_id,
+                loop_id=loop_id,
+                candidate=candidate,
+                contract=contract,
+                phase=phase,
+                candidate_root=candidate_root,
+            )
+            if emit_lifecycle_events:
+                self.repo.append_event(
+                    EventType.VALIDATION_SCRUTINY_COMPLETED,
+                    {
+                        **self._event_payload(contract=contract, phase=phase),
+                        "validation_report_id": report.id,
+                        "verdict": report.verdict.value,
+                        "assertions": [
+                            {
+                                "assertion_id": self._assertion_id(
+                                    task_id,
+                                    loop_id,
+                                    _WORKSPACE_CHECK_TYPE,
+                                ),
+                                "check_type": _WORKSPACE_CHECK_TYPE,
+                                "status": "blocked",
+                                "evidence_ids": list(report.evidence_ids),
+                            }
+                        ],
+                    },
+                    task_id=task_id,
+                    loop_id=loop_id,
+                )
+            return report
 
         for check_type, argv, label in _SCRUTINY_COMMANDS:
             timeout = budget.scrutiny_timeout_seconds
@@ -185,6 +221,79 @@ class ScrutinyValidator:
             )
         return report
 
+    def _missing_workspace_report(
+        self,
+        *,
+        task_id: str,
+        loop_id: int,
+        candidate: CandidateState,
+        contract: ValidationContract,
+        phase: MissionPhase,
+        candidate_root: Path,
+    ) -> ValidationReport:
+        evidence_id = self.repo.save_evidence(
+            task_id=task_id,
+            loop_id=loop_id,
+            evidence_type=EvidenceType.VALIDATION_CHECK,
+            payload={
+                **self._event_payload(contract=contract, phase=phase),
+                "candidate_state_id": candidate.id,
+                "workspace_ref": candidate.workspace_ref,
+                "candidate_root": str(candidate_root),
+                "check_type": _WORKSPACE_CHECK_TYPE,
+                "reason": "candidate_workspace_missing",
+                "success": False,
+            },
+        )
+        assertion = self._persist_assertion(
+            task_id=task_id,
+            loop_id=loop_id,
+            candidate=candidate,
+            phase=phase,
+            check_type=_WORKSPACE_CHECK_TYPE,
+            label="workspace",
+            argv=[],
+            timeout=0,
+            status="blocked",
+            evidence_id=evidence_id,
+            evidence_requirement="validation_check",
+            params={
+                "workspace_ref": candidate.workspace_ref,
+                "candidate_root": str(candidate_root),
+                "reason": "candidate_workspace_missing",
+            },
+        )
+        self.repo.append_event(
+            EventType.VALIDATION_SCRUTINY_WORKSPACE_MISSING,
+            {
+                **self._event_payload(contract=contract, phase=phase),
+                "candidate_state_id": candidate.id,
+                "workspace_ref": candidate.workspace_ref,
+                "candidate_root": str(candidate_root),
+                "assertion_id": assertion.assertion_id,
+                "evidence_ids": list(assertion.evidence_ids),
+                "reason": "candidate_workspace_missing",
+            },
+            task_id=task_id,
+            loop_id=loop_id,
+        )
+        return ValidationReport(
+            id=f"VAL-scrutiny-{task_id}-{loop_id}",
+            task_id=task_id,
+            loop_id=loop_id,
+            candidate_state_id=candidate.id,
+            baseline_state_id=None,
+            verdict=ValidationVerdict.FAIL,
+            evidence_ids=[evidence_id],
+            missing_evidence=[
+                f"Candidate workspace does not exist: {candidate.workspace_ref}"
+            ],
+            recommended_next_actions=[
+                "Create or copy the candidate workspace before scrutiny validation."
+            ],
+            has_real_progress=False,
+        )
+
     def _persist_assertion(
         self,
         *,
@@ -198,6 +307,8 @@ class ScrutinyValidator:
         timeout: int,
         status: ValidationAssertionStatus,
         evidence_id: str | None,
+        evidence_requirement: str = "sandbox_run",
+        params: dict[str, object] | None = None,
     ) -> ValidationAssertion:
         evidence_ids = [evidence_id] if evidence_id is not None else []
         assertion = ValidationAssertion(
@@ -206,8 +317,12 @@ class ScrutinyValidator:
             title=f"Scrutiny {label}",
             description=f"Run {label} scrutiny for candidate {candidate.id}.",
             check_type=check_type,
-            params={"argv": list(argv), "timeout": timeout},
-            evidence_requirements=["sandbox_run"],
+            params=(
+                params
+                if params is not None
+                else {"argv": list(argv), "timeout": timeout}
+            ),
+            evidence_requirements=[evidence_requirement],
         )
         self.repo.save_validation_assertion(assertion)
         self.repo.update_assertion_status(
