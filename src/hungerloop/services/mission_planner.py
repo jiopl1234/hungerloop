@@ -98,6 +98,29 @@ class MissionPlanner:
                 candidates.append(candidate)
 
         sorted_candidates = sorted(candidates, key=self._candidate_sort_key)
+        max_parallel_features = mission.max_parallel_features or 1
+        selected_count = min(
+            budget.max_workers_per_loop,
+            len(sorted_candidates),
+            max_parallel_features,
+        )
+        if selected_count < 1:
+            for candidate in sorted_candidates:
+                skip_reasons[candidate.feature.feature_id] = "not_selected_budget_cap"
+            return LoopPlan(
+                task_id=task_id,
+                loop_id=loop_id,
+                selected_hunger_item_ids=[],
+                assignments=[],
+                phase=budget.phase,
+                rationale=self._rationale(
+                    mission=mission,
+                    selected_feature_ids=set(),
+                    skip_reasons=skip_reasons,
+                    item_by_id=item_by_id,
+                ),
+            )
+
         candidate_by_feature_id = {
             candidate.feature.feature_id: candidate for candidate in sorted_candidates
         }
@@ -109,12 +132,6 @@ class MissionPlanner:
             [candidate.feature.feature_id for candidate in sorted_candidates],
         )
 
-        max_parallel_features = mission.max_parallel_features or 1
-        selected_count = min(
-            budget.max_workers_per_loop,
-            len(sorted_candidates),
-            max_parallel_features,
-        )
         selected_feature_ids = self._select_feature_ids(
             sorted_candidates,
             dependencies_by_feature,

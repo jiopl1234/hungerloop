@@ -208,6 +208,33 @@ def test_cap_min_of_three_bounds(repo: InMemoryRepository) -> None:
     assert len(plan.assignments) == 2
 
 
+def test_m_less_than_one_returns_empty_before_dependency_analysis(
+    repo: InMemoryRepository,
+) -> None:
+    features = [
+        _feature("F-A", "H-A", preconditions=["F-B"]),
+        _feature("F-B", "H-B", preconditions=["F-A"]),
+    ]
+    _save_ledger(repo, [_item("H-A"), _item("H-B")])
+    zero_worker_budget = BudgetAllocation.model_construct(
+        phase=LoopPhase.EXPLORE,
+        max_workers_per_loop=0,
+        max_assignment_retries=1,
+    )
+
+    plan = MissionPlanner(repo).plan(
+        "task-1",
+        1,
+        _snapshot(),
+        zero_worker_budget,
+        mission=_mission(features, max_parallel_features=3),
+    )
+
+    assert plan.assignments == []
+    assert plan.selected_hunger_item_ids == []
+    assert "not_selected_budget_cap" in plan.rationale
+
+
 def test_empty_plan_when_no_candidates(repo: InMemoryRepository) -> None:
     feature = _feature("F-done", "H-done", status="done")
     _save_ledger(repo, [_item("H-done")])
