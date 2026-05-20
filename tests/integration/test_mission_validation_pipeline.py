@@ -23,6 +23,7 @@ from hungerloop.services.sandbox_runner import SandboxRunResult
 from hungerloop.services.validation_gate import ValidationGate
 from hungerloop.services.validation_pipeline import ValidationPipeline
 from hungerloop.services.validators.scrutiny_validator import ScrutinyValidator
+from hungerloop.services.validators.user_testing_validator import UserTestingValidator
 from hungerloop.services.workspace_manager import WorkspaceManager
 
 TASK_ID = "task-1"
@@ -130,6 +131,7 @@ def _seed_mission_repo(tmp_path: Path) -> tuple[SQLiteRepository, WorkspaceManag
                     title="Contract assertion",
                     description="Contract assertion",
                     check_type="behavioral_assertion",
+                    params={"file": "report.md", "contains": ["ok"]},
                 )
             ],
         )
@@ -171,6 +173,11 @@ async def test_mission_validation_pipeline_scrutiny_result_keeps_commit_determin
             workspace_manager=workspace_manager,
             handoff_processor=handoff_processor,
         ),
+        user_testing_validator=UserTestingValidator(
+            repo=repo,
+            sandbox_runner=sandbox,  # type: ignore[arg-type]
+            workspace_manager=workspace_manager,
+        ),
     )
     mission = repo.get_mission(TASK_ID)
     assert mission is not None
@@ -186,11 +193,13 @@ async def test_mission_validation_pipeline_scrutiny_result_keeps_commit_determin
         budget=BudgetAllocation(phase=LoopPhase.EXPLORE),
     )
 
-    assert result.stages_run == ["deterministic", "scrutiny"]
+    assert result.stages_run == ["deterministic", "scrutiny", "user_testing"]
     assert result.deterministic_report.verdict is ValidationVerdict.PASS
     assert result.deterministic_report.newly_passed_check_keys == ["H-001:0"]
     assert result.scrutiny_report is not None
     assert result.scrutiny_report.verdict is ValidationVerdict.PASS
+    assert result.user_testing_report is not None
+    assert result.user_testing_report.verdict is ValidationVerdict.PASS
 
     decision = CommitManager(repo, workspace_manager).apply(_candidate(), result)
     best_state = repo.get_best_state(TASK_ID)

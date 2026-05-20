@@ -236,6 +236,7 @@ class ValidationPipeline:
             )
             return result
 
+        boundary_contract = self._contract_for_mission(mission)
         scrutiny_report = await self._run_scrutiny_stage(
             task_id=task_id,
             loop_id=loop_id,
@@ -243,6 +244,7 @@ class ValidationPipeline:
             mission=mission,
             phase=phase,
             budget=budget,
+            contract=boundary_contract,
         )
         stages_run.append("scrutiny")
 
@@ -301,6 +303,7 @@ class ValidationPipeline:
             mission=mission,
             phase=phase,
             budget=budget,
+            contract=boundary_contract,
         )
         stages_run.append("user_testing")
 
@@ -349,10 +352,10 @@ class ValidationPipeline:
         mission: Mission,
         phase: MissionPhase,
         budget: BudgetAllocation,
+        contract: ValidationContract,
     ) -> ValidationReport:
         assert self.scrutiny_validator is not None
         self.cost_guard.assert_within_budget(task_id)
-        contract = self._contract_for_mission(mission)
         self._emit_scrutiny_started(
             task_id=task_id,
             loop_id=loop_id,
@@ -386,10 +389,16 @@ class ValidationPipeline:
         mission: Mission,
         phase: MissionPhase,
         budget: BudgetAllocation,
+        contract: ValidationContract,
     ) -> ValidationReport:
         assert self.user_testing_validator is not None
         self.cost_guard.assert_within_budget(task_id)
-        contract = self._contract_for_mission(mission)
+        self._emit_user_testing_started(
+            task_id=task_id,
+            loop_id=loop_id,
+            mission=mission,
+            phase=phase,
+        )
         report = await self.user_testing_validator.validate(
             task_id=task_id,
             loop_id=loop_id,
@@ -399,6 +408,21 @@ class ValidationPipeline:
             budget=budget,
         )
         self.cost_guard.assert_within_budget(task_id)
+        self._emit_user_testing_completed(
+            task_id=task_id,
+            loop_id=loop_id,
+            mission=mission,
+            phase=phase,
+            report=report,
+        )
+        if report.verdict == ValidationVerdict.FAIL:
+            self._emit_user_testing_failed(
+                task_id=task_id,
+                loop_id=loop_id,
+                mission=mission,
+                phase=phase,
+                report=report,
+            )
         return report
 
     def _contract_for_mission(self, mission: Mission) -> ValidationContract:
@@ -550,6 +574,63 @@ class ValidationPipeline:
             {
                 **self._base_payload(mission=mission, phase=phase),
                 "reason": reason,
+            },
+            task_id=task_id,
+            loop_id=loop_id,
+        )
+
+    def _emit_user_testing_started(
+        self,
+        *,
+        task_id: str,
+        loop_id: int,
+        mission: Mission,
+        phase: MissionPhase,
+    ) -> None:
+        self.repo.append_event(
+            EventType.VALIDATION_USER_TESTING_STARTED,
+            self._base_payload(mission=mission, phase=phase),
+            task_id=task_id,
+            loop_id=loop_id,
+        )
+
+    def _emit_user_testing_completed(
+        self,
+        *,
+        task_id: str,
+        loop_id: int,
+        mission: Mission,
+        phase: MissionPhase,
+        report: ValidationReport,
+    ) -> None:
+        self.repo.append_event(
+            EventType.VALIDATION_USER_TESTING_COMPLETED,
+            {
+                **self._base_payload(mission=mission, phase=phase),
+                "validation_report_id": report.id,
+                "verdict": report.verdict.value,
+            },
+            task_id=task_id,
+            loop_id=loop_id,
+        )
+
+    def _emit_user_testing_failed(
+        self,
+        *,
+        task_id: str,
+        loop_id: int,
+        mission: Mission,
+        phase: MissionPhase,
+        report: ValidationReport,
+    ) -> None:
+        self.repo.append_event(
+            EventType.VALIDATION_USER_TESTING_FAILED,
+            {
+                **self._base_payload(mission=mission, phase=phase),
+                "validation_report_id": report.id,
+                "verdict": report.verdict.value,
+                "missing_evidence": list(report.missing_evidence),
+                "recommended_next_actions": list(report.recommended_next_actions),
             },
             task_id=task_id,
             loop_id=loop_id,

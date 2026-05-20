@@ -98,6 +98,7 @@ def _pipeline(
     *,
     deterministic_verdict: ValidationVerdict = ValidationVerdict.PASS,
     scrutiny_verdict: ValidationVerdict = ValidationVerdict.PASS,
+    user_testing_verdict: ValidationVerdict | None = None,
     cost_guard: _RecordingCostGuard | None = None,
 ) -> tuple[
     ValidationPipeline,
@@ -121,6 +122,14 @@ def _pipeline(
         cost_guard=guard,
         deterministic_validator=deterministic,
         scrutiny_validator=scrutiny,
+        user_testing_validator=(
+            _StageValidator(
+                _report(user_testing_verdict, report_id="VAL-user-testing"),
+                "user_testing",
+            )
+            if user_testing_verdict is not None
+            else None
+        ),
     )
     return pipeline, repo, deterministic, scrutiny, guard
 
@@ -355,6 +364,33 @@ async def test_user_testing_runs_after_scrutiny_pass_when_configured() -> None:
     assert result.user_testing_report is not None
     assert len(user_testing.calls) == 1
     assert guard.calls == [TASK_ID, TASK_ID, TASK_ID, TASK_ID, TASK_ID, TASK_ID]
+
+
+async def test_user_testing_failure_emits_failure_event() -> None:
+    pipeline, repo, _deterministic, _scrutiny, _guard = _pipeline(
+        deterministic_verdict=ValidationVerdict.PASS,
+        scrutiny_verdict=ValidationVerdict.PASS,
+        user_testing_verdict=ValidationVerdict.FAIL,
+    )
+
+    result = await pipeline.run(
+        TASK_ID,
+        LOOP_ID,
+        _candidate(),
+        ["H-001"],
+        mission=_mission(),
+        phase=_phase("validating"),
+        budget=_budget(),
+    )
+
+    failed_events = repo.list_events(
+        TASK_ID,
+        event_types=["validation.user_testing_failed"],
+    )
+    assert result.stages_run == ["deterministic", "scrutiny", "user_testing"]
+    assert result.pipeline_verdict == "fail"
+    assert len(failed_events) == 1
+    assert failed_events[0]["payload"]["verdict"] == "fail"
 
 
 async def test_pipeline_lifecycle_events() -> None:

@@ -38,6 +38,7 @@ from hungerloop.services.tools import default_tool_registry
 from hungerloop.services.validation_gate import ValidationGate
 from hungerloop.services.validation_pipeline import ValidationPipeline
 from hungerloop.services.validators.scrutiny_validator import ScrutinyValidator
+from hungerloop.services.validators.user_testing_validator import UserTestingValidator
 from hungerloop.services.worker_runtime import WorkerRuntime
 from hungerloop.services.workspace_manager import WorkspaceManager
 from hungerloop.services.workspace_reader import WorkspaceReader
@@ -84,6 +85,11 @@ def build_orchestrator(
             sandbox_runner=sandbox,
             workspace_manager=workspace_manager,
             handoff_processor=handoff_processor,
+        ),
+        user_testing_validator=UserTestingValidator(
+            repo=repo,
+            sandbox_runner=sandbox,
+            workspace_manager=workspace_manager,
         ),
     )
 
