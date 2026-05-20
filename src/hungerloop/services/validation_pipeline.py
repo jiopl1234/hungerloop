@@ -22,7 +22,7 @@ from hungerloop.services.cost_guard import CostGuard
 from hungerloop.services.validation_gate import ValidationGate
 from hungerloop.services.validators.deterministic_validator import DeterministicValidator
 
-ValidationPipelineVerdict = Literal["pass", "partial", "fail", "skipped"]
+ValidationPipelineVerdict = Literal["pass", "fail", "skipped"]
 ValidationPipelineStage = Literal["deterministic", "scrutiny", "user_testing"]
 
 _CONTINUE_VERDICTS = {ValidationVerdict.PASS, ValidationVerdict.PARTIAL}
@@ -213,13 +213,18 @@ class ValidationPipeline:
                 phase=phase,
                 reason="scrutiny_validator_unavailable",
             )
+            self._emit_user_testing_skipped(
+                task_id=task_id,
+                loop_id=loop_id,
+                mission=mission,
+                phase=phase,
+                reason="scrutiny_validator_unavailable",
+            )
             result = ValidationPipelineResult(
                 deterministic_report=deterministic_report,
                 scrutiny_report=None,
                 user_testing_report=None,
-                pipeline_verdict=self._pipeline_verdict_from_validation(
-                    deterministic_report.verdict
-                ),
+                pipeline_verdict="skipped",
                 stages_run=stages_run,
             )
             self._emit_pipeline_completed(
@@ -266,13 +271,18 @@ class ValidationPipeline:
             return result
 
         if self.user_testing_validator is None:
+            self._emit_user_testing_skipped(
+                task_id=task_id,
+                loop_id=loop_id,
+                mission=mission,
+                phase=phase,
+                reason="user_testing_validator_unavailable",
+            )
             result = ValidationPipelineResult(
                 deterministic_report=deterministic_report,
                 scrutiny_report=scrutiny_report,
                 user_testing_report=None,
-                pipeline_verdict=self._pipeline_verdict_from_validation(
-                    scrutiny_report.verdict
-                ),
+                pipeline_verdict="skipped",
                 stages_run=stages_run,
             )
             self._emit_pipeline_completed(
@@ -403,7 +413,7 @@ class ValidationPipeline:
         if verdict == ValidationVerdict.PASS:
             return "pass"
         if verdict == ValidationVerdict.PARTIAL:
-            return "partial"
+            return "pass"
         return "fail"
 
     @staticmethod

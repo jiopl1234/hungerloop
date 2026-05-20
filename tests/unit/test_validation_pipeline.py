@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import Literal
+from typing import Literal, get_args
 
 import pytest
 
@@ -12,7 +12,10 @@ from hungerloop.models.planning import BudgetAllocation
 from hungerloop.models.validation import ValidationReport
 from hungerloop.repository.in_memory_repo import InMemoryRepository
 from hungerloop.services.cost_guard import SafetyStopError
-from hungerloop.services.validation_pipeline import ValidationPipeline
+from hungerloop.services.validation_pipeline import (
+    ValidationPipeline,
+    ValidationPipelineVerdict,
+)
 
 TASK_ID = "task-1"
 LOOP_ID = 4
@@ -138,7 +141,7 @@ async def test_legacy_path_runs_only_deterministic() -> None:
     )
 
     assert result.stages_run == ["deterministic"]
-    assert result.pipeline_verdict == "partial"
+    assert result.pipeline_verdict == "pass"
     assert result.deterministic_report.verdict == ValidationVerdict.PARTIAL
     assert result.scrutiny_report is None
     assert result.user_testing_report is None
@@ -150,6 +153,10 @@ async def test_legacy_path_runs_only_deterministic() -> None:
     assert "validation.pipeline_completed" in event_types
     assert not any(str(event_type).startswith("validation.scrutiny_") for event_type in event_types)
     assert "validation.user_testing_started" not in event_types
+
+
+def test_pipeline_verdict_literal_matches_m4_spec() -> None:
+    assert set(get_args(ValidationPipelineVerdict)) == {"pass", "fail", "skipped"}
 
 
 async def test_in_progress_skips_scrutiny() -> None:
@@ -174,6 +181,46 @@ async def test_in_progress_skips_scrutiny() -> None:
     assert repo.list_events(TASK_ID, event_types=["validation.scrutiny_started"]) == []
 
 
+async def test_validating_boundary_without_scrutiny_validator_returns_skipped() -> None:
+    repo = InMemoryRepository()
+    guard = _RecordingCostGuard()
+    deterministic = _StageValidator(
+        _report(ValidationVerdict.PASS, report_id="VAL-deterministic"),
+        "deterministic",
+    )
+    pipeline = ValidationPipeline(
+        repo=repo,
+        cost_guard=guard,
+        deterministic_validator=deterministic,
+        scrutiny_validator=None,
+    )
+
+    result = await pipeline.run(
+        TASK_ID,
+        LOOP_ID,
+        _candidate(),
+        ["H-001"],
+        mission=_mission(),
+        phase=_phase("validating"),
+        budget=_budget(),
+    )
+
+    assert result.stages_run == ["deterministic"]
+    assert result.pipeline_verdict == "skipped"
+    assert result.scrutiny_report is None
+    assert result.user_testing_report is None
+    assert guard.calls == [TASK_ID, TASK_ID]
+    skipped = repo.list_events(TASK_ID, event_types=["validation.scrutiny_skipped"])
+    assert skipped
+    assert skipped[0]["payload"]["reason"] == "scrutiny_validator_unavailable"
+    user_testing_skipped = repo.list_events(
+        TASK_ID,
+        event_types=["validation.user_testing_skipped"],
+    )
+    assert user_testing_skipped
+    assert user_testing_skipped[0]["payload"]["reason"] == "scrutiny_validator_unavailable"
+
+
 async def test_scrutiny_runs_after_deterministic_pass() -> None:
     pipeline, repo, _deterministic, scrutiny, guard = _pipeline(
         deterministic_verdict=ValidationVerdict.PASS,
@@ -191,12 +238,18 @@ async def test_scrutiny_runs_after_deterministic_pass() -> None:
     )
 
     assert result.stages_run == ["deterministic", "scrutiny"]
-    assert result.pipeline_verdict == "pass"
+    assert result.pipeline_verdict == "skipped"
     assert result.scrutiny_report is not None
     assert len(scrutiny.calls) == 1
     assert guard.calls == [TASK_ID, TASK_ID, TASK_ID, TASK_ID]
     assert repo.list_events(TASK_ID, event_types=["validation.scrutiny_started"])
     assert repo.list_events(TASK_ID, event_types=["validation.scrutiny_completed"])
+    user_testing_skipped = repo.list_events(
+        TASK_ID,
+        event_types=["validation.user_testing_skipped"],
+    )
+    assert user_testing_skipped
+    assert user_testing_skipped[0]["payload"]["reason"] == "user_testing_validator_unavailable"
 
 
 async def test_deterministic_partial_allows_scrutiny() -> None:

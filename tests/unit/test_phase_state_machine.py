@@ -289,7 +289,7 @@ def test_validating_does_not_complete_with_deterministic_regression() -> None:
     assert _event_payloads(repo, "mission.phase_completed") == []
 
 
-def test_validating_does_not_complete_on_partial_pipeline_verdict() -> None:
+def test_validating_does_not_complete_on_skipped_pipeline_verdict() -> None:
     repo = _repo_with_phase(
         phase_status="validating",
         feature_statuses=["done", "done"],
@@ -301,7 +301,7 @@ def test_validating_does_not_complete_on_partial_pipeline_verdict() -> None:
             deterministic=ValidationVerdict.PARTIAL,
             scrutiny=ValidationVerdict.PASS,
             user_testing=ValidationVerdict.PASS,
-            pipeline_verdict="partial",
+            pipeline_verdict="skipped",
         ),
         validation_phase_id=PHASE_ID,
     )
