@@ -72,7 +72,7 @@ def build_orchestrator(
 
     return LoopOrchestrator(
         repo=repo,
-        hunger_engine=HungerEngine(),
+        hunger_engine=HungerEngine(repo),
         workspace_manager=workspace_manager,
         budget_allocator=budget_allocator or BudgetAllocator(),
         planner=RuleBasedPlanner(repo),

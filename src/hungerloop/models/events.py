@@ -74,6 +74,13 @@ class EventType(str, Enum):
     CHECK_FAILED = "check_failed"
     CHECK_REGRESSED = "check_regressed"
 
+    # ----- Mission phase state machine (v0.6 M4) -------------------------
+    MISSION_PHASE_STARTED = "mission.phase_started"
+    MISSION_PHASE_VALIDATION_STARTED = "mission.phase_validation_started"
+    MISSION_PHASE_VALIDATION_FAILED = "mission.phase_validation_failed"
+    MISSION_PHASE_COMPLETED = "mission.phase_completed"
+    PHASE_TRANSITION_REJECTED = "PHASE_TRANSITION_REJECTED"
+
     # ----- Candidate decisions (v0.5d.0) --------------------------------
     CANDIDATE_CREATED = "candidate_created"
     CANDIDATE_COMMITTED = "candidate_committed"

@@ -28,9 +28,9 @@ LEGACY_EVENT_NAMES = {
 def test_every_event_value_uses_supported_wire_format() -> None:
     pattern = re.compile(
         r"^([a-z][a-z0-9_]*|worker\.(handoff|assignment)_[a-z0-9_]+|"
-        r"validation\.[a-z0-9_]+|"
+        r"validation\.[a-z0-9_]+|mission\.[a-z0-9_]+|"
         r"HANDOFF_BLOCKER_ON_CLOSED_ITEM|WORKSPACE_WRITE_COLLISION|"
-        r"PLANNER_CYCLE_DETECTED)$"
+        r"PLANNER_CYCLE_DETECTED|PHASE_TRANSITION_REJECTED)$"
     )
     for member in EventType:
         assert pattern.match(member.value), (
@@ -186,6 +186,19 @@ def test_v0_6_m4_validation_pipeline_additions_present() -> None:
         "validation.scrutiny_completed",
         "validation.scrutiny_skipped",
         "validation.user_testing_skipped",
+    }
+    actual = {m.value for m in EventType}
+    assert expected <= actual
+
+
+def test_v0_6_m4_phase_state_machine_additions_present() -> None:
+    """v0.6 M4 adds mission phase state-machine audit events."""
+    expected = {
+        "mission.phase_started",
+        "mission.phase_validation_started",
+        "mission.phase_validation_failed",
+        "mission.phase_completed",
+        "PHASE_TRANSITION_REJECTED",
     }
     actual = {m.value for m in EventType}
     assert expected <= actual

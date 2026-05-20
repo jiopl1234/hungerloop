@@ -35,6 +35,7 @@ from hungerloop.models.planning import Assignment, BudgetAllocation, LoopPlan
 from hungerloop.models.tracing import LoopTrace, StopReport
 from hungerloop.models.validation import ValidationReport
 from hungerloop.models.worker import WorkerHandoff, WorkerResult
+from hungerloop.repository.migration_errors import IllegalPhaseTransition
 from hungerloop.repository.protocol import RepositoryProtocol
 from hungerloop.services.budget_allocator import BudgetAllocator
 from hungerloop.services.commit_manager import CommitManager
@@ -102,6 +103,8 @@ class LoopOrchestrator:
     ) -> None:
         self.repo = repo
         self.hunger_engine = hunger_engine
+        if self.hunger_engine.repo is None:
+            self.hunger_engine.repo = repo
         self.workspace_manager = workspace_manager
         self.budget_allocator = budget_allocator
         self.planner = planner
@@ -164,7 +167,11 @@ class LoopOrchestrator:
         previous_phase = self.repo.get_last_phase(task_id)
 
         snapshot = self.hunger_engine.tick(
-            policy, clock, ledger, previous_phase=previous_phase
+            policy,
+            clock,
+            ledger,
+            previous_phase=previous_phase,
+            task_id=task_id,
         )
 
         budgeted = self._maybe_expand_or_stop_budgeted_refinement(
@@ -721,7 +728,11 @@ class LoopOrchestrator:
 
         refreshed_ledger = self.repo.get_hunger_ledger(task_id)
         refreshed_snapshot = self.hunger_engine.tick(
-            policy, clock, refreshed_ledger, previous_phase=previous_phase
+            policy,
+            clock,
+            refreshed_ledger,
+            previous_phase=previous_phase,
+            task_id=task_id,
         )
         return refreshed_ledger, refreshed_snapshot
 
@@ -780,6 +791,16 @@ class LoopOrchestrator:
         # can detect D10 (stopped task with no trace) cleanly.
         try:
             trace_loop_id = loop_id if loop_id is not None else self.repo.next_loop_id(task_id)
+            if isinstance(exc, IllegalPhaseTransition):
+                self.repo.append_event(
+                    EventType.PHASE_TRANSITION_REJECTED,
+                    {
+                        "error_type": type(exc).__name__,
+                        "error_message": str(exc)[:240],
+                    },
+                    task_id=task_id,
+                    loop_id=trace_loop_id,
+                )
             error_trace = LoopTrace(
                 task_id=task_id,
                 loop_id=trace_loop_id,
