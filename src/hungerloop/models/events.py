@@ -86,6 +86,11 @@ class EventType(str, Enum):
     MISSION_PHASE_COMPLETED = "mission.phase_completed"
     PHASE_TRANSITION_REJECTED = "PHASE_TRANSITION_REJECTED"
 
+    # ----- Mission artifact mirror regeneration (v0.6 M5) -----------------
+    MISSION_STATE_REGENERATED = "mission.state_regenerated"
+    MISSION_STATE_REGENERATION_SLOW = "MISSION_STATE_REGENERATION_SLOW"
+    MISSION_STATE_REGENERATION_FAILED = "MISSION_STATE_REGENERATION_FAILED"
+
     # ----- Candidate decisions (v0.5d.0) --------------------------------
     CANDIDATE_CREATED = "candidate_created"
     CANDIDATE_COMMITTED = "candidate_committed"

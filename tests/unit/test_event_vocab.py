@@ -30,7 +30,8 @@ def test_every_event_value_uses_supported_wire_format() -> None:
         r"^([a-z][a-z0-9_]*|worker\.(handoff|assignment)_[a-z0-9_]+|"
         r"validation\.[a-z0-9_]+|mission\.[a-z0-9_]+|"
         r"HANDOFF_BLOCKER_ON_CLOSED_ITEM|WORKSPACE_WRITE_COLLISION|"
-        r"PLANNER_CYCLE_DETECTED|PHASE_TRANSITION_REJECTED)$"
+        r"PLANNER_CYCLE_DETECTED|PHASE_TRANSITION_REJECTED|"
+        r"MISSION_STATE_REGENERATION_(SLOW|FAILED))$"
     )
     for member in EventType:
         assert pattern.match(member.value), (
@@ -199,6 +200,17 @@ def test_v0_6_m4_phase_state_machine_additions_present() -> None:
         "mission.phase_validation_failed",
         "mission.phase_completed",
         "PHASE_TRANSITION_REJECTED",
+    }
+    actual = {m.value for m in EventType}
+    assert expected <= actual
+
+
+def test_v0_6_m5_mission_state_regeneration_additions_present() -> None:
+    """v0.6 M5 adds mission artifact mirror regeneration audit events."""
+    expected = {
+        "mission.state_regenerated",
+        "MISSION_STATE_REGENERATION_SLOW",
+        "MISSION_STATE_REGENERATION_FAILED",
     }
     actual = {m.value for m in EventType}
     assert expected <= actual
