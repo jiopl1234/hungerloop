@@ -10,12 +10,15 @@ and persists state transitions via the repository protocol (Task 14).
 
 from __future__ import annotations
 
-from typing import TypedDict
+from pathlib import Path
+from typing import Protocol, TypedDict
 
 from hungerloop.models.blackboard import BestState, CandidateState
 from hungerloop.models.enums import ValidationVerdict
+from hungerloop.models.events import EventType
 from hungerloop.models.validation import ValidationReport
 from hungerloop.repository.protocol import RepositoryProtocol
+from hungerloop.services.mission_state_updater import MissionStateUpdater
 from hungerloop.services.validation_gate import make_check_key
 from hungerloop.services.validation_pipeline import ValidationPipelineResult
 from hungerloop.services.workspace_manager import WorkspaceManager
@@ -25,16 +28,32 @@ class CommitDecision(TypedDict):
     """Result of a commit/reject decision."""
     committed: bool
     reason: str
+    verdict: ValidationVerdict
+
+
+class _MissionStateUpdaterProtocol(Protocol):
+    """Narrow protocol for commit-tail mission artifact regeneration."""
+
+    def regenerate(
+        self,
+        task_id: str,
+        *,
+        best_workspace_root: Path,
+    ) -> object: ...
 
 
 class CommitManager:
     """Decide whether to promote or reject a candidate based on validation."""
 
     def __init__(
-        self, repo: RepositoryProtocol, workspace_manager: WorkspaceManager
+        self,
+        repo: RepositoryProtocol,
+        workspace_manager: WorkspaceManager,
+        mission_state_updater: _MissionStateUpdaterProtocol | None = None,
     ) -> None:
         self.repo = repo
         self.workspace_manager = workspace_manager
+        self.mission_state_updater = mission_state_updater or MissionStateUpdater(repo)
 
     def apply(
         self,
@@ -53,19 +72,13 @@ class CommitManager:
             A decision with ``committed: bool`` and ``reason: str``.
 
         Note:
-            v0.5a (ADR-001): the repository writes that follow promotion or
-            rejection execute inside ``repo.transaction()``. Filesystem
-            operations remain outside the transaction (they cannot
-            participate in SQLite atomicity); recovery on restart is the
-            Orchestrator's job.
+            v0.5a (ADR-001): repository writes execute inside
+            ``repo.transaction()``. v0.6 M5 also invokes mission artifact
+            regeneration before that transaction commits so failed mirror
+            regeneration rolls back SQLite commit state.
         """
         report = self._deterministic_report(validation)
         if self._can_commit(report):
-            self.workspace_manager.promote_candidate_to_best(
-                task_id=candidate.task_id,
-                loop_id=candidate.loop_id,
-            )
-
             best = BestState(
                 task_id=candidate.task_id,
                 state_id=candidate.id,
@@ -79,26 +92,70 @@ class CommitManager:
                 workspace_ref="best",
             )
 
-            with self.repo.transaction():
-                self.repo.save_best_state(best)
-                self.repo.mark_candidate_committed(candidate.id)
-                # §28.9 / M9: per-check accepted record; only newly-passed
-                # rows are inserted (previously-passed rows already exist).
-                evidence_by_key = self._evidence_by_check_key(report)
-                for check_key in report.newly_passed_check_keys:
-                    item_id, idx_str = check_key.split(":", 1)
-                    self.repo.save_accepted_check(
+            regeneration_error: Exception | None = None
+            try:
+                with self.repo.transaction():
+                    self.workspace_manager.promote_candidate_to_best(
                         task_id=candidate.task_id,
-                        check_key=check_key,
-                        hunger_item_id=item_id,
-                        check_index=int(idx_str),
-                        accepted_at_loop=candidate.loop_id,
-                        validation_id=report.id,
-                        evidence_id=evidence_by_key.get(check_key),
+                        loop_id=candidate.loop_id,
                     )
+                    self.repo.save_best_state(best)
+                    self.repo.mark_candidate_committed(candidate.id)
+                    # §28.9 / M9: per-check accepted record; only newly-passed
+                    # rows are inserted (previously-passed rows already exist).
+                    evidence_by_key = self._evidence_by_check_key(report)
+                    for check_key in report.newly_passed_check_keys:
+                        item_id, idx_str = check_key.split(":", 1)
+                        self.repo.save_accepted_check(
+                            task_id=candidate.task_id,
+                            check_key=check_key,
+                            hunger_item_id=item_id,
+                            check_index=int(idx_str),
+                            accepted_at_loop=candidate.loop_id,
+                            validation_id=report.id,
+                            evidence_id=evidence_by_key.get(check_key),
+                        )
+                    if self.repo.get_mission(candidate.task_id) is not None:
+                        try:
+                            self.mission_state_updater.regenerate(
+                                candidate.task_id,
+                                best_workspace_root=self.workspace_manager.best_files_dir(
+                                    candidate.task_id
+                                ),
+                            )
+                        except Exception as exc:
+                            regeneration_error = exc
+                            raise
+            except Exception as exc:
+                if regeneration_error is None:
+                    raise
+                self.workspace_manager.reject_candidate(
+                    task_id=candidate.task_id,
+                    loop_id=candidate.loop_id,
+                )
+                with self.repo.transaction():
+                    self.repo.mark_candidate_rejected(candidate.id)
+                    self.repo.append_event(
+                        EventType.MISSION_STATE_REGENERATION_FAILED,
+                        {
+                            "candidate_state_id": candidate.id,
+                            "validation_report_id": report.id,
+                            "loop_id": candidate.loop_id,
+                            "error_type": type(exc).__name__,
+                            "error": str(exc),
+                        },
+                        task_id=candidate.task_id,
+                        loop_id=candidate.loop_id,
+                    )
+                return {
+                    "committed": False,
+                    "reason": "mission_state_regeneration_failed",
+                    "verdict": ValidationVerdict.FAIL,
+                }
             return {
                 "committed": True,
                 "reason": "validation_passed_with_check_progress",
+                "verdict": report.verdict,
             }
 
         self.workspace_manager.reject_candidate(
@@ -112,6 +169,7 @@ class CommitManager:
         return {
             "committed": False,
             "reason": self._reject_reason(report),
+            "verdict": report.verdict,
         }
 
     @staticmethod

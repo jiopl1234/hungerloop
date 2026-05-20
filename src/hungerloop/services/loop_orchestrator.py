@@ -428,12 +428,30 @@ class LoopOrchestrator:
         )
 
         commit_decision = self.commit_manager.apply(candidate, pipeline_result)
+        commit_verdict = commit_decision["verdict"]
+        effective_validation = validation
+        effective_pipeline_result = pipeline_result
+        if commit_verdict != validation.verdict:
+            effective_validation = validation.model_copy(
+                update={
+                    "verdict": commit_verdict,
+                    "newly_passed_check_keys": [],
+                    "satisfied_hunger_item_ids": [],
+                    "has_real_progress": False,
+                }
+            )
+            effective_pipeline_result = pipeline_result.model_copy(
+                update={
+                    "deterministic_report": effective_validation,
+                    "pipeline_verdict": "fail",
+                }
+            )
         if commit_decision["committed"]:
             self.repo.append_event(
                 EventType.CANDIDATE_COMMITTED,
                 {
                     "candidate_state_id": candidate.id,
-                    "validation_report_id": validation.id,
+                    "validation_report_id": effective_validation.id,
                 },
                 task_id=task_id,
                 loop_id=loop_id,
@@ -443,23 +461,23 @@ class LoopOrchestrator:
                 EventType.CANDIDATE_REJECTED,
                 {
                     "candidate_state_id": candidate.id,
-                    "validation_report_id": validation.id,
+                    "validation_report_id": effective_validation.id,
                     "reason": commit_decision["reason"],
                 },
                 task_id=task_id,
                 loop_id=loop_id,
             )
-        self.hunger_update.apply_validation(task_id, validation)
+        self.hunger_update.apply_validation(task_id, effective_validation)
         stagnation = self.stagnation_detector.update(
             task_id,
             loop_id,
-            validation,
+            effective_validation,
             attempted_hunger_item_ids=attempted_hunger_item_ids,
             respect_stagnation=policy.respect_stagnation,
         )
 
         if self.memory_manager is not None:
-            self.memory_manager.propose_from_loop(task_id, loop_id, validation)
+            self.memory_manager.propose_from_loop(task_id, loop_id, effective_validation)
         # SkillCard generation is end-of-task only (PRD §20.2); the CLI calls
         # SkillManager.maybe_create_skill_card after the StopReport is built.
 
@@ -469,7 +487,7 @@ class LoopOrchestrator:
             self.repo.get_hunger_ledger(task_id),
             previous_phase=previous_phase,
             task_id=task_id,
-            validation_result=pipeline_result,
+            validation_result=effective_pipeline_result,
             validation_phase_id=(
                 validation_phase.phase_id if validation_phase is not None else None
             ),
@@ -490,16 +508,20 @@ class LoopOrchestrator:
             selected_hunger_item_ids=attempted_hunger_item_ids,
             worker_ids=[a.agent_id for a in plan.assignments],
             candidate_state_id=candidate.id,
-            validation_report_id=validation.id,
+            validation_report_id=effective_validation.id,
             committed=commit_decision["committed"],
-            newly_passed_check_keys=list(validation.newly_passed_check_keys),
-            regressed_check_keys=list(validation.regressed_check_keys),
-            currently_passed_check_keys=list(validation.currently_passed_check_keys),
-            satisfied_hunger_item_ids=list(validation.satisfied_hunger_item_ids),
-            unsatisfied_hunger_item_ids=list(validation.unsatisfied_hunger_item_ids),
+            newly_passed_check_keys=list(effective_validation.newly_passed_check_keys),
+            regressed_check_keys=list(effective_validation.regressed_check_keys),
+            currently_passed_check_keys=list(
+                effective_validation.currently_passed_check_keys
+            ),
+            satisfied_hunger_item_ids=list(effective_validation.satisfied_hunger_item_ids),
+            unsatisfied_hunger_item_ids=list(
+                effective_validation.unsatisfied_hunger_item_ids
+            ),
             best_state_id_before_loop=best_state_id_before,
             best_state_id_after_loop=best_state_id_after,
-            verdict=validation.verdict.value,
+            verdict=effective_validation.verdict.value,
             blocked_items_added=list(stagnation["blocked_items"]),
             blocked_item_ids=list(stagnation["blocked_items"]),
             tokens_consumed_this_loop=usage_after.tokens - usage_before.tokens,
@@ -508,8 +530,8 @@ class LoopOrchestrator:
             tool_calls=usage_after.tool_calls - usage_before.tool_calls,
             delta_summary=_build_delta_summary(
                 committed=commit_decision["committed"],
-                newly_passed=list(validation.newly_passed_check_keys),
-                regressed=list(validation.regressed_check_keys),
+                newly_passed=list(effective_validation.newly_passed_check_keys),
+                regressed=list(effective_validation.regressed_check_keys),
                 reason=commit_decision["reason"],
             ),
             next_action="continue",
@@ -520,8 +542,10 @@ class LoopOrchestrator:
                 EventType.LOOP_COMMITTED,
                 {
                     "candidate_state_id": candidate.id,
-                    "validation_report_id": validation.id,
-                    "newly_passed_check_keys": list(validation.newly_passed_check_keys),
+                    "validation_report_id": effective_validation.id,
+                    "newly_passed_check_keys": list(
+                        effective_validation.newly_passed_check_keys
+                    ),
                 },
                 task_id=task_id,
                 loop_id=loop_id,
@@ -531,9 +555,11 @@ class LoopOrchestrator:
                 EventType.LOOP_REJECTED,
                 {
                     "candidate_state_id": candidate.id,
-                    "validation_report_id": validation.id,
+                    "validation_report_id": effective_validation.id,
                     "reason": commit_decision["reason"],
-                    "regressed_check_keys": list(validation.regressed_check_keys),
+                    "regressed_check_keys": list(
+                        effective_validation.regressed_check_keys
+                    ),
                 },
                 task_id=task_id,
                 loop_id=loop_id,

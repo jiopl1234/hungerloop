@@ -1,12 +1,14 @@
 """Unit tests for CommitManager (Task 8)."""
 
 from pathlib import Path
+from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
 
 from hungerloop.models.blackboard import CandidateState
 from hungerloop.models.enums import ValidationVerdict
+from hungerloop.models.events import EventType
 from hungerloop.models.validation import ValidationReport
 from hungerloop.services.commit_manager import CommitManager
 from hungerloop.services.validation_pipeline import ValidationPipelineResult
@@ -21,6 +23,8 @@ def ws(tmp_path: Path) -> WorkspaceManager:
 @pytest.fixture
 def repo() -> MagicMock:
     r = MagicMock()
+    r.get_mission.return_value = None
+    r.list_events.return_value = []
     return r
 
 
@@ -244,3 +248,149 @@ def test_reject_reason_priority_regressed_over_missing_evidence(
     )
     result = cm.apply(_candidate(), report)
     assert result["reason"] == "regressed_checks_detected"
+
+
+class _RecordingUpdater:
+    def __init__(self, order: list[str] | None = None) -> None:
+        self.calls: list[tuple[str, Path]] = []
+        self.order = order
+
+    def regenerate(self, task_id: str, *, best_workspace_root: Path) -> None:
+        if self.order is not None:
+            self.order.append("regenerate")
+        self.calls.append((task_id, best_workspace_root))
+
+
+class _FailingUpdater:
+    def __init__(self, exc: Exception) -> None:
+        self.exc = exc
+        self.calls: list[tuple[str, Path]] = []
+
+    def regenerate(self, task_id: str, *, best_workspace_root: Path) -> None:
+        self.calls.append((task_id, best_workspace_root))
+        raise self.exc
+
+
+class _RecordingTransaction:
+    def __init__(self, order: list[str]) -> None:
+        self.order = order
+
+    def __enter__(self) -> None:
+        self.order.append("transaction_enter")
+
+    def __exit__(self, *args: Any) -> None:
+        self.order.append("transaction_exit")
+
+
+def test_mission_commit_regenerates_after_repository_writes(
+    repo: MagicMock,
+    ws: WorkspaceManager,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    order: list[str] = []
+    repo.get_mission.return_value = object()
+    repo.transaction.return_value = _RecordingTransaction(order)
+    repo.save_best_state.side_effect = lambda _best: order.append("save_best_state")
+    repo.mark_candidate_committed.side_effect = lambda _candidate_id: order.append(
+        "mark_candidate_committed"
+    )
+    repo.save_accepted_check.side_effect = lambda **_kwargs: order.append(
+        "save_accepted_check"
+    )
+    updater = _RecordingUpdater(order)
+    candidate_dir = ws.create_candidate_workspace("t1", 1)
+    (candidate_dir / "output.txt").write_text("result", encoding="utf-8")
+    real_promote = ws.promote_candidate_to_best
+
+    def recording_promote(*, task_id: str, loop_id: int) -> None:
+        order.append("promote")
+        real_promote(task_id=task_id, loop_id=loop_id)
+
+    monkeypatch.setattr(ws, "promote_candidate_to_best", recording_promote)
+
+    cm_with_updater = CommitManager(
+        repo=repo,
+        workspace_manager=ws,
+        mission_state_updater=updater,  # type: ignore[arg-type]
+    )
+    result = cm_with_updater.apply(
+        _candidate(),
+        _report(newly_passed=["H-001:0"], currently_passed=["H-001:0"]),
+    )
+
+    assert result["committed"] is True
+    assert order == [
+        "transaction_enter",
+        "promote",
+        "save_best_state",
+        "mark_candidate_committed",
+        "save_accepted_check",
+        "regenerate",
+        "transaction_exit",
+    ]
+    assert updater.calls == [("t1", ws.best_files_dir("t1"))]
+
+
+def test_legacy_commit_skips_mission_state_regeneration(
+    repo: MagicMock,
+    ws: WorkspaceManager,
+) -> None:
+    repo.get_mission.return_value = None
+    updater = _RecordingUpdater()
+    candidate_dir = ws.create_candidate_workspace("t1", 1)
+    (candidate_dir / "output.txt").write_text("result", encoding="utf-8")
+
+    cm_with_updater = CommitManager(
+        repo=repo,
+        workspace_manager=ws,
+        mission_state_updater=updater,  # type: ignore[arg-type]
+    )
+    result = cm_with_updater.apply(
+        _candidate(),
+        _report(newly_passed=["H-001:0"], currently_passed=["H-001:0"]),
+    )
+
+    assert result["committed"] is True
+    assert updater.calls == []
+    best = ws.best_files_dir("t1")
+    for artifact_name in [
+        "mission.md",
+        "features.yaml",
+        "validation-contract.yaml",
+        "services.yaml",
+    ]:
+        assert not (best / artifact_name).exists()
+
+
+def test_regeneration_failure_rejects_candidate_and_returns_fail_verdict(
+    repo: MagicMock,
+    ws: WorkspaceManager,
+) -> None:
+    repo.get_mission.return_value = object()
+    failure = RuntimeError("disk full")
+    updater = _FailingUpdater(failure)
+    candidate_dir = ws.create_candidate_workspace("t1", 1)
+    (candidate_dir / "output.txt").write_text("result", encoding="utf-8")
+
+    cm_with_updater = CommitManager(
+        repo=repo,
+        workspace_manager=ws,
+        mission_state_updater=updater,  # type: ignore[arg-type]
+    )
+    result = cm_with_updater.apply(
+        _candidate(),
+        _report(newly_passed=["H-001:0"], currently_passed=["H-001:0"]),
+    )
+
+    assert result == {
+        "committed": False,
+        "reason": "mission_state_regeneration_failed",
+        "verdict": ValidationVerdict.FAIL,
+    }
+    assert updater.calls == [("t1", ws.best_files_dir("t1"))]
+    assert not candidate_dir.exists()
+    rejected = ws.rejected_files_dir("t1", 1)
+    assert (rejected / "output.txt").read_text(encoding="utf-8") == "result"
+    repo.mark_candidate_rejected.assert_called_once_with("CAND-t1-1")
+    repo.append_event.assert_called_once()
+    assert repo.append_event.call_args.args[0] is EventType.MISSION_STATE_REGENERATION_FAILED

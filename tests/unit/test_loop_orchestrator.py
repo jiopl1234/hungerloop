@@ -459,7 +459,11 @@ async def test_orchestrator_uses_validation_pipeline_and_commit_receives_result(
     def apply_spy(candidate: object, report: object) -> dict[str, object]:
         del candidate
         commit_inputs.append(report)
-        return {"committed": False, "reason": "spy_reject"}
+        return {
+            "committed": False,
+            "reason": "spy_reject",
+            "verdict": ValidationVerdict.PASS,
+        }
 
     monkeypatch.setattr(orchestrator, "validation_pipeline", _PipelineSpy())
     monkeypatch.setattr(orchestrator.commit_manager, "apply", apply_spy)
