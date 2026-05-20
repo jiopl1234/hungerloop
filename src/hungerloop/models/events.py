@@ -46,6 +46,7 @@ class EventType(str, Enum):
     WORKER_ASSIGNMENT_SKIPPED = "worker.assignment_skipped"
     WORKER_ASSIGNMENT_RETRIED = "worker.assignment_retried"
     WORKSPACE_WRITE_COLLISION = "WORKSPACE_WRITE_COLLISION"
+    PLANNER_CYCLE_DETECTED = "PLANNER_CYCLE_DETECTED"
 
     # ----- Model calls (v0.5d.0) ----------------------------------------
     MODEL_CALL_STARTED = "model_call_started"

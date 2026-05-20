@@ -863,7 +863,7 @@ class SQLiteRepository:
 
     def save_worker_handoff(self, handoff: WorkerHandoff) -> str:
         self._ensure_task(handoff.task_id)
-        handoff_id = f"WH-{uuid.uuid4()}"
+        handoff_id = handoff.handoff_id or f"WH-{uuid.uuid4()}"
         self.conn.execute(
             """
             INSERT INTO worker_handoffs(

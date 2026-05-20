@@ -106,7 +106,7 @@ def _pack(truncated: bool) -> ContextPack:
     )
 
 
-async def test_context_truncated_precedes_worker_started(tmp_path: Path) -> None:
+async def test_context_truncated_precedes_assignment_started(tmp_path: Path) -> None:
     repo = InMemoryRepository()
     _seed(repo)
 
@@ -119,7 +119,7 @@ async def test_context_truncated_precedes_worker_started(tmp_path: Path) -> None
     assert EventType.CONTEXT_TRUNCATED.value in loop_events
     assert (
         loop_events.index(EventType.CONTEXT_TRUNCATED.value)
-        < loop_events.index(EventType.WORKER_STARTED.value)
+        < loop_events.index(EventType.WORKER_ASSIGNMENT_STARTED.value)
     )
 
 
@@ -134,4 +134,4 @@ async def test_no_context_truncated_when_pack_not_truncated(tmp_path: Path) -> N
         for event in repo.list_events("t1", since_loop=1, until_loop=1)
     }
     assert EventType.CONTEXT_TRUNCATED.value not in loop_events
-    assert EventType.WORKER_STARTED.value in loop_events
+    assert EventType.WORKER_ASSIGNMENT_STARTED.value in loop_events

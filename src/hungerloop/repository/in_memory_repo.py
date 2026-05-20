@@ -545,7 +545,7 @@ class InMemoryRepository:
         self._worker_results[rid] = result
 
     def save_worker_handoff(self, handoff: WorkerHandoff) -> str:
-        handoff_id = f"WH-{uuid.uuid4()}"
+        handoff_id = handoff.handoff_id or f"WH-{uuid.uuid4()}"
         self._worker_handoffs[handoff_id] = handoff
         self._worker_handoff_order.append(handoff_id)
         return handoff_id

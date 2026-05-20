@@ -200,7 +200,7 @@ class WorkerScheduler:
             evidence_by_assignment.setdefault(assignment.assignment_id, set()).update(
                 handoff.evidence_ids
             )
-            handoff_id = self._persist_handoff(
+            handoff_id, handoff = self._persist_handoff(
                 task_id=task_id,
                 loop_id=loop_id,
                 assignment_id=assignment.assignment_id,
@@ -263,7 +263,9 @@ class WorkerScheduler:
         loop_id: int,
         assignment_id: str,
         handoff: WorkerHandoff,
-    ) -> str:
+    ) -> tuple[str, WorkerHandoff]:
+        handoff_id = handoff.handoff_id or f"WH-{task_id}-{loop_id}-{assignment_id}"
+        handoff = handoff.model_copy(update={"handoff_id": handoff_id})
         handoff_id = self.repo.save_worker_handoff(handoff)
         loop_root = (
             self.workspace_manager.task_root(task_id)
@@ -276,7 +278,28 @@ class WorkerScheduler:
         if audit_path.parent != handoffs_dir.resolve():
             raise PermissionError(f"Invalid assignment audit path: {assignment_id}")
         audit_path.write_text(handoff.model_dump_json(indent=2), encoding="utf-8")
-        return handoff_id
+        return handoff_id, handoff
+
+    def persist_handoff_audit(
+        self,
+        *,
+        task_id: str,
+        loop_id: int,
+        assignment_id: str,
+        handoff: WorkerHandoff,
+    ) -> None:
+        """Write a scheduler-compatible audit JSON without repository persistence."""
+        loop_root = (
+            self.workspace_manager.task_root(task_id)
+            / "candidates"
+            / f"loop_{loop_id:03d}"
+        )
+        handoffs_dir = resolve_workspace_path(loop_root, "handoffs")
+        handoffs_dir.mkdir(parents=True, exist_ok=True)
+        audit_path = resolve_workspace_path(handoffs_dir, f"{assignment_id}.json")
+        if audit_path.parent != handoffs_dir.resolve():
+            raise PermissionError(f"Invalid assignment audit path: {assignment_id}")
+        audit_path.write_text(handoff.model_dump_json(indent=2), encoding="utf-8")
 
     @staticmethod
     def _coerce_handoff(

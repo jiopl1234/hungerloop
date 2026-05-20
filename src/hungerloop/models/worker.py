@@ -84,6 +84,7 @@ class HandoffItem(BaseModel):
 class WorkerHandoff(WorkerResult):
     """Field-additive worker handoff model (REQ-M2-003)."""
 
+    handoff_id: str | None = None
     assignment_id: str | None = None
     retry_count: int = Field(default=0, ge=0)
     handoff_items: list[HandoffItem] = Field(default_factory=list)

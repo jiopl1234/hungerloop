@@ -24,7 +24,6 @@ the orchestrator skips those steps when they are not provided.
 """
 from __future__ import annotations
 
-from pathlib import Path
 from typing import Protocol, runtime_checkable
 
 from hungerloop.models.context import ContextPack
@@ -45,12 +44,14 @@ from hungerloop.services.handoff_processor import HandoffProcessor
 from hungerloop.services.hunger_engine import HungerEngine
 from hungerloop.services.hunger_update import HungerUpdateService
 from hungerloop.services.integrator import Integrator
+from hungerloop.services.mission_planner import MissionPlanner, PlannerCycleError
 from hungerloop.services.refinement_compiler import RefinementCompiler
 from hungerloop.services.rule_based_planner import RuleBasedPlanner
 from hungerloop.services.stagnation_detector import StagnationDetector
 from hungerloop.services.stop_report_builder import build_stop_report
 from hungerloop.services.validation_gate import ValidationGate
 from hungerloop.services.worker_runtime import WorkerRuntime
+from hungerloop.services.worker_scheduler import SchedulerResult, WorkerScheduler
 from hungerloop.services.workspace_manager import WorkspaceManager
 
 
@@ -85,6 +86,8 @@ class LoopOrchestrator:
         workspace_manager: WorkspaceManager,
         budget_allocator: BudgetAllocator,
         planner: RuleBasedPlanner,
+        mission_planner: MissionPlanner | None = None,
+        worker_scheduler: WorkerScheduler | None = None,
         context_builder: ContextBuilder,
         worker_runtime: WorkerRuntime,
         integrator: Integrator,
@@ -102,6 +105,13 @@ class LoopOrchestrator:
         self.workspace_manager = workspace_manager
         self.budget_allocator = budget_allocator
         self.planner = planner
+        self.mission_planner = mission_planner or MissionPlanner(repo, planner)
+        self.worker_scheduler = worker_scheduler or WorkerScheduler(
+            repo=repo,
+            worker_runtime=worker_runtime,
+            cost_guard=worker_runtime.cost_guard,
+            workspace_manager=workspace_manager,
+        )
         self.context_builder = context_builder
         self.worker_runtime = worker_runtime
         self.integrator = integrator
@@ -198,9 +208,7 @@ class LoopOrchestrator:
         best_before = self.repo.get_best_state(task_id)
         best_state_id_before = best_before.state_id if best_before else None
 
-        candidate_root = self.workspace_manager.create_candidate_workspace(
-            task_id, loop_id
-        )
+        self.workspace_manager.create_candidate_workspace(task_id, loop_id)
         self.repo.append_event(
             EventType.LOOP_STARTED,
             {
@@ -218,7 +226,46 @@ class LoopOrchestrator:
         usage_before = self.repo.get_usage_snapshot(task_id).model_copy()
 
         budget = self.budget_allocator.allocate(snapshot)
-        plan = self.planner.plan(task_id, loop_id, snapshot, budget)
+        mission = self.repo.get_mission(task_id)
+        previous_loop_id = loop_id - 1
+        prior_handoffs = self.repo.list_worker_handoffs(
+            task_id,
+            since_loop_id=previous_loop_id,
+        )
+        prior_handoffs = [
+            handoff for handoff in prior_handoffs if handoff.loop_id == previous_loop_id
+        ]
+        try:
+            if mission is not None:
+                plan = self.mission_planner.plan(
+                    task_id,
+                    loop_id,
+                    snapshot,
+                    budget,
+                    mission=mission,
+                    prior_handoffs=prior_handoffs,
+                )
+            else:
+                plan = self.planner.plan(task_id, loop_id, snapshot, budget)
+        except PlannerCycleError as exc:
+            safety_snapshot = snapshot.model_copy(
+                update={"should_stop": True, "stop_reason": StopReason.SAFETY_STOP}
+            )
+            self.repo.save_hunger_snapshot(task_id, safety_snapshot)
+            self.workspace_manager.reject_candidate(task_id, loop_id)
+            self.repo.append_event(
+                EventType.PLANNER_CYCLE_DETECTED,
+                {"loop_id": loop_id, "cycle": list(exc.cycle), "error": str(exc)},
+                task_id=task_id,
+                loop_id=loop_id,
+            )
+            self.repo.append_event(
+                EventType.SAFETY_STOP,
+                {"loop_id": loop_id, "reason": "planner_cycle_detected"},
+                task_id=task_id,
+                loop_id=loop_id,
+            )
+            return self._emit_stop(task_id, StopReason.SAFETY_STOP)
         self.repo.save_loop_plan(plan)
         # PRD §7.5: LOOP_PLANNED fires once after the planner returns,
         # regardless of whether the plan has assignments.
@@ -244,12 +291,11 @@ class LoopOrchestrator:
             )
 
         try:
-            worker_results = await self._run_assignments(
+            scheduler_result = await self._run_assignments(
                 task_id=task_id,
                 loop_id=loop_id,
                 plan=plan,
                 budget=budget,
-                candidate_root=candidate_root,
             )
         except SafetyStopError:
             self.workspace_manager.reject_candidate(task_id, loop_id)
@@ -261,12 +307,11 @@ class LoopOrchestrator:
             )
             return self._emit_stop(task_id, StopReason.SAFETY_STOP)
 
-        mission = self.repo.get_mission(task_id)
         worker_handoffs, handoff_payloads = self._save_and_emit_handoffs(
             task_id=task_id,
             loop_id=loop_id,
             plan=plan,
-            worker_results=worker_results,
+            worker_handoffs=scheduler_result.handoffs,
             mission=mission,
         )
         self.handoff_processor.process_handoffs(
@@ -286,19 +331,24 @@ class LoopOrchestrator:
             loop_id=loop_id,
         )
 
-        if any(r.requires_human for r in worker_results):
+        if any(handoff.requires_human for handoff in worker_handoffs):
             self.workspace_manager.reject_candidate(task_id, loop_id)
             self.repo.append_event(
                 EventType.HUMAN_REQUIRED,
                 {
                     "loop_id": loop_id,
-                    "agent_ids": [r.agent_id for r in worker_results if r.requires_human],
+                    "agent_ids": [
+                        handoff.agent_id
+                        for handoff in worker_handoffs
+                        if handoff.requires_human
+                    ],
                 },
                 task_id=task_id,
                 loop_id=loop_id,
             )
             return self._emit_stop(task_id, StopReason.HUMAN_REQUIRED)
 
+        worker_results = [handoff.as_worker_result() for handoff in worker_handoffs]
         candidate = self.integrator.integrate(task_id, loop_id, worker_results)
         self.repo.save_candidate(candidate)
         self.repo.append_event(
@@ -312,11 +362,15 @@ class LoopOrchestrator:
             loop_id=loop_id,
         )
 
+        attempted_hunger_item_ids = self._attempted_hunger_item_ids(
+            plan,
+            skipped_ids=scheduler_result.skipped_ids,
+        )
         self.repo.append_event(
             EventType.VALIDATION_STARTED,
             {
                 "candidate_state_id": candidate.id,
-                "target_hunger_item_ids": list(plan.selected_hunger_item_ids),
+                "target_hunger_item_ids": attempted_hunger_item_ids,
             },
             task_id=task_id,
             loop_id=loop_id,
@@ -325,7 +379,7 @@ class LoopOrchestrator:
             task_id=task_id,
             loop_id=loop_id,
             candidate=candidate,
-            target_hunger_item_ids=plan.selected_hunger_item_ids,
+            target_hunger_item_ids=attempted_hunger_item_ids,
         )
         self.repo.save_validation_report(validation)
         self._emit_check_events(task_id, loop_id, validation)
@@ -368,6 +422,7 @@ class LoopOrchestrator:
             task_id,
             loop_id,
             validation,
+            attempted_hunger_item_ids=attempted_hunger_item_ids,
             respect_stagnation=policy.respect_stagnation,
         )
 
@@ -388,7 +443,7 @@ class LoopOrchestrator:
             active_hunger=snapshot.active_hunger,
             drive_budget=snapshot.drive_budget,
             work_pressure=snapshot.work_pressure,
-            selected_hunger_item_ids=plan.selected_hunger_item_ids,
+            selected_hunger_item_ids=attempted_hunger_item_ids,
             worker_ids=[a.agent_id for a in plan.assignments],
             candidate_state_id=candidate.id,
             validation_report_id=validation.id,
@@ -450,16 +505,27 @@ class LoopOrchestrator:
         task_id: str,
         loop_id: int,
         plan: LoopPlan,
-        worker_results: list[WorkerResult],
+        worker_handoffs: list[WorkerHandoff],
         mission: Mission | None,
     ) -> tuple[list[WorkerHandoff], list[dict[str, object]]]:
-        handoffs: list[WorkerHandoff] = []
         emitted_payloads: list[dict[str, object]] = []
-        for index, (assignment, result) in enumerate(
-            zip(plan.assignments, worker_results, strict=False)
+        for index, (assignment, handoff) in enumerate(
+            zip(plan.assignments, worker_handoffs, strict=False)
         ):
-            handoff = WorkerHandoff(**result.model_dump())
-            handoff_id = self.repo.save_worker_handoff(handoff)
+            handoff_id = (
+                handoff.handoff_id
+                or f"WH-{task_id}-{loop_id}-{assignment.assignment_id}"
+            )
+            if handoff.handoff_id is None:
+                handoff = handoff.model_copy(update={"handoff_id": handoff_id})
+                worker_handoffs[index] = handoff
+                self.repo.save_worker_handoff(handoff)
+                self.worker_scheduler.persist_handoff_audit(
+                    task_id=task_id,
+                    loop_id=loop_id,
+                    assignment_id=assignment.assignment_id,
+                    handoff=handoff,
+                )
             payload = self._handoff_event_payload(
                 mission=mission,
                 assignment=assignment,
@@ -475,9 +541,8 @@ class LoopOrchestrator:
                 task_id=task_id,
                 loop_id=loop_id,
             )
-            handoffs.append(handoff)
             emitted_payloads.append(payload)
-        return handoffs, emitted_payloads
+        return worker_handoffs, emitted_payloads
 
     def _handoff_event_payload(
         self,
@@ -768,20 +833,20 @@ class LoopOrchestrator:
         loop_id: int,
         plan: LoopPlan,
         budget: BudgetAllocation,
-        candidate_root: Path,
-    ) -> list[WorkerResult]:
-        """Build context and dispatch each assignment in plan order.
+    ) -> SchedulerResult:
+        """Delegate assignment execution to the M3 WorkerScheduler."""
 
-        v0.5d.0 (PRD §7.5): emits WORKER_STARTED / WORKER_FINISHED /
-        WORKER_FAILED for each assignment. ``WORKER_FAILED`` fires
-        when ``WorkerResult.error`` is populated; bare exceptions in
-        the worker runtime propagate to ``_step_inner``'s outer
-        try/except and become an ERROR stop.
-        """
-        results: list[WorkerResult] = []
-        for assignment in plan.assignments:
+        def context_factory(assignment: Assignment) -> ContextPack:
             spec = self.repo.get_agent_spec(assignment.agent_id)
-            context: ContextPack = self.context_builder.build_for_agent(
+            if isinstance(self.context_builder, ContextBuilder):
+                return self.context_builder.build_for_agent(
+                    assignment,
+                    task_id=task_id,
+                    loop_id=loop_id,
+                    budget=budget,
+                    output_schema_name=spec.output_schema_name,
+                )
+            return self.context_builder.build_for_agent(
                 task_id=task_id,
                 loop_id=loop_id,
                 agent_id=assignment.agent_id,
@@ -792,53 +857,30 @@ class LoopOrchestrator:
                 output_schema_name=spec.output_schema_name,
                 candidate_workspace_ref=f"candidates/loop_{loop_id:03d}",
             )
-            if context.truncation_info is not None:
-                self.repo.append_event(
-                    EventType.CONTEXT_TRUNCATED,
-                    context.truncation_info.model_dump(),
-                    task_id=task_id,
-                    loop_id=loop_id,
-                )
-            self.repo.append_event(
-                EventType.WORKER_STARTED,
-                {
-                    "agent_id": assignment.agent_id,
-                    "mission": assignment.mission,
-                    "target_hunger_item_ids": list(
-                        assignment.target_hunger_item_ids
-                    ),
-                },
-                task_id=task_id,
-                loop_id=loop_id,
-            )
-            result = await self.worker_runtime.run(
-                spec, context, workspace_root=candidate_root
-            )
-            self.repo.save_worker_result(result)
-            results.append(result)
-            failure_msg = self._worker_failure_message(result)
-            if failure_msg is not None:
-                self.repo.append_event(
-                    EventType.WORKER_FAILED,
-                    {
-                        "agent_id": assignment.agent_id,
-                        "error": failure_msg,
-                    },
-                    task_id=task_id,
-                    loop_id=loop_id,
-                )
-            else:
-                self.repo.append_event(
-                    EventType.WORKER_FINISHED,
-                    {
-                        "agent_id": assignment.agent_id,
-                        "evidence_count": len(result.evidence_ids),
-                        "artifact_count": len(result.artifact_ids),
-                    },
-                    task_id=task_id,
-                    loop_id=loop_id,
-                )
-        return results
+
+        return await self.worker_scheduler.execute_assignments(
+            task_id,
+            loop_id,
+            plan.assignments,
+            context_factory,
+        )
+
+    @staticmethod
+    def _attempted_hunger_item_ids(
+        plan: LoopPlan,
+        *,
+        skipped_ids: list[str],
+    ) -> list[str]:
+        """Return the union of hunger ids for completed, non-skipped assignments."""
+        skipped = set(skipped_ids)
+        attempted: list[str] = []
+        for assignment in plan.assignments:
+            if assignment.assignment_id in skipped:
+                continue
+            for item_id in assignment.target_hunger_item_ids:
+                if item_id not in attempted:
+                    attempted.append(item_id)
+        return attempted
 
     @staticmethod
     def _worker_failure_message(result: WorkerResult) -> str | None:

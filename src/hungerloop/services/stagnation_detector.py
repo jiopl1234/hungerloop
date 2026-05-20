@@ -49,6 +49,7 @@ class StagnationDetector:
         loop_id: int,
         validation_report: ValidationReport,
         *,
+        attempted_hunger_item_ids: list[str] | None = None,
         respect_stagnation: bool = True,
     ) -> StagnationResult:
         """Update stagnation counters based on validation report.
@@ -58,11 +59,17 @@ class StagnationDetector:
             loop_id: Current loop number.
             validation_report: ValidationReport with attempted_hunger_item_ids,
                 newly_passed_check_keys, and has_real_progress.
+            attempted_hunger_item_ids: Optional M3 override containing the union
+                of hunger items attempted by completed, non-skipped assignments.
 
         Returns:
             StagnationResult with blocked_items and global_blocked.
         """
-        attempted = set(validation_report.attempted_hunger_item_ids)
+        attempted = set(
+            attempted_hunger_item_ids
+            if attempted_hunger_item_ids is not None
+            else validation_report.attempted_hunger_item_ids
+        )
         newly_progressed: set[str] = set()
 
         for check_key in validation_report.newly_passed_check_keys:

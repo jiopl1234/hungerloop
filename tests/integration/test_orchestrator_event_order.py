@@ -3,8 +3,8 @@
 Pins the canonical per-loop event sequence the orchestrator emits in
 v0.5d.0:
 
-    LOOP_STARTED → LOOP_PLANNED → (WORKER_STARTED → tool/model →
-    WORKER_FINISHED|FAILED)+ → CANDIDATE_CREATED → VALIDATION_STARTED →
+    LOOP_STARTED → LOOP_PLANNED → (worker.assignment_started → tool/model →
+    worker.assignment_completed|failed)+ → CANDIDATE_CREATED → VALIDATION_STARTED →
     (CHECK_PASSED|FAILED|REGRESSED)+ → VALIDATION_FINISHED →
     CANDIDATE_COMMITTED|REJECTED → LOOP_COMMITTED|LOOP_REJECTED.
 
@@ -58,8 +58,8 @@ async def test_happy_path_emits_section_7_5_sequence(tmp_path: Path) -> None:
     must_appear = {
         "loop_started",
         "loop_planned",
-        "worker_started",
-        "worker_finished",
+        "worker.assignment_started",
+        "worker.assignment_completed",
         "worker.handoff_emitted",
         "worker.handoff_received",
         "candidate_created",
@@ -111,8 +111,8 @@ async def test_first_loop_emits_canonical_ordering(tmp_path: Path) -> None:
     canonical = [
         "loop_started",
         "loop_planned",
-        "worker_started",
-        "worker_finished",
+        "worker.assignment_started",
+        "worker.assignment_completed",
         "worker.handoff_emitted",
         "worker.handoff_received",
         "candidate_created",
