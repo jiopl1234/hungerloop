@@ -627,7 +627,7 @@ def _import_mission_from_path(
     try:
         parsed = MissionLoader().load_from_path(from_path)
         result = RequirementCompiler(ctx.repo).compile_mission_changes(task_id, parsed)
-    except (MissionLoadError, OSError, ValidationError) as exc:
+    except (MissionLoadError, OSError, ValidationError, ValueError) as exc:
         ctx.repo.append_event(
             _MISSION_LOAD_FAILED,
             {"task_id": task_id, "error": str(exc), "source": source},

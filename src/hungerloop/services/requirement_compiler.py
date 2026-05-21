@@ -290,6 +290,7 @@ class RequirementCompiler(RuleBasedCompiler):
             parsed_spec=parsed_spec,
             existing_contract=existing_contract,
         )
+        self._validate_assertion_phase_ids(mission, contract)
         operations = [
             *self._diff_mission(existing_mission, mission),
             *self._diff_contract(existing_contract, contract),
@@ -647,6 +648,24 @@ class RequirementCompiler(RuleBasedCompiler):
             mission_id=mission_id,
             assertions=imported_assertions,
         )
+
+    @staticmethod
+    def _validate_assertion_phase_ids(
+        mission: Mission,
+        contract: ValidationContract | None,
+    ) -> None:
+        if contract is None:
+            return
+        phase_ids = {phase.phase_id for phase in mission.phases}
+        for assertion in contract.assertions:
+            if assertion.phase_id not in phase_ids:
+                available = ", ".join(sorted(phase_ids)) or "<none>"
+                raise ValueError(
+                    "validation assertion "
+                    f"{assertion.assertion_id!r} references unknown "
+                    f"phase_id {assertion.phase_id!r}; "
+                    f"available phase_ids: {available}"
+                )
 
     def _merge_imported_ledger(
         self,

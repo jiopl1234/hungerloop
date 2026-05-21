@@ -69,7 +69,7 @@ def _seed_mission(ctx: CliContext, task_id: str = "T-import") -> None:
     ctx.repo.save_hunger_ledger(task_id, HungerLedger(task_id=task_id, items=[]))
 
 
-def _write_update_dir(tmp_path: Path) -> Path:
+def _write_update_dir(tmp_path: Path, *, assertion_phase_id: str = "phase-1") -> Path:
     mission_dir = tmp_path / "updated"
     mission_dir.mkdir()
     (mission_dir / "mission.md").write_text(
@@ -118,7 +118,7 @@ def _write_update_dir(tmp_path: Path) -> Path:
                 "assertions": [
                     {
                         "assertion_id": "VAL-NEW",
-                        "phase_id": "phase-1",
+                        "phase_id": assertion_phase_id,
                         "title": "New assertion",
                         "description": "Imported assertion",
                         "check_type": "behavioral_assertion",
@@ -218,3 +218,56 @@ def test_paused_accepts_import_evidence_and_leaves_best_mirrors(tmp_path: Path) 
     assert {
         mirror.name: mirror.read_text(encoding="utf-8") for mirror in mirror_files
     } == before_mirrors
+
+
+def test_paused_import_with_unknown_assertion_phase_exits_2_without_fk_error(
+    tmp_path: Path,
+) -> None:
+    ctx, db_path = _context(tmp_path)
+    _seed_mission(ctx)
+    ctx.repo.save_stop_report(
+        StopReport(
+            task_id="T-import",
+            stop_reason=StopReason.HUMAN_PAUSED,
+            goal_status="paused",
+        )
+    )
+    before_counts = _sql_counts(db_path)
+
+    result = CliRunner().invoke(
+        cli,
+        [
+            "mission",
+            "import",
+            "T-import",
+            "--from",
+            str(
+                _write_update_dir(
+                    tmp_path,
+                    assertion_phase_id="phase-missing",
+                )
+            ),
+        ],
+        obj=ctx,
+    )
+
+    assert result.exit_code == 2
+    assert "VAL-NEW" in result.output
+    assert "phase-missing" in result.output
+    assert "IntegrityError" not in result.output
+    assert "FOREIGN KEY constraint failed" not in result.output
+    assert _sql_counts(db_path) == before_counts
+    with sqlite3.connect(str(db_path)) as conn:
+        assert conn.execute(
+            "SELECT COUNT(*) FROM events WHERE event_type='MISSION_LOAD_FAILED'"
+        ).fetchone()[0] == 1
+        assert conn.execute(
+            "SELECT COUNT(*) FROM events WHERE event_type='MISSION_IMPORT_FAILED'"
+        ).fetchone()[0] == 0
+        assert conn.execute(
+            """
+            SELECT COUNT(*) FROM evidence
+            WHERE evidence_type='human_input'
+              AND json_extract(payload_json, '$.kind')='mission_import'
+            """
+        ).fetchone()[0] == 0

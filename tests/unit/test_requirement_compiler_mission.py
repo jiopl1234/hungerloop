@@ -1,11 +1,16 @@
 from __future__ import annotations
 
 from datetime import datetime
+from pathlib import Path
 
 import pytest
 
 from hungerloop.models.enums import AcceptanceCheckType
 from hungerloop.models.mission import Mission, MissionFeature, MissionPhase
+from hungerloop.models.validation_contract import ValidationAssertion, ValidationContract
+from hungerloop.repository.in_memory_repo import InMemoryRepository
+from hungerloop.repository.sqlite_repo import SQLiteRepository
+from hungerloop.services.mission_loader import ParsedMissionSpec
 from hungerloop.services.requirement_compiler import RequirementCompiler
 
 
@@ -92,3 +97,54 @@ def test_compile_mission_features_uses_phase_local_priority_without_mutating_mis
     assert item_by_id["H-101"].priority == pytest.approx(0.5)
     assert item_by_id["H-102"].priority == pytest.approx(0.5)
     assert item_by_id["H-201"].priority == pytest.approx(1.0)
+
+
+@pytest.mark.parametrize("repo_kind", ["in_memory", "sqlite"])
+def test_compile_mission_changes_rejects_assertion_with_unknown_phase_id(
+    repo_kind: str,
+    tmp_path: Path,
+) -> None:
+    repo = (
+        SQLiteRepository.open(tmp_path / "hungerloop.sqlite")
+        if repo_kind == "sqlite"
+        else InMemoryRepository()
+    )
+    try:
+        repo.create_task("task-1", "Import mission")
+        parsed = ParsedMissionSpec(
+            title="Import Mission",
+            description="Import with mismatched assertion phase",
+            phases=[_make_phase("phase-1", [])],
+            features=[],
+            validation_contract=ValidationContract(
+                mission_id="ignored-by-compiler",
+                assertions=[
+                    ValidationAssertion(
+                        assertion_id="VAL-BAD-PHASE",
+                        phase_id="phase-missing",
+                        title="Bad phase reference",
+                        description="References a phase that is not imported",
+                        check_type="behavioral_assertion",
+                    )
+                ],
+            ),
+            source_files=["mission.md", "validation-contract.yaml"],
+        )
+
+        with pytest.raises(ValueError) as excinfo:
+            RequirementCompiler(repo).compile_mission_changes("task-1", parsed)
+
+        message = str(excinfo.value)
+        assert "VAL-BAD-PHASE" in message
+        assert "phase-missing" in message
+        assert "phase-1" in message
+        assert repo.get_mission("task-1") is None
+        assert repo.list_validation_assertions(mission_id="mission-task-1") == []
+        assert [
+            row
+            for row in repo.list_evidence("task-1", evidence_type="human_input")
+            if row.get("kind") == "mission_import"
+        ] == []
+    finally:
+        if isinstance(repo, SQLiteRepository):
+            repo.close()
