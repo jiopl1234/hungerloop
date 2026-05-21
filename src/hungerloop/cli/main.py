@@ -25,6 +25,7 @@ from hungerloop.cli.checks_cmd import checks
 from hungerloop.cli.context import CliContext
 from hungerloop.cli.hunger_cmd import hunger
 from hungerloop.cli.memory_cmd import memory
+from hungerloop.cli.mission_cmd import mission
 from hungerloop.cli.new_cmd import new
 from hungerloop.cli.repair_state_cmd import repair_state
 from hungerloop.cli.report_cmd import report
@@ -87,6 +88,7 @@ cli.add_command(report)
 cli.add_command(repair_state)
 cli.add_command(hunger)
 cli.add_command(memory)
+cli.add_command(mission)
 cli.add_command(skill)
 cli.add_command(trace)
 cli.add_command(workspace)

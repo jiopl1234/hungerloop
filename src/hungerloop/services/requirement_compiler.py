@@ -85,6 +85,14 @@ class MissionChangeResult(BaseModel):
     summary: dict[str, int]
 
 
+class MissionCreationResult(BaseModel):
+    """Result returned by ``compile_new_mission`` for CLI creation."""
+
+    mission: Mission
+    validation_contract: ValidationContract | None = None
+    hunger_ledger: HungerLedger
+
+
 class RuleBasedCompiler:
     """Simple rule-based compiler that creates a 2-item or 3-item HungerLedger.
 
@@ -208,6 +216,43 @@ class RequirementCompiler(RuleBasedCompiler):
             for feature in mission.features
         ]
         return HungerLedger(task_id=task_id, items=items)
+
+    def compile_new_mission(
+        self,
+        task_id: str,
+        parsed_spec: ParsedMissionSpec,
+    ) -> MissionCreationResult:
+        """Persist a newly-created mission through the compiler write path."""
+        repo = self._require_repo("compile_new_mission")
+        existing_mission = repo.get_mission(task_id)
+        if existing_mission is not None:
+            raise ValueError(
+                "mission already exists for task; use 'mission import' to update"
+            )
+        mission = self._build_imported_mission(
+            task_id=task_id,
+            mission_id=f"mission-{task_id}",
+            parsed_spec=parsed_spec,
+            existing_mission=None,
+        )
+        contract = self._build_imported_contract(
+            mission_id=mission.mission_id,
+            parsed_spec=parsed_spec,
+            existing_contract=None,
+        )
+        ledger = self.compile_mission_features(task_id, mission)
+
+        with repo.transaction():
+            repo.save_mission(mission)
+            if contract is not None:
+                repo.save_validation_contract(contract)
+            repo.save_hunger_ledger(task_id, ledger)
+
+        return MissionCreationResult(
+            mission=mission,
+            validation_contract=contract,
+            hunger_ledger=ledger,
+        )
 
     def compile_mission_changes(
         self,
