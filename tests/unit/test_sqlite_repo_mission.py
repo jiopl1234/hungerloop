@@ -26,6 +26,7 @@ MISSION_METHODS = [
     "save_validation_assertion",
     "update_assertion_status",
     "list_validation_assertions",
+    "count_validation_contract_summary",
 ]
 
 
@@ -392,3 +393,58 @@ def test_assertion_update_and_contract_roundtrip(tmp_path: Path) -> None:
     updated = ValidationAssertion.model_validate_json(str(row["payload_json"]))
     assert updated.validated_at_loop == 4
     assert updated.evidence_ids == ["E-1"]
+
+
+def test_count_validation_contract_summary_returns_all_status_counts(
+    tmp_path: Path,
+) -> None:
+    repo = _repo(tmp_path)
+    repo.create_task("task-1", "Build mission")
+    mission = _make_mission(
+        mission_id="mission-1",
+        task_id="task-1",
+        phases=[
+            _make_phase(
+                "phase-1",
+                feature_ids=[],
+                validation_contract_ids=[
+                    "assert-pending",
+                    "assert-passed",
+                    "assert-failed",
+                    "assert-blocked",
+                    "assert-passed-2",
+                ],
+            )
+        ],
+        features=[],
+    )
+    _save_mission_graph(repo, mission)
+    repo.save_validation_contract(
+        ValidationContract(
+            mission_id="mission-1",
+            assertions=[
+                _make_assertion("assert-pending", phase_id="phase-1"),
+                _make_assertion("assert-passed", phase_id="phase-1", status="passed"),
+                _make_assertion("assert-failed", phase_id="phase-1", status="failed"),
+                _make_assertion(
+                    "assert-blocked", phase_id="phase-1", status="blocked"
+                ),
+                _make_assertion(
+                    "assert-passed-2", phase_id="phase-1", status="passed"
+                ),
+            ],
+        )
+    )
+
+    assert repo.count_validation_contract_summary("mission-1") == {
+        "pending": 1,
+        "passed": 2,
+        "failed": 1,
+        "blocked": 1,
+    }
+    assert repo.count_validation_contract_summary("missing-mission") == {
+        "pending": 0,
+        "passed": 0,
+        "failed": 0,
+        "blocked": 0,
+    }

@@ -1803,6 +1803,28 @@ class SQLiteRepository:
             for row in rows
         ]
 
+    def count_validation_contract_summary(self, mission_id: str) -> dict[str, int]:
+        counts = {
+            "pending": 0,
+            "passed": 0,
+            "failed": 0,
+            "blocked": 0,
+        }
+        rows = self.conn.execute(
+            """
+            SELECT status, COUNT(*) AS n
+            FROM validation_assertions
+            WHERE mission_id = ?
+            GROUP BY status
+            """,
+            (mission_id,),
+        ).fetchall()
+        for row in rows:
+            status = str(row["status"])
+            if status in counts:
+                counts[status] = int(row["n"])
+        return counts
+
     # =====================================================================
     # Section 9 — Approvals, misc, transactions, task lock
     # =====================================================================

@@ -14,6 +14,8 @@ from hungerloop.cli.main import cli
 from hungerloop.models.enums import AcceptanceCheckType, HungerItemStatus
 from hungerloop.models.hunger import AcceptanceCheck, HungerItem, HungerLedger
 from hungerloop.models.mission import Mission, MissionFeature, MissionPhase
+from hungerloop.models.tracing import StopReport
+from hungerloop.models.validation_contract import ValidationAssertion, ValidationContract
 from hungerloop.repository.in_memory_repo import InMemoryRepository
 from hungerloop.services.model_client import DummyModelClient
 
@@ -108,6 +110,91 @@ def _mission(task_id: str) -> Mission:
         features=[feature],
         created_at=datetime.now(timezone.utc),
     )
+
+
+def _seed_listing_mission(ctx: CliContext, task_id: str = "T-list") -> Mission:
+    ctx.repo.create_task(task_id, "List mission state")
+    mission = Mission(
+        mission_id=f"mission-{task_id}",
+        task_id=task_id,
+        title="Listing Mission",
+        description="List features and assertions.",
+        phases=[
+            MissionPhase(
+                phase_id="phase_2",
+                title="Second",
+                description="Second phase",
+                feature_ids=["feat_b"],
+            ),
+            MissionPhase(
+                phase_id="phase_1",
+                title="First",
+                description="First phase",
+                feature_ids=["feat_a", "feat_c"],
+            ),
+        ],
+        features=[
+            MissionFeature(
+                feature_id="feat_c",
+                hunger_item_id="H-003",
+                phase_id="phase_1",
+                title="C feature",
+                description="third",
+                status="blocked",
+            ),
+            MissionFeature(
+                feature_id="feat_b",
+                hunger_item_id="H-002",
+                phase_id="phase_2",
+                title="B feature",
+                description="second",
+                status="done",
+            ),
+            MissionFeature(
+                feature_id="feat_a",
+                hunger_item_id="H-001",
+                phase_id="phase_1",
+                title="A feature",
+                description="first",
+                status="in_progress",
+            ),
+        ],
+        created_at=datetime.now(timezone.utc),
+    )
+    ctx.repo.save_mission(mission)
+    ctx.repo.save_validation_contract(
+        ValidationContract(
+            mission_id=mission.mission_id,
+            assertions=[
+                ValidationAssertion(
+                    assertion_id="VAL-003",
+                    phase_id="phase_2",
+                    title="Third assertion",
+                    description="third",
+                    check_type="behavioral_assertion",
+                    status="blocked",
+                ),
+                ValidationAssertion(
+                    assertion_id="VAL-002",
+                    phase_id="phase_1",
+                    title="Second assertion",
+                    description="second",
+                    check_type="behavioral_assertion",
+                    status="passed",
+                    validated_at_loop=8,
+                ),
+                ValidationAssertion(
+                    assertion_id="VAL-001",
+                    phase_id="phase_1",
+                    title="First assertion",
+                    description="first",
+                    check_type="behavioral_assertion",
+                    status="pending",
+                ),
+            ],
+        )
+    )
+    return mission
 
 
 def test_help_lists_exact_mission_subcommands(tmp_path: Path) -> None:
@@ -338,3 +425,164 @@ def test_mission_runtime_zero_prints_notice_and_uses_legacy_path(
         for event in ctx.repo.list_events(task_id)
         if str(event["event_type"]).startswith("mission.")
     ]
+
+
+def test_features_lists_every_feature_sorted_and_filterable(tmp_path: Path) -> None:
+    ctx = _context(tmp_path)
+    _seed_listing_mission(ctx)
+
+    result = CliRunner().invoke(
+        cli,
+        ["mission", "features", "T-list"],
+        obj=ctx,
+    )
+
+    assert result.exit_code == 0, result.output
+    lines = result.output.splitlines()
+    assert lines[0].split() == [
+        "phase_id",
+        "feature_id",
+        "status",
+        "hunger_item_id",
+        "title",
+    ]
+    assert [line.split(maxsplit=4)[:4] for line in lines[1:]] == [
+        ["phase_1", "feat_a", "in_progress", "H-001"],
+        ["phase_1", "feat_c", "blocked", "H-003"],
+        ["phase_2", "feat_b", "done", "H-002"],
+    ]
+
+    phase_result = CliRunner().invoke(
+        cli,
+        ["mission", "features", "T-list", "--phase", "phase_2"],
+        obj=ctx,
+    )
+
+    assert phase_result.exit_code == 0, phase_result.output
+    assert [line.split(maxsplit=4)[:4] for line in phase_result.output.splitlines()[1:]] == [
+        ["phase_2", "feat_b", "done", "H-002"]
+    ]
+
+
+def test_features_json_emits_required_keys(tmp_path: Path) -> None:
+    ctx = _context(tmp_path)
+    _seed_listing_mission(ctx)
+
+    result = CliRunner().invoke(
+        cli,
+        ["mission", "features", "T-list", "--json"],
+        obj=ctx,
+    )
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert [
+        (row["phase_id"], row["feature_id"], row["status"], row["hunger_item_id"])
+        for row in payload
+    ] == [
+        ("phase_1", "feat_a", "in_progress", "H-001"),
+        ("phase_1", "feat_c", "blocked", "H-003"),
+        ("phase_2", "feat_b", "done", "H-002"),
+    ]
+    assert {"feature_id", "phase_id", "status", "hunger_item_id"} <= set(payload[0])
+
+
+def test_validation_lists_assertions_with_last_loop(tmp_path: Path) -> None:
+    ctx = _context(tmp_path)
+    _seed_listing_mission(ctx)
+
+    result = CliRunner().invoke(
+        cli,
+        ["mission", "validation", "T-list"],
+        obj=ctx,
+    )
+
+    assert result.exit_code == 0, result.output
+    lines = result.output.splitlines()
+    assert lines[0].split() == [
+        "assertion_id",
+        "phase_id",
+        "status",
+        "last_loop",
+        "title",
+    ]
+    assert [line.split(maxsplit=4)[:4] for line in lines[1:]] == [
+        ["VAL-001", "phase_1", "pending", "-"],
+        ["VAL-002", "phase_1", "passed", "8"],
+        ["VAL-003", "phase_2", "blocked", "-"],
+    ]
+
+
+def test_validation_json_filters_by_phase(tmp_path: Path) -> None:
+    ctx = _context(tmp_path)
+    _seed_listing_mission(ctx)
+
+    result = CliRunner().invoke(
+        cli,
+        ["mission", "validation", "T-list", "--phase", "phase_1", "--json"],
+        obj=ctx,
+    )
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert [
+        (row["assertion_id"], row["phase_id"], row["status"], row["last_loop"])
+        for row in payload
+    ] == [
+        ("VAL-001", "phase_1", "pending", None),
+        ("VAL-002", "phase_1", "passed", 8),
+    ]
+
+
+def test_mission_edit_non_paused_exits_7_and_records_rejection(
+    tmp_path: Path,
+) -> None:
+    ctx = _context(tmp_path)
+    _seed_listing_mission(ctx, task_id="T-edit")
+    before_features = ctx.repo.list_mission_features(mission_id="mission-T-edit")
+    before_assertions = ctx.repo.list_validation_assertions(mission_id="mission-T-edit")
+
+    result = CliRunner().invoke(cli, ["mission", "edit", "T-edit"], obj=ctx)
+
+    assert result.exit_code == 7
+    assert (
+        "mission import requires HUMAN_PAUSED state; use 'hungerloop hunger freeze' first"
+        in result.output
+    )
+    assert ctx.repo.list_mission_features(mission_id="mission-T-edit") == before_features
+    assert (
+        ctx.repo.list_validation_assertions(mission_id="mission-T-edit")
+        == before_assertions
+    )
+    assert [
+        event["event_type"]
+        for event in ctx.repo.list_events("T-edit")
+        if event["event_type"] == "MISSION_IMPORT_REJECTED"
+    ] == ["MISSION_IMPORT_REJECTED"]
+
+
+def test_mission_edit_no_editor_exits_6(tmp_path: Path) -> None:
+    ctx = _context(tmp_path)
+    _seed_listing_mission(ctx, task_id="T-edit")
+    ctx.repo.save_stop_report(
+        StopReport(
+            task_id="T-edit",
+            stop_reason="human_paused",
+            goal_status="paused",
+        )
+    )
+
+    result = CliRunner().invoke(
+        cli,
+        ["mission", "edit", "T-edit"],
+        obj=ctx,
+        env={"EDITOR": "", "PATH": str(tmp_path / "empty-bin")},
+    )
+
+    assert result.exit_code == 6
+    assert "No editor found; set EDITOR or install vi." in result.output
+    assert [
+        event["event_type"]
+        for event in ctx.repo.list_events("T-edit")
+        if event["event_type"] == "MISSION_EDIT_NO_EDITOR"
+    ] == ["MISSION_EDIT_NO_EDITOR"]

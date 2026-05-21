@@ -1060,6 +1060,17 @@ class InMemoryRepository:
             ]
         return assertions
 
+    def count_validation_contract_summary(self, mission_id: str) -> dict[str, int]:
+        counts = {
+            "pending": 0,
+            "passed": 0,
+            "failed": 0,
+            "blocked": 0,
+        }
+        for assertion in self.list_validation_assertions(mission_id=mission_id):
+            counts[assertion.status] += 1
+        return counts
+
     # =====================================================================
     # Section 9 — Approvals, misc, transactions
     # =====================================================================

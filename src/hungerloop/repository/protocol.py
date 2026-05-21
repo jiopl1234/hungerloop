@@ -519,6 +519,7 @@ class RepositoryProtocol(Protocol):
         mission_id: str | None = None,
         phase_id: str | None = None,
     ) -> list[ValidationAssertion]: ...
+    def count_validation_contract_summary(self, mission_id: str) -> dict[str, int]: ...
 
     # =====================================================================
     # Section 9 — Approvals, misc, transactions, task lock
