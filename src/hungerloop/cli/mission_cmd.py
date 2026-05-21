@@ -36,6 +36,7 @@ _MISSION_NEW_CREATED = "MISSION_NEW_CREATED"
 _MISSION_LOAD_FAILED = "MISSION_LOAD_FAILED"
 _MISSION_IMPORT_APPLIED = "MISSION_IMPORT_APPLIED"
 _MISSION_IMPORT_REJECTED = "MISSION_IMPORT_REJECTED"
+_MISSION_IMPORT_FAILED = "MISSION_IMPORT_FAILED"
 _MISSION_EDIT_APPLIED = "MISSION_EDIT_APPLIED"
 _MISSION_EDIT_CANCELLED = "MISSION_EDIT_CANCELLED"
 _MISSION_EDIT_NO_EDITOR = "MISSION_EDIT_NO_EDITOR"
@@ -762,6 +763,14 @@ def _import_mission_from_path(
         )
         click.echo(str(exc), err=True)
         raise click.exceptions.Exit(2) from exc
+    except Exception as exc:
+        ctx.repo.append_event(
+            _MISSION_IMPORT_FAILED,
+            {"task_id": task_id, "error": str(exc), "source": source},
+            task_id=task_id,
+        )
+        click.echo(str(exc), err=True)
+        raise click.exceptions.Exit(1) from exc
     ctx.repo.append_event(
         _MISSION_IMPORT_APPLIED,
         {

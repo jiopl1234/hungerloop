@@ -164,6 +164,43 @@ def test_safety_stop_passes_with_higher_ceiling_and_resume() -> None:
     )
 
 
+def test_pending_mission_import_rejects_with_resume_notice() -> None:
+    repo = InMemoryRepository()
+    _seed(repo, last_stop=StopReason.HUMAN_PAUSED)
+    repo.save_evidence(
+        task_id="t1",
+        loop_id=None,
+        evidence_type="human_input",
+        payload={"kind": "mission_import", "success": True},
+    )
+
+    with pytest.raises(
+        PreflightError,
+        match="mission import pending; resume to apply on next commit",
+    ):
+        check_resume_preflight(repo, "t1")
+
+
+def test_pending_mission_import_clears_after_state_regenerated() -> None:
+    repo = InMemoryRepository()
+    _seed(repo, last_stop=StopReason.HUMAN_PAUSED)
+    repo.save_evidence(
+        task_id="t1",
+        loop_id=None,
+        evidence_type="human_input",
+        payload={"kind": "mission_import", "success": True},
+    )
+    repo.append_event(
+        EventType.MISSION_STATE_REGENERATED,
+        {"mission_id": "mission-t1"},
+        task_id="t1",
+    )
+
+    with pytest.raises(PreflightError, match="HUMAN_PAUSED") as exc_info:
+        check_resume_preflight(repo, "t1")
+    assert "mission import pending" not in str(exc_info.value)
+
+
 def test_human_paused_requires_resume_flag() -> None:
     repo = InMemoryRepository()
     _seed(repo, last_stop=StopReason.HUMAN_PAUSED)

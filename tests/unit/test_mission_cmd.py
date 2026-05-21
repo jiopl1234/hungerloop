@@ -561,6 +561,243 @@ def test_mission_edit_non_paused_exits_7_and_records_rejection(
     ] == ["MISSION_IMPORT_REJECTED"]
 
 
+def test_mission_import_non_paused_exits_7_and_preserves_state(
+    tmp_path: Path,
+) -> None:
+    ctx = _context(tmp_path)
+    _seed_listing_mission(ctx, task_id="T-import")
+    mission_before = ctx.repo.get_mission("T-import")
+    assert mission_before is not None
+    before = (
+        mission_before,
+        ctx.repo.list_mission_features(mission_id=mission_before.mission_id),
+        ctx.repo.list_validation_assertions(mission_id=mission_before.mission_id),
+        ctx.repo.get_hunger_ledger("T-import"),
+    )
+
+    result = CliRunner().invoke(
+        cli,
+        ["mission", "import", "T-import", "--from", str(_write_mission_dir(tmp_path))],
+        obj=ctx,
+    )
+
+    assert result.exit_code == 7
+    assert (
+        "mission import requires HUMAN_PAUSED state; use 'hungerloop hunger freeze' first"
+        in result.output
+    )
+    after_mission = ctx.repo.get_mission("T-import")
+    assert after_mission is not None
+    assert (
+        after_mission,
+        ctx.repo.list_mission_features(mission_id=mission_before.mission_id),
+        ctx.repo.list_validation_assertions(mission_id=mission_before.mission_id),
+        ctx.repo.get_hunger_ledger("T-import"),
+    ) == before
+    assert [
+        event["event_type"]
+        for event in ctx.repo.list_events("T-import")
+        if event["event_type"] == "MISSION_IMPORT_REJECTED"
+    ] == ["MISSION_IMPORT_REJECTED"]
+    assert not [
+        row
+        for row in ctx.repo.list_evidence("T-import", evidence_type="human_input")
+        if row.get("kind") == "mission_import"
+    ]
+
+
+def test_mission_import_paused_updates_sqlite_only_and_prints_summary(
+    tmp_path: Path,
+) -> None:
+    ctx = _context(tmp_path)
+    _seed_listing_mission(ctx, task_id="T-import")
+    ctx.repo.save_stop_report(
+        StopReport(
+            task_id="T-import",
+            stop_reason="human_paused",
+            goal_status="paused",
+        )
+    )
+    best = tmp_path / "tasks" / "T-import" / "best" / "files"
+    best.mkdir(parents=True)
+    mission_markdown = best / "mission.md"
+    mission_markdown.write_text("# Original mirror\n", encoding="utf-8")
+    features_yaml = best / "features.yaml"
+    features_yaml.write_text("features: []\n", encoding="utf-8")
+    contract_yaml = best / "validation-contract.yaml"
+    contract_yaml.write_text("assertions: []\n", encoding="utf-8")
+    services_yaml = best / "services.yaml"
+    services_yaml.write_text("services: {}\n", encoding="utf-8")
+    before_artifacts = {
+        path.name: path.read_text(encoding="utf-8")
+        for path in [mission_markdown, features_yaml, contract_yaml, services_yaml]
+    }
+    mission_before = ctx.repo.get_mission("T-import")
+    assert mission_before is not None
+    import_dir = _write_mission_dir(tmp_path)
+    (import_dir / "validation-contract.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "assertions": [
+                    {
+                        "assertion_id": "VAL-IMPORT",
+                        "phase_id": "phase-1",
+                        "title": "Imported assertion",
+                        "description": "New assertion from import",
+                        "check_type": "behavioral_assertion",
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = CliRunner().invoke(
+        cli,
+        ["mission", "import", "T-import", "--from", str(import_dir)],
+        obj=ctx,
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "1 features added, 1 assertions added" in result.output
+    mission_after = ctx.repo.get_mission("T-import")
+    assert mission_after is not None
+    assert len(ctx.repo.list_mission_features(mission_id=mission_after.mission_id)) == 1
+    assert len(
+        ctx.repo.list_validation_assertions(mission_id=mission_after.mission_id)
+    ) == 1
+    assert {
+        path.name: path.read_text(encoding="utf-8")
+        for path in [mission_markdown, features_yaml, contract_yaml, services_yaml]
+    } == before_artifacts
+    assert [
+        event["event_type"]
+        for event in ctx.repo.list_events("T-import")
+        if event["event_type"] == "MISSION_IMPORT_APPLIED"
+    ] == ["MISSION_IMPORT_APPLIED"]
+    import_evidence = [
+        row
+        for row in ctx.repo.list_evidence("T-import", evidence_type="human_input")
+        if row.get("kind") == "mission_import"
+    ]
+    assert len(import_evidence) == 1
+    assert import_evidence[0]["success"] is True
+
+
+def test_mission_import_malformed_yaml_exits_2_without_writes(
+    tmp_path: Path,
+) -> None:
+    ctx = _context(tmp_path)
+    _seed_listing_mission(ctx, task_id="T-import")
+    ctx.repo.save_stop_report(
+        StopReport(
+            task_id="T-import",
+            stop_reason="human_paused",
+            goal_status="paused",
+        )
+    )
+    bad_dir = _write_mission_dir(tmp_path)
+    (bad_dir / "validation-contract.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "assertions": [
+                    {
+                        "phase_id": "phase-1",
+                        "title": "Missing id",
+                        "description": "No assertion_id",
+                        "check_type": "behavioral_assertion",
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    mission_before = ctx.repo.get_mission("T-import")
+    assert mission_before is not None
+    before = (
+        mission_before,
+        ctx.repo.list_mission_features(mission_id=mission_before.mission_id),
+        ctx.repo.list_validation_assertions(mission_id=mission_before.mission_id),
+        ctx.repo.get_hunger_ledger("T-import"),
+    )
+
+    result = CliRunner().invoke(
+        cli,
+        ["mission", "import", "T-import", "--from", str(bad_dir)],
+        obj=ctx,
+    )
+
+    assert result.exit_code == 2
+    assert "assertion_id" in result.output
+    assert (
+        ctx.repo.get_mission("T-import"),
+        ctx.repo.list_mission_features(mission_id=mission_before.mission_id),
+        ctx.repo.list_validation_assertions(mission_id=mission_before.mission_id),
+        ctx.repo.get_hunger_ledger("T-import"),
+    ) == before
+    assert [
+        event["event_type"]
+        for event in ctx.repo.list_events("T-import")
+        if event["event_type"] == "MISSION_LOAD_FAILED"
+    ] == ["MISSION_LOAD_FAILED"]
+    assert not [
+        row
+        for row in ctx.repo.list_evidence("T-import", evidence_type="human_input")
+        if row.get("kind") == "mission_import"
+    ]
+
+
+def test_mission_import_compiler_failure_rolls_back_sqlite(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ctx = _context(tmp_path)
+    _seed_listing_mission(ctx, task_id="T-import")
+    ctx.repo.save_stop_report(
+        StopReport(
+            task_id="T-import",
+            stop_reason="human_paused",
+            goal_status="paused",
+        )
+    )
+    mission_before = ctx.repo.get_mission("T-import")
+    assert mission_before is not None
+    before = (
+        mission_before,
+        ctx.repo.list_mission_features(mission_id=mission_before.mission_id),
+        ctx.repo.list_validation_assertions(mission_id=mission_before.mission_id),
+        ctx.repo.get_hunger_ledger("T-import"),
+    )
+
+    def fail_compile(self: object, task_id: str, parsed_spec: object) -> object:
+        raise RuntimeError("forced import failure")
+
+    monkeypatch.setattr(
+        "hungerloop.cli.mission_cmd.RequirementCompiler.compile_mission_changes",
+        fail_compile,
+    )
+
+    result = CliRunner().invoke(
+        cli,
+        ["mission", "import", "T-import", "--from", str(_write_mission_dir(tmp_path))],
+        obj=ctx,
+    )
+
+    assert result.exit_code != 0
+    assert "forced import failure" in result.output
+    assert (
+        ctx.repo.get_mission("T-import"),
+        ctx.repo.list_mission_features(mission_id=mission_before.mission_id),
+        ctx.repo.list_validation_assertions(mission_id=mission_before.mission_id),
+        ctx.repo.get_hunger_ledger("T-import"),
+    ) == before
+    assert [
+        event["event_type"]
+        for event in ctx.repo.list_events("T-import")
+        if event["event_type"] == "MISSION_IMPORT_FAILED"
+    ] == ["MISSION_IMPORT_FAILED"]
+
+
 def test_mission_edit_no_editor_exits_6(tmp_path: Path) -> None:
     ctx = _context(tmp_path)
     _seed_listing_mission(ctx, task_id="T-edit")

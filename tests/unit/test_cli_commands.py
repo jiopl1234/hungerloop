@@ -296,6 +296,31 @@ def test_run_preflight_blocks_on_hunger_expired_without_refill(
     assert "HUNGER_EXPIRED" in result.output
 
 
+def test_run_preflight_surfaces_pending_mission_import_notice(
+    context: CliContext,
+) -> None:
+    context.repo.save_hunger_ledger("t1", HungerLedger(task_id="t1", items=[]))
+    context.repo.save_stop_report(
+        StopReport(
+            task_id="t1",
+            stop_reason=StopReason.HUMAN_PAUSED,
+            goal_status="paused",
+        )
+    )
+    context.repo.append_event("MISSION_IMPORT_APPLIED", {}, task_id="t1")
+    context.repo.save_evidence(
+        task_id="t1",
+        loop_id=None,
+        evidence_type="human_input",
+        payload={"kind": "mission_import", "success": True},
+    )
+
+    result = CliRunner().invoke(cli, ["run", "t1", "--max-loops", "1"], obj=context)
+
+    assert result.exit_code == 2
+    assert "mission import pending; resume to apply on next commit" in result.output
+
+
 def test_run_with_refill_passes_preflight(context: CliContext) -> None:
     item = HungerItem(
         id="H-001",

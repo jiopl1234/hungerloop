@@ -460,6 +460,26 @@ class InMemoryRepository:
         }
         return eid
 
+    def list_evidence(
+        self,
+        task_id: str,
+        *,
+        evidence_type: EvidenceType | str | None = None,
+    ) -> list[dict[str, object]]:
+        wanted = (
+            evidence_type.value
+            if isinstance(evidence_type, EvidenceType)
+            else evidence_type
+        )
+        out: list[dict[str, object]] = []
+        for evidence_id, evidence in self._evidence.items():
+            if evidence.get("task_id") != task_id:
+                continue
+            if wanted is not None and evidence.get("type") != wanted:
+                continue
+            out.append({"evidence_id": evidence_id, **evidence})
+        return out
+
     def count_evidence_by_type(
         self,
         task_id: str,

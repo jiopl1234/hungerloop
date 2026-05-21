@@ -229,6 +229,14 @@ class RepositoryProtocol(Protocol):
     ) -> str: ...
     """Generic additive evidence write path for non-tool/model/shell flows."""
 
+    def list_evidence(
+        self,
+        task_id: str,
+        *,
+        evidence_type: EvidenceType | str | None = None,
+    ) -> list[dict[str, object]]: ...
+    """List persisted evidence rows for a task."""
+
     def count_evidence_by_type(
         self,
         task_id: str,

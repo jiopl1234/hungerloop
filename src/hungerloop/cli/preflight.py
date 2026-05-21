@@ -30,6 +30,11 @@ from hungerloop.models.enums import StopReason
 from hungerloop.models.events import EventType
 from hungerloop.repository.protocol import RepositoryProtocol
 
+_MISSION_IMPORT_PENDING_NOTICE = (
+    "mission import pending; resume to apply on next commit"
+)
+_MISSION_IMPORT_APPLIED = "MISSION_IMPORT_APPLIED"
+
 
 class PreflightError(RuntimeError):
     """Raised when the CLI refuses to call the orchestrator.
@@ -74,8 +79,9 @@ def check_resume_preflight(
             is not satisfied. Caller should print ``str(exc)`` and exit
             without invoking the Orchestrator.
     """
+    pending_import = _has_pending_mission_import(repo, task_id)
     last = repo.get_last_stop_reason(task_id)
-    if last is None:
+    if last is None and not pending_import:
         return  # fresh task — nothing to preflight
 
     if last == StopReason.DONE:
@@ -144,6 +150,8 @@ def check_resume_preflight(
 
     elif last == StopReason.HUMAN_PAUSED:
         if not resume_human:
+            if pending_import:
+                raise PreflightError(_MISSION_IMPORT_PENDING_NOTICE)
             raise PreflightError(
                 f"Task {task_id} previously stopped with HUMAN_PAUSED. "
                 "Pass --resume to unfreeze during this run, or run "
@@ -168,11 +176,46 @@ def check_resume_preflight(
                 "(audit-logged via repair_state_action with action=\"skipped\")."
             )
 
+    elif pending_import and not resume_human:
+        raise PreflightError(_MISSION_IMPORT_PENDING_NOTICE)
+
 
 def _has_open_items(repo: RepositoryProtocol, task_id: str) -> bool:
     """True iff at least one item in the ledger is currently active."""
     ledger = repo.get_hunger_ledger(task_id)
     return ledger.has_active_items()
+
+
+def _has_pending_mission_import(repo: RepositoryProtocol, task_id: str) -> bool:
+    """Return True when an import evidence row has not been mirrored yet."""
+    evidence_rows = repo.list_evidence(task_id, evidence_type="human_input")
+    import_seen = any(
+        row.get("kind") == "mission_import" and row.get("success") is True
+        for row in evidence_rows
+    )
+    if not import_seen:
+        return False
+    rows = repo.list_events(
+        task_id,
+        event_types=[
+            _MISSION_IMPORT_APPLIED,
+            EventType.MISSION_STATE_REGENERATED.value,
+        ],
+    )
+    if not rows:
+        return True
+
+    latest_import_index = -1
+    latest_regeneration_index = -1
+    for index, event in enumerate(rows):
+        if event.get("event_type") == _MISSION_IMPORT_APPLIED:
+            latest_import_index = index
+        elif event.get("event_type") == EventType.MISSION_STATE_REGENERATED.value:
+            latest_regeneration_index = index
+
+    if latest_import_index < 0:
+        return latest_regeneration_index < 0
+    return latest_import_index > latest_regeneration_index
 
 
 def _has_recent_repair_event(repo: RepositoryProtocol, task_id: str) -> bool:

@@ -711,6 +711,42 @@ class SQLiteRepository:
         evidence_payload = {"type": actual_type, **payload}
         return self._insert_evidence(task_id, loop_id, actual_type, evidence_payload)
 
+    def list_evidence(
+        self,
+        task_id: str,
+        *,
+        evidence_type: EvidenceType | str | None = None,
+    ) -> list[dict[str, object]]:
+        clauses = ["task_id = ?"]
+        params: list[object] = [task_id]
+        if evidence_type is not None:
+            actual_type = (
+                evidence_type.value
+                if isinstance(evidence_type, EvidenceType)
+                else evidence_type
+            )
+            clauses.append("evidence_type = ?")
+            params.append(actual_type)
+        rows = self.conn.execute(
+            f"""
+            SELECT evidence_id, task_id, loop_id, evidence_type, payload_json
+            FROM evidence
+            WHERE {" AND ".join(clauses)}
+            ORDER BY evidence_id ASC
+            """,
+            tuple(params),
+        ).fetchall()
+        return [
+            {
+                "evidence_id": str(row["evidence_id"]),
+                "task_id": str(row["task_id"]),
+                "loop_id": row["loop_id"],
+                "type": str(row["evidence_type"]),
+                **_loads(str(row["payload_json"])),
+            }
+            for row in rows
+        ]
+
     def count_evidence_by_type(
         self,
         task_id: str,
