@@ -69,6 +69,16 @@ def _seed_mission(ctx: CliContext, task_id: str = "T-import") -> None:
     ctx.repo.save_hunger_ledger(task_id, HungerLedger(task_id=task_id, items=[]))
 
 
+def _mark_task_human_paused(ctx: CliContext, task_id: str = "T-import") -> None:
+    assert isinstance(ctx.repo, SQLiteRepository)
+    task = ctx.repo.get_task(task_id)
+    assert task is not None
+    ctx.repo.conn.execute(
+        "UPDATE tasks SET status = ?, updated_at = ? WHERE task_id = ?",
+        ("HUMAN_PAUSED", task.updated_at, task_id),
+    )
+
+
 def _write_update_dir(tmp_path: Path, *, assertion_phase_id: str = "phase-1") -> Path:
     mission_dir = tmp_path / "updated"
     mission_dir.mkdir()
@@ -185,6 +195,7 @@ def test_paused_accepts_import_evidence_and_leaves_best_mirrors(tmp_path: Path) 
             goal_status="paused",
         )
     )
+    _mark_task_human_paused(ctx)
     best = tmp_path / "tasks" / "T-import" / "best" / "files"
     best.mkdir(parents=True)
     mirror_files = [
@@ -232,6 +243,7 @@ def test_paused_import_with_unknown_assertion_phase_exits_2_without_fk_error(
             goal_status="paused",
         )
     )
+    _mark_task_human_paused(ctx)
     before_counts = _sql_counts(db_path)
 
     result = CliRunner().invoke(

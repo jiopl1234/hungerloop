@@ -477,11 +477,7 @@ def _render_validation_table(assertions: list[ValidationAssertion]) -> str:
 
 def _is_human_paused(ctx: CliContext, task_id: str) -> bool:
     task = ctx.repo.get_task(task_id)
-    last_stop = ctx.repo.get_last_stop_reason(task_id)
-    clock = ctx.repo.get_hunger_clock(task_id)
-    return (task is not None and str(task.status).upper() == "HUMAN_PAUSED") or (
-        last_stop is not None and last_stop.value == "human_paused"
-    ) or clock.frozen
+    return task is not None and task.status == "HUMAN_PAUSED"
 
 
 def _record_import_rejected(

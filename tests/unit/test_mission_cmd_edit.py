@@ -17,6 +17,23 @@ from hungerloop.repository.in_memory_repo import InMemoryRepository
 from hungerloop.repository.sqlite_repo import SQLiteRepository
 
 
+def _set_task_status(ctx: CliContext, task_id: str, status: str) -> None:
+    task = ctx.repo.get_task(task_id)
+    assert task is not None
+    if isinstance(ctx.repo, InMemoryRepository):
+        ctx.repo._tasks[task_id] = task.model_copy(update={"status": status})
+        return
+    assert isinstance(ctx.repo, SQLiteRepository)
+    ctx.repo.conn.execute(
+        "UPDATE tasks SET status = ?, updated_at = ? WHERE task_id = ?",
+        (status, task.updated_at, task_id),
+    )
+
+
+def _set_task_human_paused(ctx: CliContext, task_id: str) -> None:
+    _set_task_status(ctx, task_id, "HUMAN_PAUSED")
+
+
 def _context(tmp_path: Path) -> CliContext:
     return CliContext(repo=InMemoryRepository(), workspace_root=tmp_path)
 
@@ -102,10 +119,70 @@ def _seed_paused_mission(ctx: CliContext, task_id: str = "T-edit") -> Mission:
             goal_status="paused",
         )
     )
+    _set_task_human_paused(ctx, task_id)
     best = ctx.workspace_root / "tasks" / task_id / "best" / "files"
     best.mkdir(parents=True)
     (best / "mission.md").write_text(_mission_markdown(), encoding="utf-8")
     return mission
+
+
+def test_edit_requires_task_record_status_human_paused(tmp_path: Path) -> None:
+    ctx = _context(tmp_path)
+    _seed_paused_mission(ctx)
+    _set_task_status(ctx, "T-edit", "stopped")
+    clock = ctx.repo.get_hunger_clock("T-edit")
+    clock.frozen = True
+    ctx.repo.save_hunger_clock(clock)
+
+    result = CliRunner().invoke(
+        cli,
+        ["mission", "edit", "T-edit"],
+        obj=ctx,
+        env={"EDITOR": "/usr/bin/false"},
+    )
+
+    assert result.exit_code == 7
+    assert (
+        "mission import requires HUMAN_PAUSED state; use 'hungerloop hunger freeze' first"
+        in result.output
+    )
+    assert [
+        event["event_type"]
+        for event in ctx.repo.list_events("T-edit")
+        if event["event_type"] == "MISSION_IMPORT_REJECTED"
+    ] == ["MISSION_IMPORT_REJECTED"]
+    assert all(
+        event["event_type"] != "MISSION_EDIT_CANCELLED"
+        for event in ctx.repo.list_events("T-edit")
+    )
+
+
+def test_edit_allows_when_task_record_status_human_paused(tmp_path: Path) -> None:
+    ctx = _context(tmp_path)
+    _seed_paused_mission(ctx)
+    editor = tmp_path / "editor.py"
+    editor.write_text(
+        "\n".join(
+            [
+                "#!/usr/bin/env python3",
+                "import sys",
+                "from pathlib import Path",
+                "Path(sys.argv[1]).read_text(encoding='utf-8')",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    editor.chmod(0o755)
+
+    result = CliRunner().invoke(
+        cli,
+        ["mission", "edit", "T-edit"],
+        obj=ctx,
+        env={"EDITOR": str(editor)},
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "0 features added, 0 assertions added" in result.output
 
 
 def _mission_state_dump(db_path: Path) -> dict[str, list[tuple[object, ...]]]:

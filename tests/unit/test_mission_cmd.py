@@ -197,6 +197,13 @@ def _seed_listing_mission(ctx: CliContext, task_id: str = "T-list") -> Mission:
     return mission
 
 
+def _mark_task_human_paused(ctx: CliContext, task_id: str) -> None:
+    task = ctx.repo.get_task(task_id)
+    assert task is not None
+    assert isinstance(ctx.repo, InMemoryRepository)
+    ctx.repo._tasks[task_id] = task.model_copy(update={"status": "HUMAN_PAUSED"})
+
+
 def test_help_lists_exact_mission_subcommands(tmp_path: Path) -> None:
     result = CliRunner().invoke(cli, ["mission", "--help"], obj=_context(tmp_path))
 
@@ -606,6 +613,65 @@ def test_mission_import_non_paused_exits_7_and_preserves_state(
     ]
 
 
+def test_mission_import_last_stop_reason_without_task_status_exits_7(
+    tmp_path: Path,
+) -> None:
+    ctx = _context(tmp_path)
+    _seed_listing_mission(ctx, task_id="T-import")
+    ctx.repo.save_stop_report(
+        StopReport(
+            task_id="T-import",
+            stop_reason="human_paused",
+            goal_status="paused",
+        )
+    )
+
+    result = CliRunner().invoke(
+        cli,
+        ["mission", "import", "T-import", "--from", str(_write_mission_dir(tmp_path))],
+        obj=ctx,
+    )
+
+    assert result.exit_code == 7
+    assert (
+        "mission import requires HUMAN_PAUSED state; use 'hungerloop hunger freeze' first"
+        in result.output
+    )
+    assert [
+        event["event_type"]
+        for event in ctx.repo.list_events("T-import")
+        if event["event_type"] == "MISSION_IMPORT_REJECTED"
+    ] == ["MISSION_IMPORT_REJECTED"]
+
+
+def test_mission_edit_frozen_clock_without_task_status_exits_7(
+    tmp_path: Path,
+) -> None:
+    ctx = _context(tmp_path)
+    _seed_listing_mission(ctx, task_id="T-edit")
+    clock = ctx.repo.get_hunger_clock("T-edit")
+    clock.frozen = True
+    ctx.repo.save_hunger_clock(clock)
+
+    result = CliRunner().invoke(
+        cli,
+        ["mission", "edit", "T-edit"],
+        obj=ctx,
+        env={"EDITOR": "/usr/bin/false"},
+    )
+
+    assert result.exit_code == 7
+    assert (
+        "mission import requires HUMAN_PAUSED state; use 'hungerloop hunger freeze' first"
+        in result.output
+    )
+    assert [
+        event["event_type"]
+        for event in ctx.repo.list_events("T-edit")
+        if event["event_type"] == "MISSION_IMPORT_REJECTED"
+    ] == ["MISSION_IMPORT_REJECTED"]
+
+
 def test_mission_import_paused_updates_sqlite_only_and_prints_summary(
     tmp_path: Path,
 ) -> None:
@@ -618,6 +684,7 @@ def test_mission_import_paused_updates_sqlite_only_and_prints_summary(
             goal_status="paused",
         )
     )
+    _mark_task_human_paused(ctx, "T-import")
     best = tmp_path / "tasks" / "T-import" / "best" / "files"
     best.mkdir(parents=True)
     mission_markdown = best / "mission.md"
@@ -696,6 +763,7 @@ def test_mission_import_malformed_yaml_exits_2_without_writes(
             goal_status="paused",
         )
     )
+    _mark_task_human_paused(ctx, "T-import")
     bad_dir = _write_mission_dir(tmp_path)
     (bad_dir / "validation-contract.yaml").write_text(
         yaml.safe_dump(
@@ -760,6 +828,7 @@ def test_mission_import_compiler_failure_rolls_back_sqlite(
             goal_status="paused",
         )
     )
+    _mark_task_human_paused(ctx, "T-import")
     mission_before = ctx.repo.get_mission("T-import")
     assert mission_before is not None
     before = (
@@ -808,6 +877,7 @@ def test_mission_edit_no_editor_exits_6(tmp_path: Path) -> None:
             goal_status="paused",
         )
     )
+    _mark_task_human_paused(ctx, "T-edit")
 
     result = CliRunner().invoke(
         cli,
