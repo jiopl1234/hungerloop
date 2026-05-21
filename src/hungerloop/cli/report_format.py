@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from hungerloop.cli.mission_cockpit import build_mission_cockpit, render_mission_cockpit
 from hungerloop.models.enums import HungerItemStatus
 from hungerloop.models.tracing import LoopTrace
 from hungerloop.repository.protocol import RepositoryProtocol
@@ -72,7 +73,7 @@ def build_report_dict(
             "recommendation": _resolve_recommendation(repo, task_id),
         }
 
-    return {
+    report: dict[str, Any] = {
         "schema_version": REPORT_SCHEMA_VERSION,
         "task_id": task_id,
         "goal": goal,
@@ -98,6 +99,12 @@ def build_report_dict(
         "accepted_check_keys": list(best.accepted_check_keys) if best else [],
         "last_loop": last_loop_block,
     }
+    mission = repo.get_mission(task_id)
+    if mission is not None:
+        cockpit = build_mission_cockpit(repo, mission)
+        report["mission_cockpit"] = cockpit.to_json_payload()
+        report["mission_cockpit_text"] = render_mission_cockpit(cockpit)
+    return report
 
 
 def format_markdown(report: dict[str, Any]) -> str:
@@ -182,6 +189,17 @@ def format_markdown(report: dict[str, Any]) -> str:
         lines.append("## Accepted check keys")
         for key in accepted:
             lines.append(f"- `{key}`")
+        lines.append("")
+
+    mission_cockpit_text = report.get("mission_cockpit_text")
+    if mission_cockpit_text:
+        lines.extend(
+            [
+                "## Mission cockpit",
+                str(mission_cockpit_text).rstrip(),
+                "",
+            ]
+        )
 
     return "\n".join(lines).rstrip() + "\n"
 

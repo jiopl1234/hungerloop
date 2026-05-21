@@ -241,6 +241,63 @@ def test_export_includes_v0_6_handoff_events_without_allow_list(
     assert {event_type.value for event_type in expected} <= event_types
 
 
+def test_export_includes_all_v0_6_mission_runtime_events_without_allow_list(
+    context: CliContext,
+) -> None:
+    """Trace export generically streams every v0.6 mission runtime event
+    family rather than whitelisting only older loop or handoff names.
+    """
+    expected = _v0_6_mission_runtime_event_types()
+    for event_type in expected:
+        event_name = event_type.value if isinstance(event_type, EventType) else event_type
+        context.repo.append_event(
+            event_type,
+            {
+                "mission_id": "mission-1",
+                "phase_id": "phase-1",
+                "feature_id": "feature-1",
+                "assignment_id": "assignment-1",
+                "event_name": event_name,
+            },
+            task_id="demo-1",
+            loop_id=1,
+        )
+    runner = CliRunner()
+
+    result = runner.invoke(cli, ["trace", "export", "demo-1"], obj=context)
+
+    assert result.exit_code == 0, result.output
+    parsed = [
+        json.loads(line) for line in result.output.split("\n") if line
+    ]
+    event_types = {row["event_type"] for row in parsed}
+    assert {
+        event_type.value if isinstance(event_type, EventType) else event_type
+        for event_type in expected
+    } <= event_types
+
+
+def _v0_6_mission_runtime_event_types() -> list[EventType | str]:
+    prefixes = (
+        "mission.phase_",
+        "worker.assignment_",
+        "worker.handoff_",
+        "validation.scrutiny_",
+        "validation.user_testing_",
+    )
+    return [
+        *[
+            event_type
+            for event_type in EventType
+            if event_type.value.startswith(prefixes)
+        ],
+        EventType.MISSION_STATE_REGENERATED,
+        # M6 requires trace export to avoid enum/allow-list coupling, so
+        # include a forward-compatible event name that is not in EventType.
+        "worker.handoff_processed",
+    ]
+
+
 def test_export_non_json_payload_handled_gracefully(
     context: CliContext,
 ) -> None:
