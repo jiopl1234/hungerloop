@@ -122,10 +122,7 @@ class HungerEngine:
                 validation_phase_id=validation_phase_id,
                 now=now,
             )
-            if (
-                stop_reason == StopReason.DONE
-                and phase_transition_status == "validating"
-            ):
+            if phase_transition_status == "validating":
                 should_stop = False
                 stop_reason = None
             elif stop_reason == StopReason.DONE and self._mission_blocks_done_stop(
@@ -180,6 +177,31 @@ class HungerEngine:
             )
             if phase.status == "done":
                 continue
+            if phase.status == "validating":
+                if self._validation_failed(validation_outcome):
+                    last_transition_status = "in_progress"
+                    self._transition_phase(
+                        task_id=task_id,
+                        mission_id=mission.mission_id,
+                        phase=phase,
+                        status="in_progress",
+                        event_type=EventType.MISSION_PHASE_VALIDATION_FAILED,
+                        completed_at=None,
+                    )
+                elif self._validation_passed(validation_outcome):
+                    last_transition_status = "done"
+                    self._transition_phase(
+                        task_id=task_id,
+                        mission_id=mission.mission_id,
+                        phase=phase,
+                        status="done",
+                        event_type=EventType.MISSION_PHASE_VALIDATED,
+                        completed_at=now,
+                        extra_event_types=[EventType.MISSION_PHASE_COMPLETED],
+                    )
+                else:
+                    last_transition_status = "validating"
+                continue
             if self._should_start_phase(phase):
                 last_transition_status = "in_progress"
                 self._transition_phase(
@@ -202,27 +224,6 @@ class HungerEngine:
                     completed_at=None,
                 )
                 continue
-            if phase.status == "validating":
-                if self._validation_failed(validation_outcome):
-                    last_transition_status = "in_progress"
-                    self._transition_phase(
-                        task_id=task_id,
-                        mission_id=mission.mission_id,
-                        phase=phase,
-                        status="in_progress",
-                        event_type=EventType.MISSION_PHASE_VALIDATION_FAILED,
-                        completed_at=None,
-                    )
-                elif self._validation_passed(validation_outcome):
-                    last_transition_status = "done"
-                    self._transition_phase(
-                        task_id=task_id,
-                        mission_id=mission.mission_id,
-                        phase=phase,
-                        status="done",
-                        event_type=EventType.MISSION_PHASE_COMPLETED,
-                        completed_at=now,
-                    )
         return last_transition_status
 
     def _should_start_phase(self, phase: MissionPhase) -> bool:
@@ -299,6 +300,7 @@ class HungerEngine:
         status: MissionPhaseStatus,
         event_type: EventType,
         completed_at: datetime | None,
+        extra_event_types: list[EventType] | None = None,
     ) -> None:
         assert self.repo is not None
         previous_status = phase.status
@@ -307,16 +309,15 @@ class HungerEngine:
             status,
             completed_at=completed_at,
         )
-        self.repo.append_event(
-            event_type,
-            {
-                "mission_id": mission_id,
-                "phase_id": phase.phase_id,
-                "previous_status": previous_status,
-                "new_status": status,
-            },
-            task_id=task_id,
-        )
+        payload: dict[str, object] = {
+            "mission_id": mission_id,
+            "phase_id": phase.phase_id,
+            "previous_status": previous_status,
+            "new_status": status,
+        }
+        self.repo.append_event(event_type, payload, task_id=task_id)
+        for extra_event_type in extra_event_types or []:
+            self.repo.append_event(extra_event_type, payload, task_id=task_id)
 
     def _compute_drive_budget(
         self,

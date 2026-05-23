@@ -67,3 +67,18 @@ class DownMigrationDisallowed(MigrationError):
 
 class IllegalPhaseTransition(MigrationError):
     """Raised when mission phase or feature status moves through a forbidden edge."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        phase_id: str | None = None,
+        feature_id: str | None = None,
+        from_status: str | None = None,
+        to_status: str | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.phase_id = phase_id
+        self.feature_id = feature_id
+        self.from_status = from_status
+        self.to_status = to_status

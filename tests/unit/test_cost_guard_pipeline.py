@@ -25,13 +25,16 @@ AGENT_ID = "execution_worker_v1"
 
 
 class _RecordingCostGuard:
-    def __init__(self, recorder: list[str]) -> None:
+    def __init__(self, recorder: list[str], *, raise_on_call: int | None = None) -> None:
         self.recorder = recorder
         self.calls: list[str] = []
+        self.raise_on_call = raise_on_call
 
     def assert_within_budget(self, task_id: str) -> None:
         self.calls.append(task_id)
         self.recorder.append("budget")
+        if self.raise_on_call is not None and len(self.calls) == self.raise_on_call:
+            raise SafetyStopError("cost ceiling")
 
 
 class _Runtime:
@@ -258,4 +261,110 @@ async def test_mid_pipeline_safety_stop_skips_remaining_stages(
 
     assert cost_guard.calls == [TASK_ID, TASK_ID, TASK_ID]
     assert scrutiny.calls == 0
-    assert recorder == ["budget", "validate:deterministic", "budget", "budget"]
+
+
+async def test_safety_stop_mid_scrutiny(repo: InMemoryRepository) -> None:
+    recorder: list[str] = []
+    cost_guard = _RecordingCostGuard(recorder, raise_on_call=4)
+    deterministic = _ValidationStage(
+        _validation_report("VAL-deterministic", ValidationVerdict.PASS),
+        recorder,
+        "deterministic",
+    )
+    scrutiny = _ValidationStage(
+        _validation_report("VAL-scrutiny", ValidationVerdict.PASS),
+        recorder,
+        "scrutiny",
+    )
+    user_testing = _ValidationStage(
+        _validation_report("VAL-user-testing", ValidationVerdict.PASS),
+        recorder,
+        "user_testing",
+    )
+    pipeline = ValidationPipeline(
+        repo=repo,
+        cost_guard=cost_guard,
+        deterministic_validator=deterministic,
+        scrutiny_validator=scrutiny,
+        user_testing_validator=user_testing,
+    )
+
+    with pytest.raises(SafetyStopError):
+        await pipeline.run(
+            TASK_ID,
+            LOOP_ID,
+            _candidate(),
+            ["H-001"],
+            mission=_mission(),
+            phase=_phase(),
+            budget=BudgetAllocation(phase=LoopPhase.EXPLORE),
+        )
+
+    assert recorder == [
+        "budget",
+        "validate:deterministic",
+        "budget",
+        "budget",
+        "validate:scrutiny",
+        "budget",
+    ]
+    assert scrutiny.calls == 1
+    assert user_testing.calls == 0
+    assert repo.list_events(TASK_ID, event_types=["validation.pipeline_completed"]) == []
+    assert repo.list_events(TASK_ID, event_types=["mission.state_regenerated"]) == []
+
+
+async def test_two_assignments_three_stage_pipeline_cost_guard_count(
+    repo: InMemoryRepository,
+    tmp_path: Path,
+) -> None:
+    recorder: list[str] = []
+    cost_guard = _RecordingCostGuard(recorder)
+    runtime = _Runtime(recorder)
+    scheduler = WorkerScheduler(
+        repo=repo,
+        worker_runtime=runtime,
+        cost_guard=cost_guard,
+        workspace_manager=WorkspaceManager(tmp_path),
+    )
+
+    await scheduler.execute_assignments(
+        TASK_ID,
+        LOOP_ID,
+        [_assignment("A"), _assignment("B")],
+        _context,
+    )
+
+    deterministic = _ValidationStage(
+        _validation_report("VAL-deterministic", ValidationVerdict.PASS),
+        recorder,
+        "deterministic",
+    )
+    scrutiny = _ValidationStage(
+        _validation_report("VAL-scrutiny", ValidationVerdict.PASS),
+        recorder,
+        "scrutiny",
+    )
+    user_testing = _ValidationStage(
+        _validation_report("VAL-user-testing", ValidationVerdict.PASS),
+        recorder,
+        "user_testing",
+    )
+    pipeline = ValidationPipeline(
+        repo=repo,
+        cost_guard=cost_guard,
+        deterministic_validator=deterministic,
+        scrutiny_validator=scrutiny,
+        user_testing_validator=user_testing,
+    )
+    await pipeline.run(
+        TASK_ID,
+        LOOP_ID,
+        _candidate(),
+        ["H-001"],
+        mission=_mission(),
+        phase=_phase(),
+        budget=BudgetAllocation(phase=LoopPhase.EXPLORE),
+    )
+
+    assert len(cost_guard.calls) >= 10

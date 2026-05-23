@@ -27,13 +27,14 @@ def _assignment(
     *,
     depends_on: list[str] | None = None,
     max_retries: int = 0,
+    target_feature_ids: list[str] | None = None,
 ) -> Assignment:
     return Assignment(
         assignment_id=assignment_id,
         agent_id=AGENT_ID,
         mission=assignment_id,
         target_hunger_item_ids=[f"H-{assignment_id}"],
-        target_feature_ids=[f"F-{assignment_id}"],
+        target_feature_ids=target_feature_ids or [f"F-{assignment_id}"],
         allowed_tools=["write_file"],
         depends_on=depends_on or [],
         max_retries=max_retries,
@@ -260,7 +261,8 @@ async def test_retry_succeeds_with_same_assignment_id_and_persists_audit(
     events = repo.list_events(TASK_ID, event_types=["worker.assignment_started"])
     assert [event["payload"]["attempt"] for event in events] == [1, 2]
     retried = repo.list_events(TASK_ID, event_types=["worker.assignment_retried"])
-    assert retried[0]["payload"] == {"assignment_id": "A", "attempt": 2}
+    assert retried[0]["payload"]["assignment_id"] == "A"
+    assert retried[0]["payload"]["attempt"] == 2
 
     audit_path = (
         WorkspaceManager(tmp_path).task_root(TASK_ID)
@@ -310,7 +312,8 @@ async def test_retry_exhaustion_skips_downstream_and_emits_lifecycle_events(
     ]
 
     skipped = repo.list_events(TASK_ID, event_types=["worker.assignment_skipped"])
-    assert skipped[0]["payload"] == {"assignment_id": "C", "blocked_by": "B"}
+    assert skipped[0]["payload"]["assignment_id"] == "C"
+    assert skipped[0]["payload"]["blocked_by"] == "B"
     event_types = {
         str(event["event_type"])
         for event in repo.list_events(TASK_ID, since_loop=LOOP_ID, until_loop=LOOP_ID)
@@ -450,3 +453,26 @@ async def test_safety_stop_marks_remaining_skipped_and_propagates(
     skipped = repo.list_events(TASK_ID, event_types=["worker.assignment_skipped"])
     assert [event["payload"]["assignment_id"] for event in skipped] == ["B", "C"]
     assert cost_guard.calls == [TASK_ID, TASK_ID, TASK_ID]
+
+
+async def test_assignment_events_include_scoping_keys(
+    repo: InMemoryRepository,
+    tmp_path: Path,
+) -> None:
+    assignment = _assignment("A", target_feature_ids=["feature-a"])
+    runtime = _RecordingRuntime({"A": [_handoff("A")]})
+
+    await _scheduler(repo=repo, tmp_path=tmp_path, runtime=runtime).execute_assignments(
+        TASK_ID,
+        LOOP_ID,
+        [assignment],
+        _context_factory([]),
+    )
+
+    started = repo.list_events(TASK_ID, event_types=["worker.assignment_started"])[0]
+    completed = repo.list_events(TASK_ID, event_types=["worker.assignment_completed"])[0]
+    for event in (started, completed):
+        payload = event["payload"]
+        assert payload["assignment_id"] == "A"
+        assert payload["target_feature_ids"] == ["feature-a"]
+        assert payload["target_hunger_item_ids"] == ["H-A"]

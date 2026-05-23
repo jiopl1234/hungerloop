@@ -129,6 +129,15 @@ class UserTestingValidator:
                     assertion=assertion,
                     result=result,
                 )
+            self._emit_assertion_result(
+                task_id=task_id,
+                loop_id=loop_id,
+                contract=contract,
+                phase=phase,
+                assertion=assertion,
+                result=result,
+                evidence_ids=predicate_evidence_ids,
+            )
 
         verdict = self._decide_verdict(evaluated_assertions, missing_evidence)
         report = ValidationReport(
@@ -300,6 +309,36 @@ class UserTestingValidator:
                 "argv": list(result.argv),
                 "stdout": result.stdout[:_MAX_EVENT_OUTPUT_CHARS],
                 "stderr": result.stderr[:_MAX_EVENT_OUTPUT_CHARS],
+            },
+            task_id=task_id,
+            loop_id=loop_id,
+        )
+
+    def _emit_assertion_result(
+        self,
+        *,
+        task_id: str,
+        loop_id: int,
+        contract: ValidationContract,
+        phase: MissionPhase,
+        assertion: ValidationAssertion,
+        result: UserTestingPredicateResult,
+        evidence_ids: list[str],
+    ) -> None:
+        event_type = (
+            EventType.VALIDATION_ASSERTION_PASSED
+            if result.status == "passed"
+            else EventType.VALIDATION_ASSERTION_FAILED
+        )
+        self.repo.append_event(
+            event_type,
+            {
+                **self._event_payload(contract=contract, phase=phase),
+                "assertion_id": assertion.assertion_id,
+                "check_type": assertion.check_type,
+                "status": result.status,
+                "detail": result.detail,
+                "evidence_ids": list(evidence_ids),
             },
             task_id=task_id,
             loop_id=loop_id,

@@ -68,7 +68,7 @@ class WorkerScheduler:
                 self._emit_assignment_skipped(
                     task_id,
                     loop_id,
-                    assignment.assignment_id,
+                    assignment,
                     blocked_by="cycle",
                 )
             return SchedulerResult(
@@ -100,7 +100,7 @@ class WorkerScheduler:
                 self._emit_assignment_skipped(
                     task_id,
                     loop_id,
-                    assignment.assignment_id,
+                    assignment,
                     blocked_by=blocked_by,
                 )
                 continue
@@ -124,7 +124,7 @@ class WorkerScheduler:
                     self._emit_assignment_skipped(
                         task_id,
                         loop_id,
-                        remaining.assignment_id,
+                        remaining,
                         blocked_by="safety_stop",
                     )
                 raise exc.original
@@ -175,7 +175,10 @@ class WorkerScheduler:
 
             self.repo.append_event(
                 EventType.WORKER_ASSIGNMENT_STARTED,
-                {"assignment_id": assignment.assignment_id, "attempt": attempt},
+                {
+                    **self._assignment_payload(assignment),
+                    "attempt": attempt,
+                },
                 task_id=task_id,
                 loop_id=loop_id,
             )
@@ -207,7 +210,7 @@ class WorkerScheduler:
                 self.repo.append_event(
                     EventType.WORKER_ASSIGNMENT_FAILED,
                     {
-                        "assignment_id": assignment.assignment_id,
+                        **self._assignment_payload(assignment),
                         "error_type": handoff.error_type or "unknown",
                         "handoff_id": handoff_id,
                     },
@@ -218,7 +221,7 @@ class WorkerScheduler:
                 self.repo.append_event(
                     EventType.WORKER_ASSIGNMENT_COMPLETED,
                     {
-                        "assignment_id": assignment.assignment_id,
+                        **self._assignment_payload(assignment),
                         "handoff_id": handoff_id,
                     },
                     task_id=task_id,
@@ -242,7 +245,7 @@ class WorkerScheduler:
                 self.repo.append_event(
                     EventType.WORKER_ASSIGNMENT_RETRIED,
                     {
-                        "assignment_id": assignment.assignment_id,
+                        **self._assignment_payload(assignment),
                         "attempt": assignment.retry_count + 1,
                     },
                     task_id=task_id,
@@ -399,16 +402,25 @@ class WorkerScheduler:
         self,
         task_id: str,
         loop_id: int,
-        assignment_id: str,
+        assignment: Assignment,
         *,
         blocked_by: str,
     ) -> None:
         self.repo.append_event(
             EventType.WORKER_ASSIGNMENT_SKIPPED,
-            {"assignment_id": assignment_id, "blocked_by": blocked_by},
+            {**self._assignment_payload(assignment), "blocked_by": blocked_by},
             task_id=task_id,
             loop_id=loop_id,
         )
+
+    @staticmethod
+    def _assignment_payload(assignment: Assignment) -> dict[str, object]:
+        return {
+            "assignment_id": assignment.assignment_id,
+            "agent_id": assignment.agent_id,
+            "target_hunger_item_ids": list(assignment.target_hunger_item_ids),
+            "target_feature_ids": list(assignment.target_feature_ids),
+        }
 
     def _emit_write_collisions(
         self,

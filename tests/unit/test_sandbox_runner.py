@@ -1,5 +1,9 @@
 """Unit tests for SandboxRunner (Task 7)."""
 
+import os
+import signal
+import sys
+import time
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -69,6 +73,43 @@ async def test_timeout_returns_timed_out(runner: SandboxRunner, tmp_path: Path) 
         evidence_label="test",
     )
     assert result.timed_out is True
+
+
+async def test_timeout_kills_process_group(
+    runner: SandboxRunner,
+    tmp_path: Path,
+) -> None:
+    pid_file = tmp_path / "child.pid"
+    result = await runner.run_argv(
+        task_id="t1",
+        loop_id=1,
+        argv=[
+            sys.executable,
+            "-c",
+            (
+                "import pathlib, subprocess, sys, time; "
+                "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)']); "
+                f"pathlib.Path({str(pid_file)!r}).write_text(str(child.pid)); "
+                "time.sleep(30)"
+            ),
+        ],
+        cwd=tmp_path,
+        timeout=1,
+        evidence_label="test",
+    )
+
+    assert result.timed_out is True
+    child_pid = int(pid_file.read_text(encoding="utf-8"))
+    deadline = time.monotonic() + 5.0
+    while time.monotonic() < deadline:
+        try:
+            os.kill(child_pid, 0)
+        except ProcessLookupError:
+            break
+        time.sleep(0.05)
+    else:
+        os.kill(child_pid, signal.SIGKILL)
+        pytest.fail(f"child process {child_pid} survived sandbox timeout")
 
 
 async def test_stdout_truncated(mock_repo: MagicMock, tmp_path: Path) -> None:

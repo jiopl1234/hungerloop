@@ -63,11 +63,14 @@ def test_trace_export_includes_all_present_v0_6_event_types(tmp_path: Path) -> N
 
 def _v0_6_mission_runtime_event_types() -> list[EventType | str]:
     prefixes = (
+        "mission.created",
         "mission.phase_",
+        "mission.feature_",
         "worker.assignment_",
         "worker.handoff_",
         "validation.scrutiny_",
         "validation.user_testing_",
+        "validation.assertion_",
     )
     return [
         *[

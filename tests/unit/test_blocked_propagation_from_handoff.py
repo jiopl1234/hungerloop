@@ -135,6 +135,38 @@ def test_handoff_blocker_propagates_to_engine_blocked(
     assert snapshot.stop_reason == StopReason.BLOCKED
 
 
+def test_blocked_not_done(repo: InMemoryRepository | SQLiteRepository) -> None:
+    from hungerloop.services.handoff_processor import HandoffProcessor
+
+    processor = HandoffProcessor(repo, requirement_compiler=RequirementCompiler(repo))
+    result = processor.process_handoffs(
+        "task-1",
+        2,
+        [
+            _handoff(
+                HandoffItem(
+                    item_type="blocker",
+                    summary="Waiting on an upstream dependency",
+                    related_item_ids=["H-001"],
+                )
+            )
+        ],
+        mission=None,
+        budget=_budget(),
+    )
+
+    assert not hasattr(result, "stop_reason")
+    ledger = repo.get_hunger_ledger("task-1")
+    assert ledger.is_done() is False
+    assert ledger.all_remaining_items_blocked() is True
+    snapshot = HungerEngine().tick(
+        repo.get_hunger_policy("task-1"),
+        repo.get_hunger_clock("task-1"),
+        ledger,
+    )
+    assert snapshot.stop_reason is StopReason.BLOCKED
+
+
 def test_handoff_blocker_recorded_event_emitted_per_blocked_item(
     repo: InMemoryRepository | SQLiteRepository,
 ) -> None:

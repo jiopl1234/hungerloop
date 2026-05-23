@@ -46,6 +46,9 @@ def test_loop_trace_v2_defaults_empty() -> None:
     assert trace.model_errors == []
     assert trace.tool_errors == []
     assert trace.worker_errors == []
+    assert trace.mission_snapshot is None
+    assert trace.assignment_traces == []
+    assert trace.validation_pipeline_trace is None
 
 
 def test_loop_trace_v2_round_trips_through_pydantic_dump() -> None:
@@ -67,6 +70,30 @@ def test_loop_trace_v2_round_trips_through_pydantic_dump() -> None:
         model_errors=["openai timeout"],
         tool_errors=["bash exit 127"],
         worker_errors=["RuntimeError: boom"],
+        mission_snapshot={
+            "mission_id": "mission-1",
+            "phases": [{"phase_id": "phase-1", "status": "in_progress"}],
+            "features": [{"feature_id": "feature-1", "status": "pending"}],
+        },
+        assignment_traces=[
+            {
+                "assignment_id": "ASGN-t1-2-0",
+                "agent_id": "execution_worker_v1",
+                "handoff_id": "WH-t1-2-ASGN-t1-2-0",
+                "target_hunger_item_ids": ["H-001"],
+                "target_feature_ids": ["feature-1"],
+                "summary": "done",
+                "evidence_ids": ["EV-1"],
+                "error_type": None,
+            }
+        ],
+        validation_pipeline_trace={
+            "pipeline_verdict": "pass",
+            "stages_run": ["deterministic", "scrutiny", "user_testing"],
+            "deterministic_report_id": "VAL-deterministic",
+            "scrutiny_report_id": "VAL-scrutiny",
+            "user_testing_report_id": "VAL-user-testing",
+        },
     )
     blob = trace.model_dump()
     revived = LoopTrace.model_validate(blob)
@@ -103,6 +130,9 @@ def test_loop_trace_v0_5a_shape_still_loads() -> None:
     assert trace.currently_passed_check_keys == []
     assert trace.best_state_id_after_loop is None
     assert trace.worker_errors == []
+    assert trace.mission_snapshot is None
+    assert trace.assignment_traces == []
+    assert trace.validation_pipeline_trace is None
 
 
 # ---------------------------------------------------------------------------

@@ -940,7 +940,10 @@ class InMemoryRepository:
         phase = self._mission_phases[phase_id]
         if phase.status == "done" and status != "done":
             raise IllegalPhaseTransition(
-                f"Mission phase {phase_id!r} cannot transition from done to {status!r}"
+                f"Mission phase {phase_id!r} cannot transition from done to {status!r}",
+                phase_id=phase_id,
+                from_status=phase.status,
+                to_status=status,
             )
         self._mission_phases[phase_id] = phase.model_copy(
             update={"status": status, "completed_at": completed_at}
@@ -973,7 +976,10 @@ class InMemoryRepository:
         feature = self._mission_features[feature_id]
         if feature.status == "blocked" and status == "done":
             raise IllegalPhaseTransition(
-                f"Mission feature {feature_id!r} cannot transition from blocked to done"
+                f"Mission feature {feature_id!r} cannot transition from blocked to done",
+                feature_id=feature_id,
+                from_status=feature.status,
+                to_status=status,
             )
         self._mission_features[feature_id] = feature.model_copy(
             update={"status": status}

@@ -26,6 +26,7 @@ from __future__ import annotations
 
 from typing import Protocol, runtime_checkable
 
+from hungerloop.models.blackboard import CandidateState
 from hungerloop.models.context import ContextPack
 from hungerloop.models.enums import CompletionMode, LoopPhase, StopReason
 from hungerloop.models.events import EventType
@@ -51,7 +52,10 @@ from hungerloop.services.rule_based_planner import RuleBasedPlanner
 from hungerloop.services.stagnation_detector import StagnationDetector
 from hungerloop.services.stop_report_builder import build_stop_report
 from hungerloop.services.validation_gate import ValidationGate
-from hungerloop.services.validation_pipeline import ValidationPipeline
+from hungerloop.services.validation_pipeline import (
+    ValidationPipeline,
+    ValidationPipelineResult,
+)
 from hungerloop.services.worker_runtime import WorkerRuntime
 from hungerloop.services.worker_scheduler import SchedulerResult, WorkerScheduler
 from hungerloop.services.workspace_manager import WorkspaceManager
@@ -75,6 +79,38 @@ def _build_delta_summary(
     if regressed:
         return f"rejected ({reason}); regressed {len(regressed)}"
     return f"rejected ({reason})"
+
+
+def _mission_snapshot(mission: Mission | None) -> dict[str, object] | None:
+    if mission is None:
+        return None
+    return {
+        "mission_id": mission.mission_id,
+        "task_id": mission.task_id,
+        "title": mission.title,
+        "phases": [phase.model_dump(mode="json") for phase in mission.phases],
+        "features": [feature.model_dump(mode="json") for feature in mission.features],
+    }
+
+
+def _validation_pipeline_trace(
+    result: ValidationPipelineResult | None,
+) -> dict[str, object] | None:
+    if result is None:
+        return None
+    return {
+        "pipeline_verdict": result.pipeline_verdict,
+        "stages_run": list(result.stages_run),
+        "deterministic_report_id": result.deterministic_report.id,
+        "scrutiny_report_id": (
+            result.scrutiny_report.id if result.scrutiny_report is not None else None
+        ),
+        "user_testing_report_id": (
+            result.user_testing_report.id
+            if result.user_testing_report is not None
+            else None
+        ),
+    }
 
 
 class LoopOrchestrator:
@@ -283,6 +319,12 @@ class LoopOrchestrator:
                 loop_id=loop_id,
             )
             return self._emit_stop(task_id, StopReason.SAFETY_STOP)
+        self._emit_feature_assigned_events(
+            task_id=task_id,
+            loop_id=loop_id,
+            mission=mission,
+            plan=plan,
+        )
         self.repo.save_loop_plan(plan)
         # PRD §7.5: LOOP_PLANNED fires once after the planner returns,
         # regardless of whether the plan has assignments.
@@ -299,11 +341,13 @@ class LoopOrchestrator:
         )
 
         if not plan.assignments:
-            return self._handle_empty_plan(
+            return await self._handle_empty_plan(
                 task_id=task_id,
                 loop_id=loop_id,
                 snapshot=snapshot,
                 plan=plan,
+                mission=mission,
+                budget=budget,
                 best_state_id_before=best_state_id_before,
             )
 
@@ -528,6 +572,15 @@ class LoopOrchestrator:
             cost_this_loop_usd=usage_after.cost_usd - usage_before.cost_usd,
             llm_calls=usage_after.llm_calls - usage_before.llm_calls,
             tool_calls=usage_after.tool_calls - usage_before.tool_calls,
+            mission_snapshot=_mission_snapshot(mission),
+            assignment_traces=self._assignment_traces(
+                plan=plan,
+                handoffs=worker_handoffs,
+                emitted_payloads=handoff_payloads,
+            ),
+            validation_pipeline_trace=_validation_pipeline_trace(
+                effective_pipeline_result
+            ),
             delta_summary=_build_delta_summary(
                 committed=commit_decision["committed"],
                 newly_passed=list(effective_validation.newly_passed_check_keys),
@@ -611,8 +664,82 @@ class LoopOrchestrator:
                 task_id=task_id,
                 loop_id=loop_id,
             )
+            self._emit_feature_terminal_event_from_handoff(
+                task_id=task_id,
+                loop_id=loop_id,
+                mission=mission,
+                assignment=assignment,
+                handoff=handoff,
+                payload=payload,
+            )
             emitted_payloads.append(payload)
         return worker_handoffs, emitted_payloads
+
+    def _emit_feature_assigned_events(
+        self,
+        *,
+        task_id: str,
+        loop_id: int,
+        mission: Mission | None,
+        plan: LoopPlan,
+    ) -> None:
+        if mission is None:
+            return
+        for assignment_index, assignment in enumerate(plan.assignments):
+            feature = self._feature_for_assignment(mission, assignment)
+            if feature is None:
+                continue
+            self.repo.append_event(
+                EventType.MISSION_FEATURE_ASSIGNED,
+                {
+                    "mission_id": mission.mission_id,
+                    "phase_id": feature.phase_id,
+                    "feature_id": feature.feature_id,
+                    "assignment_id": self._assignment_id(
+                        assignment,
+                        task_id=task_id,
+                        loop_id=loop_id,
+                        assignment_index=assignment_index,
+                    ),
+                    "agent_id": assignment.agent_id,
+                    "target_hunger_item_ids": list(assignment.target_hunger_item_ids),
+                    "target_feature_ids": list(assignment.target_feature_ids),
+                },
+                task_id=task_id,
+                loop_id=loop_id,
+            )
+
+    def _emit_feature_terminal_event_from_handoff(
+        self,
+        *,
+        task_id: str,
+        loop_id: int,
+        mission: Mission | None,
+        assignment: Assignment,
+        handoff: WorkerHandoff,
+        payload: dict[str, object],
+    ) -> None:
+        feature = self._feature_for_assignment(mission, assignment)
+        if mission is None or feature is None:
+            return
+        event_payload = {
+            **payload,
+            "mission_id": mission.mission_id,
+            "phase_id": feature.phase_id,
+            "feature_id": feature.feature_id,
+        }
+        if handoff.requires_human or handoff.error_type is not None:
+            event_type = EventType.MISSION_FEATURE_BLOCKED
+            event_payload["error_type"] = handoff.error_type
+            event_payload["requires_human"] = handoff.requires_human
+        else:
+            event_type = EventType.MISSION_FEATURE_COMPLETED
+        self.repo.append_event(
+            event_type,
+            event_payload,
+            task_id=task_id,
+            loop_id=loop_id,
+        )
 
     def _handoff_event_payload(
         self,
@@ -626,6 +753,7 @@ class LoopOrchestrator:
         handoff_id: str,
     ) -> dict[str, object]:
         feature = self._feature_for_assignment(mission, assignment)
+        target_feature_ids = list(assignment.target_feature_ids)
         assignment_id = self._assignment_id(
             assignment,
             task_id=task_id,
@@ -640,6 +768,7 @@ class LoopOrchestrator:
             "agent_id": handoff.agent_id,
             "handoff_id": handoff_id,
             "target_hunger_item_ids": list(assignment.target_hunger_item_ids),
+            "target_feature_ids": target_feature_ids,
         }
 
     @staticmethod
@@ -658,6 +787,39 @@ class LoopOrchestrator:
             ):
                 return feature
         return None
+
+    @staticmethod
+    def _assignment_traces(
+        *,
+        plan: LoopPlan,
+        handoffs: list[WorkerHandoff],
+        emitted_payloads: list[dict[str, object]],
+    ) -> list[dict[str, object]]:
+        traces: list[dict[str, object]] = []
+        for assignment, handoff, payload in zip(
+            plan.assignments,
+            handoffs,
+            emitted_payloads,
+            strict=False,
+        ):
+            traces.append(
+                {
+                    "assignment_id": payload["assignment_id"],
+                    "agent_id": handoff.agent_id,
+                    "handoff_id": payload["handoff_id"],
+                    "target_hunger_item_ids": list(
+                        assignment.target_hunger_item_ids
+                    ),
+                    "target_feature_ids": list(assignment.target_feature_ids),
+                    "summary": handoff.summary,
+                    "evidence_ids": list(handoff.evidence_ids),
+                    "artifact_ids": list(handoff.artifact_ids),
+                    "error_type": handoff.error_type,
+                    "requires_human": handoff.requires_human,
+                    "retry_count": handoff.retry_count,
+                }
+            )
+        return traces
 
     @staticmethod
     def _assignment_id(
@@ -880,12 +1042,21 @@ class LoopOrchestrator:
         try:
             trace_loop_id = loop_id if loop_id is not None else self.repo.next_loop_id(task_id)
             if isinstance(exc, IllegalPhaseTransition):
+                payload: dict[str, object] = {
+                    "error_type": type(exc).__name__,
+                    "error_message": str(exc)[:240],
+                }
+                if exc.phase_id is not None:
+                    payload["phase_id"] = exc.phase_id
+                if exc.feature_id is not None:
+                    payload["feature_id"] = exc.feature_id
+                if exc.from_status is not None:
+                    payload["from_status"] = exc.from_status
+                if exc.to_status is not None:
+                    payload["to_status"] = exc.to_status
                 self.repo.append_event(
                     EventType.PHASE_TRANSITION_REJECTED,
-                    {
-                        "error_type": type(exc).__name__,
-                        "error_message": str(exc)[:240],
-                    },
+                    payload,
                     task_id=task_id,
                     loop_id=trace_loop_id,
                 )
@@ -1005,16 +1176,30 @@ class LoopOrchestrator:
             return "requires_human"
         return None
 
-    def _handle_empty_plan(
+    async def _handle_empty_plan(
         self,
         *,
         task_id: str,
         loop_id: int,
         snapshot: HungerSnapshot,
         plan: LoopPlan,
+        mission: Mission | None,
+        budget: BudgetAllocation,
         best_state_id_before: str | None,
     ) -> LoopTrace | StopReport:
-        """No assignments — bump the streak; only stop when the threshold trips."""
+        """Handle no-assignment loops, including resumed validation boundaries."""
+        validation_phase = self._phase_for_validation(mission, plan)
+        if validation_phase is not None and validation_phase.status == "validating":
+            return await self._handle_validation_only_plan(
+                task_id=task_id,
+                loop_id=loop_id,
+                snapshot=snapshot,
+                plan=plan,
+                mission=mission,
+                phase=validation_phase,
+                budget=budget,
+                best_state_id_before=best_state_id_before,
+            )
         self.workspace_manager.reject_candidate(task_id, loop_id)
         streak = self.repo.increment_no_progress_streak(task_id)
         self.repo.append_event(
@@ -1046,6 +1231,209 @@ class LoopOrchestrator:
         if streak >= self.stagnation_detector.max_global_no_progress:
             return self._emit_stop(task_id, StopReason.BLOCKED)
         return trace
+
+    async def _handle_validation_only_plan(
+        self,
+        *,
+        task_id: str,
+        loop_id: int,
+        snapshot: HungerSnapshot,
+        plan: LoopPlan,
+        mission: Mission | None,
+        phase: MissionPhase,
+        budget: BudgetAllocation,
+        best_state_id_before: str | None,
+    ) -> LoopTrace | StopReport:
+        """Run phase-boundary validation when no executor assignments remain."""
+        candidate = CandidateState(
+            id=f"CAND-{task_id}-{loop_id}",
+            task_id=task_id,
+            loop_id=loop_id,
+            summary="validation-only candidate",
+            evidence_ids=self._validation_only_evidence_ids(task_id),
+            workspace_ref=f"candidates/loop_{loop_id:03d}",
+        )
+        self.repo.save_candidate(candidate)
+        self.repo.append_event(
+            EventType.CANDIDATE_CREATED,
+            {
+                "candidate_state_id": candidate.id,
+                "loop_id": loop_id,
+                "worker_ids": [],
+            },
+            task_id=task_id,
+            loop_id=loop_id,
+        )
+        target_hunger_item_ids = self._target_hunger_item_ids_for_phase(
+            mission=mission,
+            phase=phase,
+        )
+        self.repo.append_event(
+            EventType.VALIDATION_STARTED,
+            {
+                "candidate_state_id": candidate.id,
+                "target_hunger_item_ids": target_hunger_item_ids,
+            },
+            task_id=task_id,
+            loop_id=loop_id,
+        )
+        try:
+            pipeline_result = await self.validation_pipeline.run(
+                task_id=task_id,
+                loop_id=loop_id,
+                candidate=candidate,
+                target_hunger_item_ids=target_hunger_item_ids,
+                mission=mission,
+                phase=phase,
+                budget=budget,
+            )
+        except SafetyStopError:
+            self.workspace_manager.reject_candidate(task_id, loop_id)
+            self.repo.append_event(
+                EventType.SAFETY_STOP,
+                {"loop_id": loop_id, "stage": "validation_pipeline"},
+                task_id=task_id,
+                loop_id=loop_id,
+            )
+            return self._emit_stop(task_id, StopReason.SAFETY_STOP)
+        validation = pipeline_result.deterministic_report
+        self.repo.save_validation_report(validation)
+        self._emit_check_events(task_id, loop_id, validation)
+        self.repo.append_event(
+            EventType.VALIDATION_FINISHED,
+            {
+                "validation_report_id": validation.id,
+                "verdict": validation.verdict.value,
+                "newly_passed": list(validation.newly_passed_check_keys),
+                "regressed": list(validation.regressed_check_keys),
+            },
+            task_id=task_id,
+            loop_id=loop_id,
+        )
+
+        if pipeline_result.pipeline_verdict == "pass":
+            self.repo.mark_candidate_committed(candidate.id)
+            for check_key in validation.currently_passed_check_keys:
+                item_id, idx_str = check_key.split(":", 1)
+                self.repo.save_accepted_check(
+                    task_id=task_id,
+                    check_key=check_key,
+                    hunger_item_id=item_id,
+                    check_index=int(idx_str),
+                    accepted_at_loop=loop_id,
+                    validation_id=validation.id,
+                    evidence_id=None,
+                )
+            self.repo.append_event(
+                EventType.CANDIDATE_COMMITTED,
+                {
+                    "candidate_state_id": candidate.id,
+                    "validation_report_id": validation.id,
+                },
+                task_id=task_id,
+                loop_id=loop_id,
+            )
+        else:
+            self.workspace_manager.reject_candidate(task_id, loop_id)
+            self.repo.mark_candidate_rejected(candidate.id)
+            self.repo.add_failure_from_validation(validation)
+            self.repo.append_event(
+                EventType.CANDIDATE_REJECTED,
+                {
+                    "candidate_state_id": candidate.id,
+                    "validation_report_id": validation.id,
+                    "reason": "validation_only_pipeline_failed",
+                },
+                task_id=task_id,
+                loop_id=loop_id,
+            )
+
+        self.hunger_update.apply_validation(task_id, validation)
+        self.hunger_engine.tick(
+            self.repo.get_hunger_policy(task_id),
+            self.repo.get_hunger_clock(task_id),
+            self.repo.get_hunger_ledger(task_id),
+            previous_phase=plan.phase,
+            task_id=task_id,
+            validation_result=pipeline_result,
+            validation_phase_id=phase.phase_id,
+        )
+
+        best_after = self.repo.get_best_state(task_id)
+        best_state_id_after = best_after.state_id if best_after else None
+        trace = LoopTrace(
+            task_id=task_id,
+            loop_id=loop_id,
+            phase=plan.phase.value,
+            active_hunger=snapshot.active_hunger,
+            drive_budget=snapshot.drive_budget,
+            work_pressure=snapshot.work_pressure,
+            selected_hunger_item_ids=target_hunger_item_ids,
+            worker_ids=[],
+            candidate_state_id=candidate.id,
+            validation_report_id=validation.id,
+            committed=pipeline_result.pipeline_verdict == "pass",
+            newly_passed_check_keys=list(validation.newly_passed_check_keys),
+            regressed_check_keys=list(validation.regressed_check_keys),
+            currently_passed_check_keys=list(validation.currently_passed_check_keys),
+            satisfied_hunger_item_ids=list(validation.satisfied_hunger_item_ids),
+            unsatisfied_hunger_item_ids=list(validation.unsatisfied_hunger_item_ids),
+            best_state_id_before_loop=best_state_id_before,
+            best_state_id_after_loop=best_state_id_after,
+            verdict=validation.verdict.value,
+            mission_snapshot=_mission_snapshot(mission),
+            validation_pipeline_trace=_validation_pipeline_trace(pipeline_result),
+            delta_summary="validation-only boundary",
+            next_action="continue",
+        )
+        self.repo.save_loop_trace(trace)
+        if pipeline_result.pipeline_verdict == "pass":
+            self.repo.append_event(
+                EventType.LOOP_COMMITTED,
+                {
+                    "candidate_state_id": candidate.id,
+                    "validation_report_id": validation.id,
+                    "newly_passed_check_keys": list(validation.newly_passed_check_keys),
+                },
+                task_id=task_id,
+                loop_id=loop_id,
+            )
+        else:
+            self.repo.append_event(
+                EventType.LOOP_REJECTED,
+                {
+                    "candidate_state_id": candidate.id,
+                    "validation_report_id": validation.id,
+                    "reason": "validation_only_pipeline_failed",
+                    "regressed_check_keys": list(validation.regressed_check_keys),
+                },
+                task_id=task_id,
+                loop_id=loop_id,
+            )
+        return trace
+
+    @staticmethod
+    def _target_hunger_item_ids_for_phase(
+        *,
+        mission: Mission | None,
+        phase: MissionPhase,
+    ) -> list[str]:
+        if mission is None:
+            return []
+        phase_feature_ids = set(phase.feature_ids)
+        return [
+            feature.hunger_item_id
+            for feature in mission.features
+            if feature.phase_id == phase.phase_id
+            or feature.feature_id in phase_feature_ids
+        ]
+
+    def _validation_only_evidence_ids(self, task_id: str) -> list[str]:
+        """Carry forward accepted evidence when revalidating a phase boundary."""
+        best = self.repo.get_best_state(task_id)
+        if best is None:
+            return []
+        return list(best.evidence_ids)
 
     def _emit_stop(
         self,

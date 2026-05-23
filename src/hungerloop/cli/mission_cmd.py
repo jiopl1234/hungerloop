@@ -18,6 +18,7 @@ from hungerloop.cli.mission_cockpit import build_mission_cockpit, render_mission
 from hungerloop.cli.run_cmd import run as legacy_run
 from hungerloop.cli.status_format import format_status
 from hungerloop.models.enums import AcceptanceCheckType
+from hungerloop.models.events import EventType
 from hungerloop.models.mission import Mission, MissionFeature
 from hungerloop.models.validation_contract import ValidationAssertion, ValidationContract
 from hungerloop.repository.protocol import RepositoryProtocol
@@ -40,6 +41,8 @@ _MISSION_IMPORT_FAILED = "MISSION_IMPORT_FAILED"
 _MISSION_EDIT_APPLIED = "MISSION_EDIT_APPLIED"
 _MISSION_EDIT_CANCELLED = "MISSION_EDIT_CANCELLED"
 _MISSION_EDIT_NO_EDITOR = "MISSION_EDIT_NO_EDITOR"
+# DEPRECATED, removable in v0.7.0: keep this RC rollback flag only so
+# operators can force the v0.5f legacy path while validating v0.6.
 _MISSION_RUNTIME_ENV = "HUNGERLOOP_MISSION_RUNTIME"
 _MISSION_IMPORT_REQUIRES_PAUSED = (
     "mission import requires HUMAN_PAUSED state; use 'hungerloop hunger freeze' first"
@@ -112,6 +115,16 @@ def mission_new(
     ctx.repo.create_task(task_id, goal or parsed.description or parsed.title)
     result = RequirementCompiler(ctx.repo).compile_new_mission(task_id, parsed)
     contract = result.validation_contract
+    ctx.repo.append_event(
+        EventType.MISSION_CREATED,
+        {
+            "task_id": task_id,
+            "mission_id": result.mission.mission_id,
+            "feature_count": len(result.mission.features),
+            "assertion_count": len(contract.assertions) if contract else 0,
+        },
+        task_id=task_id,
+    )
     ctx.repo.append_event(
         _MISSION_NEW_CREATED,
         {

@@ -144,6 +144,13 @@ class ScrutinyValidator:
                 status=status,
                 evidence_id=result.evidence_id,
             )
+            self._emit_assertion_result(
+                task_id=task_id,
+                loop_id=loop_id,
+                contract=contract,
+                phase=phase,
+                assertion=assertion,
+            )
             assertions.append(assertion)
             event_assertions.append(
                 {
@@ -357,6 +364,33 @@ class ScrutinyValidator:
                 "argv": list(argv),
                 "stdout": stdout[:_MAX_EVENT_OUTPUT_CHARS],
                 "stderr": stderr[:_MAX_EVENT_OUTPUT_CHARS],
+            },
+            task_id=task_id,
+            loop_id=loop_id,
+        )
+
+    def _emit_assertion_result(
+        self,
+        *,
+        task_id: str,
+        loop_id: int,
+        contract: ValidationContract,
+        phase: MissionPhase,
+        assertion: ValidationAssertion,
+    ) -> None:
+        event_type = (
+            EventType.VALIDATION_ASSERTION_PASSED
+            if assertion.status == "passed"
+            else EventType.VALIDATION_ASSERTION_FAILED
+        )
+        self.repo.append_event(
+            event_type,
+            {
+                **self._event_payload(contract=contract, phase=phase),
+                "assertion_id": assertion.assertion_id,
+                "check_type": assertion.check_type,
+                "status": assertion.status,
+                "evidence_ids": list(assertion.evidence_ids),
             },
             task_id=task_id,
             loop_id=loop_id,

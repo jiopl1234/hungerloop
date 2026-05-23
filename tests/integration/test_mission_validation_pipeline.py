@@ -209,3 +209,4 @@ async def test_mission_validation_pipeline_scrutiny_result_keeps_commit_determin
     assert best_state.validation_id == result.deterministic_report.id
     assert repo.list_events(TASK_ID, event_types=["validation.scrutiny_started"])
     assert repo.list_events(TASK_ID, event_types=["validation.scrutiny_completed"])
+    assert repo.list_events(TASK_ID, event_types=["validation.assertion_passed"])

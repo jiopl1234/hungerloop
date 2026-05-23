@@ -259,6 +259,13 @@ async def test_single_worker_mission_emits_one_assignment(tmp_path: Path) -> Non
     assert len(worker.contexts) == 1
     assert len(repo.list_worker_handoffs(TASK_ID, since_loop_id=1)) == 1
     assert worker.contexts[0].target_feature_ids == ["F-1"]
+    assert outcome.mission_snapshot is not None
+    assert outcome.mission_snapshot["mission_id"] == "mission-1"
+    assert outcome.assignment_traces
+    assert outcome.assignment_traces[0]["assignment_id"] == "ASGN-task-1-1-0"
+    assert outcome.assignment_traces[0]["target_feature_ids"] == ["F-1"]
+    assert outcome.validation_pipeline_trace is not None
+    assert outcome.validation_pipeline_trace["pipeline_verdict"] == "pass"
 
 
 async def test_orchestrator_routes_planner_by_mission_presence(tmp_path: Path) -> None:

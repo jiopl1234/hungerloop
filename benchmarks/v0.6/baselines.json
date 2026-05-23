@@ -1,0 +1,6 @@
+{
+  "mission_status_ms": 200.0,
+  "mission_state_updater_ms": 100.0,
+  "v6_migration_ms": 200.0,
+  "mission_planner_ms": 50.0
+}

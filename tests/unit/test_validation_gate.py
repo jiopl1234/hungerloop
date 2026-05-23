@@ -10,6 +10,7 @@ These tests pin those branches end-to-end against `InMemoryRepository` +
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -281,6 +282,55 @@ async def test_previously_passed_check_not_targeted_stays_passed(
     )
     assert "H-002:0" in report.currently_passed_check_keys
     assert "H-001:0" in report.currently_passed_check_keys
+
+
+async def test_targets_only(
+    gate_setup: tuple[ValidationGate, InMemoryRepository, WorkspaceManager],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    gate, repo, wm = gate_setup
+    cand_root = wm.candidate_files_dir("t1", 1)
+    for filename in ["target.md", "regression.md", "ignored.md"]:
+        (cand_root / filename).write_text("ok", encoding="utf-8")
+
+    target = _file_exists_item("H-target", ["target.md"])
+    previous = _file_exists_item("H-prev", ["regression.md"])
+    ignored = _file_exists_item("H-ignored", ["ignored.md"])
+    repo.save_hunger_ledger(
+        "t1",
+        HungerLedger(task_id="t1", items=[target, previous, ignored]),
+    )
+    for item in (target, previous, ignored):
+        repo.save_hunger_item(item)
+    repo.save_best_state(
+        BestState(
+            task_id="t1",
+            state_id="prev",
+            summary="prev",
+            accepted_check_keys=["H-prev:0"],
+        )
+    )
+    executed: list[str] = []
+    real_run = gate.runner.run
+
+    async def recording_run(**kwargs: Any) -> tuple[bool, str, str | None]:
+        check = kwargs["check"]
+        executed.append(str(check.params["path"]))
+        return await real_run(**kwargs)
+
+    monkeypatch.setattr(gate.runner, "run", recording_run)
+
+    report = await gate.validate(
+        task_id="t1",
+        loop_id=1,
+        candidate=_candidate(evidence=["seed-ev"]),
+        target_hunger_item_ids=["H-target"],
+    )
+
+    assert executed == ["target.md", "regression.md"]
+    assert report.attempted_hunger_item_ids == ["H-target"]
+    assert "H-prev:0" in report.currently_passed_check_keys
+    assert "H-ignored:0" not in report.currently_passed_check_keys
 
 
 # ---- baseline_state_id wiring ------------------------------------------------

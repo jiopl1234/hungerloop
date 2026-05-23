@@ -209,6 +209,22 @@ def test_commit_persists_best_state_with_correct_fields(
     repo.mark_candidate_committed.assert_called_once_with("CAND-t1-1")
 
 
+def test_no_score_based_commit(cm: CommitManager, ws: WorkspaceManager) -> None:
+    """Score must never drive promotion; only newly-passed checks may."""
+    ws.create_candidate_workspace("t1", 1)
+    candidate = _candidate()
+    report = _report(
+        verdict=ValidationVerdict.PASS,
+        newly_passed=[],
+        currently_passed=["H-001:0"],
+    )
+
+    result = cm.apply(candidate, report)
+
+    assert result["committed"] is False
+    assert result["reason"] == "no_new_check_progress"
+
+
 def test_reject_records_failure_and_marks_candidate(
     cm: CommitManager, repo: MagicMock, ws: WorkspaceManager
 ) -> None:

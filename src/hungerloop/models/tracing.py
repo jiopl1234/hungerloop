@@ -18,7 +18,7 @@ worker-timeout paths emit a trace without forcing a candidate.
 """
 from __future__ import annotations
 
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -89,6 +89,12 @@ class LoopTrace(BaseModel):
     model_errors: list[str] = Field(default_factory=list)
     tool_errors: list[str] = Field(default_factory=list)
     worker_errors: list[str] = Field(default_factory=list)
+
+    # v0.6 additions — mission runtime trace snapshots. Legacy non-mission
+    # loops keep these empty so persisted v0.5f traces deserialize unchanged.
+    mission_snapshot: dict[str, Any] | None = None
+    assignment_traces: list[dict[str, Any]] = Field(default_factory=list)
+    validation_pipeline_trace: dict[str, Any] | None = None
 
     # Per-loop usage deltas (computed by Orchestrator from UsageSnapshot
     # before/after; tokens include both prompt and completion).

@@ -75,15 +75,22 @@ class EventType(str, Enum):
     VALIDATION_USER_TESTING_FAILED = "validation.user_testing_failed"
     VALIDATION_USER_TESTING_SKIPPED = "validation.user_testing_skipped"
     VALIDATION_USER_TESTING_TIMEOUT = "validation.user_testing_timeout"
+    VALIDATION_ASSERTION_PASSED = "validation.assertion_passed"
+    VALIDATION_ASSERTION_FAILED = "validation.assertion_failed"
     CHECK_PASSED = "check_passed"
     CHECK_FAILED = "check_failed"
     CHECK_REGRESSED = "check_regressed"
 
     # ----- Mission phase state machine (v0.6 M4) -------------------------
+    MISSION_CREATED = "mission.created"
     MISSION_PHASE_STARTED = "mission.phase_started"
+    MISSION_PHASE_VALIDATED = "mission.phase_validated"
     MISSION_PHASE_VALIDATION_STARTED = "mission.phase_validation_started"
     MISSION_PHASE_VALIDATION_FAILED = "mission.phase_validation_failed"
     MISSION_PHASE_COMPLETED = "mission.phase_completed"
+    MISSION_FEATURE_ASSIGNED = "mission.feature_assigned"
+    MISSION_FEATURE_COMPLETED = "mission.feature_completed"
+    MISSION_FEATURE_BLOCKED = "mission.feature_blocked"
     PHASE_TRANSITION_REJECTED = "PHASE_TRANSITION_REJECTED"
 
     # ----- Mission artifact mirror regeneration (v0.6 M5) -----------------

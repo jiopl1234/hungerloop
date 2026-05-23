@@ -216,6 +216,31 @@ def test_v0_6_m5_mission_state_regeneration_additions_present() -> None:
     assert expected <= actual
 
 
+def test_v0_6_prd_12_1_event_names_present() -> None:
+    """The PRD §12.1 event list is additive; all named rows need enum homes."""
+    expected = {
+        "mission.created",
+        "mission.phase_started",
+        "mission.phase_validated",
+        "mission.phase_completed",
+        "mission.feature_assigned",
+        "mission.feature_completed",
+        "mission.feature_blocked",
+        "worker.assignment_started",
+        "worker.assignment_completed",
+        "worker.handoff_emitted",
+        "worker.handoff_received",
+        "validation.scrutiny_started",
+        "validation.scrutiny_completed",
+        "validation.user_testing_started",
+        "validation.user_testing_completed",
+        "validation.assertion_passed",
+        "validation.assertion_failed",
+    }
+    actual = {m.value for m in EventType}
+    assert expected <= actual
+
+
 def test_no_shipped_event_value_renamed() -> None:
     """Wire-contract regression net (PRD §7.2) — every value that ever
     shipped to operators must remain in the enum. Adding to this set
