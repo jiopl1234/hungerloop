@@ -135,6 +135,17 @@ class SQLiteRepository:
             updated_at=str(row["updated_at"]),
         )
 
+    def update_task_status(self, task_id: str, status: str) -> None:
+        self._ensure_task(task_id)
+        self.conn.execute(
+            """
+            UPDATE tasks
+            SET status = ?, updated_at = ?
+            WHERE task_id = ?
+            """,
+            (status, _utc_now(), task_id),
+        )
+
     def list_task_ids(self) -> list[str]:
         rows = self.conn.execute(
             "SELECT task_id FROM tasks ORDER BY rowid ASC"

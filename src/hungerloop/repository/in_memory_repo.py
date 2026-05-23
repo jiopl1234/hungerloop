@@ -127,6 +127,27 @@ class InMemoryRepository:
     def get_task(self, task_id: str) -> TaskRecord | None:
         return self._tasks.get(task_id)
 
+    def update_task_status(self, task_id: str, status: str) -> None:
+        task = self._tasks.get(task_id)
+        now = (
+            datetime.now(timezone.utc)
+            .replace(microsecond=0)
+            .isoformat()
+            .replace("+00:00", "Z")
+        )
+        if task is None:
+            self._tasks[task_id] = TaskRecord(
+                task_id=task_id,
+                raw_goal="",
+                status=status,
+                created_at=now,
+                updated_at=now,
+            )
+            return
+        self._tasks[task_id] = task.model_copy(
+            update={"status": status, "updated_at": now}
+        )
+
     def list_task_ids(self) -> list[str]:
         return list(self._tasks.keys())
 

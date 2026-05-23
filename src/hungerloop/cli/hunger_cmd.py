@@ -125,10 +125,11 @@ def hunger_unblock_all(ctx: CliContext, task_id: str) -> None:
 @click.argument("task_id")
 @click.pass_obj
 def hunger_freeze(ctx: CliContext, task_id: str) -> None:
-    """Set ``clock.frozen = True``; next ``run`` emits HUMAN_PAUSED."""
+    """Set ``clock.frozen = True`` and mark the task HUMAN_PAUSED."""
     clock = ctx.repo.get_hunger_clock(task_id)
     clock.frozen = True
     ctx.repo.save_hunger_clock(clock)
+    ctx.repo.update_task_status(task_id, "HUMAN_PAUSED")
     ctx.repo.append_event(EventType.HUNGER_FROZEN, {}, task_id=task_id)
     click.echo(f"froze hunger clock on {task_id}")
 

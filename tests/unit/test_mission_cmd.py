@@ -613,6 +613,52 @@ def test_mission_import_non_paused_exits_7_and_preserves_state(
     ]
 
 
+def test_mission_import_accepts_after_hunger_freeze(tmp_path: Path) -> None:
+    ctx = _context(tmp_path)
+    _seed_listing_mission(ctx, task_id="T-import")
+    runner = CliRunner()
+    import_dir = _write_mission_dir(tmp_path)
+    (import_dir / "validation-contract.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "assertions": [
+                    {
+                        "assertion_id": "VAL-FREEZE",
+                        "phase_id": "phase-1",
+                        "title": "Freeze assertion",
+                        "description": "Imported after hunger freeze",
+                        "check_type": "behavioral_assertion",
+                    }
+                ]
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+
+    freeze = runner.invoke(cli, ["hunger", "freeze", "T-import"], obj=ctx)
+    assert freeze.exit_code == 0, freeze.output
+
+    result = runner.invoke(
+        cli,
+        ["mission", "import", "T-import", "--from", str(import_dir)],
+        obj=ctx,
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "1 features added, 1 assertions added" in result.output
+    assert [
+        event["event_type"]
+        for event in ctx.repo.list_events("T-import")
+        if event["event_type"] == "MISSION_IMPORT_APPLIED"
+    ] == ["MISSION_IMPORT_APPLIED"]
+    assert not [
+        event
+        for event in ctx.repo.list_events("T-import")
+        if event["event_type"] == "MISSION_IMPORT_REJECTED"
+    ]
+
+
 def test_mission_import_last_stop_reason_without_task_status_exits_7(
     tmp_path: Path,
 ) -> None:
