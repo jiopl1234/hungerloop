@@ -34,7 +34,7 @@ Use `from __future__ import annotations` in every Python module. Prefer `X | Non
 
 Models are data containers; business behavior belongs in `services/`. Services should receive dependencies through dependency injection, usually via `RepositoryProtocol`. Do not introduce score-based commit logic.
 
-CI lint rules for v0.6 are part of the contract: no `ModelClient` imports under `services/validators/`; no `yaml.load*` in `mission_state_updater.py`; no repository save/update/delete calls inside `mission_state_updater.py`; and no direct ledger writes outside compilers (`requirement_compiler.py` / `refinement_compiler.py`).
+CI lint rules for v0.6 are part of the contract: no LLM under `services/validators/`; no `ModelClient` imports under `services/validators/`; no `yaml.load*` in `mission_state_updater.py`; no repository save/update/delete calls inside `mission_state_updater.py`; and no direct ledger writes outside compilers (`requirement_compiler.py` / `refinement_compiler.py`).
 
 ## Testing Guidelines
 

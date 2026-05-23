@@ -32,8 +32,9 @@ src/hungerloop/
     commit_manager.py, integrator.py, context_builder.py,
     workspace_manager.py, sandbox_runner.py, acceptance_runner.py,
     stagnation_detector.py, requirement_compiler.py, path_safety.py,
-    mission_planner.py, worker_scheduler.py, handoff_processor.py,
-    mission_state_updater.py, validation_pipeline.py, mission_loader.py,
+    services/mission_planner.py, services/worker_scheduler.py,
+    services/handoff_processor.py, services/mission_state_updater.py,
+    validation_pipeline.py, mission_loader.py,
     validators/  # deterministic/scrutiny/user-testing; no ModelClient imports
   repository/   # Protocol + InMemoryRepository + SQLiteRepository + migrations
   cli/          # click-based: new/run/status/report/trace/mission/etc.
@@ -76,7 +77,7 @@ hungerloop mission --help           # v0.6 mission CLI surface
 - **Async:** `pytest-asyncio` in `auto` mode. Service methods that touch I/O or subprocesses are async.
 - **Models:** Pydantic v2. The `pydantic.mypy` plugin is **disabled** (incompatible with mypy ≥1.18); see `pyproject.toml` note. Don't re-enable without checking versions.
 - **Repository typing:** Several services still take `repo: Any` with `TODO(Task 14)`. When tightening, use `RepositoryProtocol` from `repository/protocol.py`.
-- **CI lint rules:** no `ModelClient` imports under `services/validators/`; no `yaml.load*` in `mission_state_updater.py`; no repository save/update/delete writes inside `mission_state_updater.py`; no direct ledger writes outside compilers (`requirement_compiler.py` / `refinement_compiler.py`).
+- **CI lint rules:** no LLM under `services/validators/`; no `ModelClient` imports under `services/validators/`; no `yaml.load*` in `mission_state_updater.py`; no repository save/update/delete writes inside `mission_state_updater.py`; no direct ledger writes outside compilers (`requirement_compiler.py` / `refinement_compiler.py`).
 - **Mission runtime rollback flag:** `HUNGERLOOP_MISSION_RUNTIME=0` is **DEPRECATED, removable in v0.7.0**. Keep only for RC/v0.6 rollback compatibility.
 
 ## Conventions
