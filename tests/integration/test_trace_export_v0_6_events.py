@@ -59,6 +59,13 @@ def test_trace_export_includes_all_present_v0_6_event_types(tmp_path: Path) -> N
         event_type.value if isinstance(event_type, EventType) else event_type
         for event_type in expected
     } <= exported_event_types
+    assignment_events = [
+        row for row in exported if row["event_type"].startswith("worker.assignment_")
+    ]
+    assert assignment_events
+    assert all(
+        row["payload"]["mission_id"] == "mission-1" for row in assignment_events
+    )
 
 
 def _v0_6_mission_runtime_event_types() -> list[EventType | str]:

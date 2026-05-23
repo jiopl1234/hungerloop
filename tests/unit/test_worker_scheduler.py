@@ -3,6 +3,7 @@ from __future__ import annotations
 import inspect
 import json
 from dataclasses import fields
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -10,6 +11,7 @@ import pytest
 
 from hungerloop.models.context import ContextPack
 from hungerloop.models.enums import LoopPhase
+from hungerloop.models.mission import Mission
 from hungerloop.models.planning import Assignment, BudgetAllocation
 from hungerloop.models.worker import AgentSpec, WorkerHandoff
 from hungerloop.repository.in_memory_repo import InMemoryRepository
@@ -20,6 +22,7 @@ from hungerloop.services.workspace_manager import WorkspaceManager
 TASK_ID = "task-1"
 LOOP_ID = 1
 AGENT_ID = "execution_worker_v1"
+MISSION_ID = "mission-1"
 
 
 def _assignment(
@@ -78,6 +81,29 @@ def _context_factory(
         )
 
     return build
+
+
+def _save_mission(repo: InMemoryRepository) -> None:
+    repo.save_mission(
+        Mission(
+            mission_id=MISSION_ID,
+            task_id=TASK_ID,
+            title="Mission",
+            description="Mission scoped assignment event test",
+            created_at=datetime(2026, 5, 23, tzinfo=timezone.utc),
+        )
+    )
+
+
+def _assert_assignment_events_have_mission_id(
+    repo: InMemoryRepository,
+    event_types: list[str],
+) -> None:
+    for event_type in event_types:
+        events = repo.list_events(TASK_ID, event_types=[event_type])
+        assert events, f"expected {event_type} event"
+        for event in events:
+            assert event["payload"]["mission_id"] == MISSION_ID
 
 
 class _RecordingRuntime:
@@ -281,6 +307,7 @@ async def test_retry_exhaustion_skips_downstream_and_emits_lifecycle_events(
     repo: InMemoryRepository,
     tmp_path: Path,
 ) -> None:
+    _save_mission(repo)
     assignments = [
         _assignment("A"),
         _assignment("B", max_retries=1),
@@ -325,6 +352,16 @@ async def test_retry_exhaustion_skips_downstream_and_emits_lifecycle_events(
         "worker.assignment_skipped",
         "worker.assignment_retried",
     } <= event_types
+    _assert_assignment_events_have_mission_id(
+        repo,
+        [
+            "worker.assignment_started",
+            "worker.assignment_completed",
+            "worker.assignment_failed",
+            "worker.assignment_skipped",
+            "worker.assignment_retried",
+        ],
+    )
 
     failed_audit = (
         WorkspaceManager(tmp_path).task_root(TASK_ID)
@@ -400,6 +437,7 @@ async def test_cycle_detected_skips_every_assignment(
     repo: InMemoryRepository,
     tmp_path: Path,
 ) -> None:
+    _save_mission(repo)
     assignments = [
         _assignment("A", depends_on=["B"]),
         _assignment("B", depends_on=["A"]),
@@ -419,12 +457,17 @@ async def test_cycle_detected_skips_every_assignment(
         cycle_detected=True,
     )
     assert runtime.order == []
+    _assert_assignment_events_have_mission_id(
+        repo,
+        ["worker.assignment_skipped"],
+    )
 
 
 async def test_safety_stop_marks_remaining_skipped_and_propagates(
     repo: InMemoryRepository,
     tmp_path: Path,
 ) -> None:
+    _save_mission(repo)
     assignments = [_assignment("A"), _assignment("B"), _assignment("C")]
     runtime = _RecordingRuntime(
         {
@@ -452,6 +495,10 @@ async def test_safety_stop_marks_remaining_skipped_and_propagates(
     assert runtime.order == ["A"]
     skipped = repo.list_events(TASK_ID, event_types=["worker.assignment_skipped"])
     assert [event["payload"]["assignment_id"] for event in skipped] == ["B", "C"]
+    _assert_assignment_events_have_mission_id(
+        repo,
+        ["worker.assignment_started", "worker.assignment_completed", "worker.assignment_skipped"],
+    )
     assert cost_guard.calls == [TASK_ID, TASK_ID, TASK_ID]
 
 
@@ -459,6 +506,7 @@ async def test_assignment_events_include_scoping_keys(
     repo: InMemoryRepository,
     tmp_path: Path,
 ) -> None:
+    _save_mission(repo)
     assignment = _assignment("A", target_feature_ids=["feature-a"])
     runtime = _RecordingRuntime({"A": [_handoff("A")]})
 
@@ -473,6 +521,7 @@ async def test_assignment_events_include_scoping_keys(
     completed = repo.list_events(TASK_ID, event_types=["worker.assignment_completed"])[0]
     for event in (started, completed):
         payload = event["payload"]
+        assert payload["mission_id"] == MISSION_ID
         assert payload["assignment_id"] == "A"
         assert payload["target_feature_ids"] == ["feature-a"]
         assert payload["target_hunger_item_ids"] == ["H-A"]

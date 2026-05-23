@@ -62,6 +62,8 @@ class WorkerScheduler:
         context_factory: Callable[[Assignment], ContextPack],
     ) -> SchedulerResult:
         """Run assignments in provided topology order with retry and skip handling."""
+        mission = self.repo.get_mission(task_id)
+        mission_id = mission.mission_id if mission is not None else None
         assignment_ids = [assignment.assignment_id for assignment in assignments]
         if self._contains_cycle(assignments):
             for assignment in assignments:
@@ -70,6 +72,7 @@ class WorkerScheduler:
                     loop_id,
                     assignment,
                     blocked_by="cycle",
+                    mission_id=mission_id,
                 )
             return SchedulerResult(
                 handoffs=[],
@@ -102,6 +105,7 @@ class WorkerScheduler:
                     loop_id,
                     assignment,
                     blocked_by=blocked_by,
+                    mission_id=mission_id,
                 )
                 continue
 
@@ -113,6 +117,7 @@ class WorkerScheduler:
                     context_factory=context_factory,
                     workspace_root=workspace_root,
                     evidence_by_assignment=evidence_by_assignment,
+                    mission_id=mission_id,
                 )
             except _SchedulerSafetyStop as exc:
                 start = index + 1 if exc.current_completed else index
@@ -126,6 +131,7 @@ class WorkerScheduler:
                         loop_id,
                         remaining,
                         blocked_by="safety_stop",
+                        mission_id=mission_id,
                     )
                 raise exc.original
 
@@ -153,6 +159,7 @@ class WorkerScheduler:
         context_factory: Callable[[Assignment], ContextPack],
         workspace_root: Path,
         evidence_by_assignment: dict[str, set[str]],
+        mission_id: str | None,
     ) -> WorkerHandoff:
         while True:
             attempt = assignment.retry_count + 1
@@ -176,7 +183,7 @@ class WorkerScheduler:
             self.repo.append_event(
                 EventType.WORKER_ASSIGNMENT_STARTED,
                 {
-                    **self._assignment_payload(assignment),
+                    **self._assignment_payload(assignment, mission_id=mission_id),
                     "attempt": attempt,
                 },
                 task_id=task_id,
@@ -210,7 +217,7 @@ class WorkerScheduler:
                 self.repo.append_event(
                     EventType.WORKER_ASSIGNMENT_FAILED,
                     {
-                        **self._assignment_payload(assignment),
+                        **self._assignment_payload(assignment, mission_id=mission_id),
                         "error_type": handoff.error_type or "unknown",
                         "handoff_id": handoff_id,
                     },
@@ -221,7 +228,7 @@ class WorkerScheduler:
                 self.repo.append_event(
                     EventType.WORKER_ASSIGNMENT_COMPLETED,
                     {
-                        **self._assignment_payload(assignment),
+                        **self._assignment_payload(assignment, mission_id=mission_id),
                         "handoff_id": handoff_id,
                     },
                     task_id=task_id,
@@ -245,7 +252,7 @@ class WorkerScheduler:
                 self.repo.append_event(
                     EventType.WORKER_ASSIGNMENT_RETRIED,
                     {
-                        **self._assignment_payload(assignment),
+                        **self._assignment_payload(assignment, mission_id=mission_id),
                         "attempt": assignment.retry_count + 1,
                     },
                     task_id=task_id,
@@ -405,22 +412,33 @@ class WorkerScheduler:
         assignment: Assignment,
         *,
         blocked_by: str,
+        mission_id: str | None = None,
     ) -> None:
         self.repo.append_event(
             EventType.WORKER_ASSIGNMENT_SKIPPED,
-            {**self._assignment_payload(assignment), "blocked_by": blocked_by},
+            {
+                **self._assignment_payload(assignment, mission_id=mission_id),
+                "blocked_by": blocked_by,
+            },
             task_id=task_id,
             loop_id=loop_id,
         )
 
     @staticmethod
-    def _assignment_payload(assignment: Assignment) -> dict[str, object]:
-        return {
+    def _assignment_payload(
+        assignment: Assignment,
+        *,
+        mission_id: str | None = None,
+    ) -> dict[str, object]:
+        payload: dict[str, object] = {
             "assignment_id": assignment.assignment_id,
             "agent_id": assignment.agent_id,
             "target_hunger_item_ids": list(assignment.target_hunger_item_ids),
             "target_feature_ids": list(assignment.target_feature_ids),
         }
+        if mission_id is not None:
+            payload["mission_id"] = mission_id
+        return payload
 
     def _emit_write_collisions(
         self,
