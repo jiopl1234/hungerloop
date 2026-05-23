@@ -11,7 +11,7 @@ import pytest
 
 from hungerloop.models.context import ContextPack
 from hungerloop.models.enums import LoopPhase
-from hungerloop.models.mission import Mission
+from hungerloop.models.mission import Mission, MissionFeature, MissionPhase
 from hungerloop.models.planning import Assignment, BudgetAllocation
 from hungerloop.models.worker import AgentSpec, WorkerHandoff
 from hungerloop.repository.in_memory_repo import InMemoryRepository
@@ -83,13 +83,33 @@ def _context_factory(
     return build
 
 
-def _save_mission(repo: InMemoryRepository) -> None:
+def _save_mission(
+    repo: InMemoryRepository,
+    *,
+    features: list[MissionFeature] | None = None,
+) -> None:
+    mission_features = features or []
+    phases = [
+        MissionPhase(
+            phase_id=phase_id,
+            title=f"Phase {phase_id}",
+            description=f"Phase for {phase_id}",
+            feature_ids=[
+                feature.feature_id
+                for feature in mission_features
+                if feature.phase_id == phase_id
+            ],
+        )
+        for phase_id in sorted({feature.phase_id for feature in mission_features})
+    ]
     repo.save_mission(
         Mission(
             mission_id=MISSION_ID,
             task_id=TASK_ID,
             title="Mission",
             description="Mission scoped assignment event test",
+            phases=phases,
+            features=mission_features,
             created_at=datetime(2026, 5, 23, tzinfo=timezone.utc),
         )
     )
@@ -506,7 +526,18 @@ async def test_assignment_events_include_scoping_keys(
     repo: InMemoryRepository,
     tmp_path: Path,
 ) -> None:
-    _save_mission(repo)
+    _save_mission(
+        repo,
+        features=[
+            MissionFeature(
+                feature_id="feature-a",
+                hunger_item_id="H-A",
+                phase_id="phase-a",
+                title="Feature A",
+                description="Feature A scoping",
+            )
+        ],
+    )
     assignment = _assignment("A", target_feature_ids=["feature-a"])
     runtime = _RecordingRuntime({"A": [_handoff("A")]})
 
@@ -522,6 +553,8 @@ async def test_assignment_events_include_scoping_keys(
     for event in (started, completed):
         payload = event["payload"]
         assert payload["mission_id"] == MISSION_ID
+        assert payload["phase_id"] == "phase-a"
+        assert payload["feature_id"] == "feature-a"
         assert payload["assignment_id"] == "A"
         assert payload["target_feature_ids"] == ["feature-a"]
         assert payload["target_hunger_item_ids"] == ["H-A"]

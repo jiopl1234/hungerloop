@@ -8,6 +8,7 @@ from pathlib import Path
 
 from hungerloop.models.context import ContextPack
 from hungerloop.models.events import EventType
+from hungerloop.models.mission import Mission, MissionFeature
 from hungerloop.models.planning import Assignment
 from hungerloop.models.worker import WorkerHandoff, WorkerResult
 from hungerloop.repository.protocol import RepositoryProtocol
@@ -63,7 +64,6 @@ class WorkerScheduler:
     ) -> SchedulerResult:
         """Run assignments in provided topology order with retry and skip handling."""
         mission = self.repo.get_mission(task_id)
-        mission_id = mission.mission_id if mission is not None else None
         assignment_ids = [assignment.assignment_id for assignment in assignments]
         if self._contains_cycle(assignments):
             for assignment in assignments:
@@ -72,7 +72,7 @@ class WorkerScheduler:
                     loop_id,
                     assignment,
                     blocked_by="cycle",
-                    mission_id=mission_id,
+                    mission=mission,
                 )
             return SchedulerResult(
                 handoffs=[],
@@ -105,7 +105,7 @@ class WorkerScheduler:
                     loop_id,
                     assignment,
                     blocked_by=blocked_by,
-                    mission_id=mission_id,
+                    mission=mission,
                 )
                 continue
 
@@ -117,7 +117,7 @@ class WorkerScheduler:
                     context_factory=context_factory,
                     workspace_root=workspace_root,
                     evidence_by_assignment=evidence_by_assignment,
-                    mission_id=mission_id,
+                    mission=mission,
                 )
             except _SchedulerSafetyStop as exc:
                 start = index + 1 if exc.current_completed else index
@@ -131,7 +131,7 @@ class WorkerScheduler:
                         loop_id,
                         remaining,
                         blocked_by="safety_stop",
-                        mission_id=mission_id,
+                        mission=mission,
                     )
                 raise exc.original
 
@@ -159,7 +159,7 @@ class WorkerScheduler:
         context_factory: Callable[[Assignment], ContextPack],
         workspace_root: Path,
         evidence_by_assignment: dict[str, set[str]],
-        mission_id: str | None,
+        mission: Mission | None,
     ) -> WorkerHandoff:
         while True:
             attempt = assignment.retry_count + 1
@@ -183,7 +183,7 @@ class WorkerScheduler:
             self.repo.append_event(
                 EventType.WORKER_ASSIGNMENT_STARTED,
                 {
-                    **self._assignment_payload(assignment, mission_id=mission_id),
+                    **self._assignment_payload(assignment, mission=mission),
                     "attempt": attempt,
                 },
                 task_id=task_id,
@@ -217,7 +217,7 @@ class WorkerScheduler:
                 self.repo.append_event(
                     EventType.WORKER_ASSIGNMENT_FAILED,
                     {
-                        **self._assignment_payload(assignment, mission_id=mission_id),
+                        **self._assignment_payload(assignment, mission=mission),
                         "error_type": handoff.error_type or "unknown",
                         "handoff_id": handoff_id,
                     },
@@ -228,7 +228,7 @@ class WorkerScheduler:
                 self.repo.append_event(
                     EventType.WORKER_ASSIGNMENT_COMPLETED,
                     {
-                        **self._assignment_payload(assignment, mission_id=mission_id),
+                        **self._assignment_payload(assignment, mission=mission),
                         "handoff_id": handoff_id,
                     },
                     task_id=task_id,
@@ -252,7 +252,7 @@ class WorkerScheduler:
                 self.repo.append_event(
                     EventType.WORKER_ASSIGNMENT_RETRIED,
                     {
-                        **self._assignment_payload(assignment, mission_id=mission_id),
+                        **self._assignment_payload(assignment, mission=mission),
                         "attempt": assignment.retry_count + 1,
                     },
                     task_id=task_id,
@@ -412,12 +412,12 @@ class WorkerScheduler:
         assignment: Assignment,
         *,
         blocked_by: str,
-        mission_id: str | None = None,
+        mission: Mission | None = None,
     ) -> None:
         self.repo.append_event(
             EventType.WORKER_ASSIGNMENT_SKIPPED,
             {
-                **self._assignment_payload(assignment, mission_id=mission_id),
+                **self._assignment_payload(assignment, mission=mission),
                 "blocked_by": blocked_by,
             },
             task_id=task_id,
@@ -428,7 +428,7 @@ class WorkerScheduler:
     def _assignment_payload(
         assignment: Assignment,
         *,
-        mission_id: str | None = None,
+        mission: Mission | None = None,
     ) -> dict[str, object]:
         payload: dict[str, object] = {
             "assignment_id": assignment.assignment_id,
@@ -436,9 +436,28 @@ class WorkerScheduler:
             "target_hunger_item_ids": list(assignment.target_hunger_item_ids),
             "target_feature_ids": list(assignment.target_feature_ids),
         }
-        if mission_id is not None:
-            payload["mission_id"] = mission_id
+        if mission is not None:
+            payload["mission_id"] = mission.mission_id
+            feature = WorkerScheduler._feature_for_assignment(mission, assignment)
+            if feature is not None:
+                payload["phase_id"] = feature.phase_id
+                payload["feature_id"] = feature.feature_id
         return payload
+
+    @staticmethod
+    def _feature_for_assignment(
+        mission: Mission,
+        assignment: Assignment,
+    ) -> MissionFeature | None:
+        target_feature_ids = set(assignment.target_feature_ids)
+        target_hunger_item_ids = set(assignment.target_hunger_item_ids)
+        for feature in mission.features:
+            if (
+                feature.feature_id in target_feature_ids
+                or feature.hunger_item_id in target_hunger_item_ids
+            ):
+                return feature
+        return None
 
     def _emit_write_collisions(
         self,
