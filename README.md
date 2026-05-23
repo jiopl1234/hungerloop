@@ -1,8 +1,8 @@
-# HungerLoop v0.5b/c
+# HungerLoop v0.6.0
 
-基于"check 级别提交"和"饥饿度预算"的 Python 异步 Agent 迭代循环框架。提供工作区隔离、成本守卫、可恢复运行和完整可观测性。
+基于"check 级别提交"和"饥饿度预算"的 Python 异步 Agent 迭代循环框架。v0.6 增加 mission runtime：多 feature 拓扑规划、结构化 worker handoff、三阶段验证流水线、SQLite→artifact 单向镜像以及 mission CLI。
 
-> **状态**：v0.5b/c — SQLite 持久化 CLI + trace/report 加固版本。CLI 默认打开 `hungerloop.sqlite`，支持跨进程恢复 dummy 运行，完整保留 v0.4 的全部不变量。
+> **状态**：v0.6.0 — Mission runtime GA。CLI 默认打开 `hungerloop.sqlite`，支持跨进程恢复 dummy 运行，并完整保留 v0.5f 的 I-3..I-10 不变量。
 
 ---
 
@@ -11,15 +11,16 @@
 1. [核心概念](#核心概念)
 2. [功能矩阵](#功能矩阵)
 3. [安装](#安装)
-4. [5 分钟快速开始](#5-分钟快速开始)
-5. [完整工作流程](#完整工作流程)
-6. [CLI 使用教程](#cli-使用教程)
-7. [验收规范文件](#验收规范文件)
-8. [模型配置](#模型配置)
-9. [不变量参考](#不变量参考)
-10. [项目结构](#项目结构)
-11. [开发与测试](#开发与测试)
-12. [文档与路线图](#文档与路线图)
+4. [v0.6 Mission 快速开始](#v06-mission-快速开始)
+5. [5 分钟快速开始（legacy acceptance checks）](#5-分钟快速开始legacy-acceptance-checks)
+6. [完整工作流程](#完整工作流程)
+7. [CLI 使用教程](#cli-使用教程)
+8. [验收规范文件](#验收规范文件)
+9. [模型配置](#模型配置)
+10. [不变量参考](#不变量参考)
+11. [项目结构](#项目结构)
+12. [开发与测试](#开发与测试)
+13. [文档与路线图](#文档与路线图)
 
 ---
 
@@ -49,8 +50,9 @@ HungerLoop 是一个把 Agent 长任务"编译"成可观察、可中断、可恢
 | `MemoryManager` | ✅ | 每轮生成 `MemoryCandidate`，确定性谓词（§19） |
 | `SkillManager` | ✅ | `DONE` 且 ≥2 个 check 通过时发卡（§20） |
 | `SQLiteRepository` | ✅ | 前向迁移、WAL、usage_snapshots、task_locks、events、traces、reports、memory、skill |
+| `MissionRuntime` | ✅ | `MissionPlanner`、`WorkerScheduler`、`HandoffProcessor`、`ValidationPipeline`、`MissionStateUpdater`、7 个 mission CLI 子命令（v0.6） |
 | `LearningWorker` / `ResearchWorker` | ⏳ | v0.5d |
-| `LLMPlanner` + 多 Worker 调度 | ⏳ | v0.6 |
+| `LLMPlanner` + 真并发 fan-out/join | ⏳ | v0.7 |
 | `Azure OpenAI` 运行时 | ⏳ | 占位实现，调用时显式失败 |
 | 长期记忆生产化推广流程 | ⏳ | 后续版本 |
 
@@ -70,14 +72,74 @@ pip install -e ".[dev]"
 
 # 验证
 hungerloop --version
-pytest tests/        # 应通过 500+ 测试
+pytest tests/        # 应通过 ≥761 unit + ≥19 integration 的 v0.6 基线
 mypy --strict src/   # 应零错误
 ruff check src/ tests/
 ```
 
 ---
 
-## 5 分钟快速开始
+## v0.6 Mission 快速开始
+
+创建一个最小 mission spec，然后通过 mission runtime 创建、运行和查看状态：
+
+```bash
+# 1. 准备 mission artifact
+mkdir -p demo-mission
+cat > demo-mission/mission.md <<'MD'
+# Demo Mission
+
+## Description
+Generate a short report through the v0.6 mission runtime.
+MD
+
+cat > demo-mission/features.yaml <<'YAML'
+features:
+  - feature_id: F-001
+    phase_id: P-001
+    title: Write report
+    description: Create report.md in the task workspace.
+    expected_behavior:
+      - report.md exists
+    verification_steps:
+      - hungerloop mission status demo-mission-1
+    fulfills:
+      - VAL-DEMO-001
+YAML
+
+cat > demo-mission/validation-contract.yaml <<'YAML'
+assertions:
+  - assertion_id: VAL-DEMO-001
+    phase_id: P-001
+    title: Report exists
+    description: report.md is present after the mission run.
+    check_type: file_contains_regex
+    params:
+      file: report.md
+      pattern: ".+"
+YAML
+
+# 2. 创建 mission task
+hungerloop mission new demo-mission-1 --from demo-mission --goal "Generate a short report"
+
+# 3. 运行 mission runtime（保留 v0.5f cost guard / workspace isolation）
+hungerloop mission run demo-mission-1 --max-loops 5
+
+# 4. 查看 mission cockpit
+hungerloop mission status demo-mission-1
+```
+
+常用查看命令：
+
+```bash
+hungerloop mission features demo-mission-1
+hungerloop mission validation demo-mission-1
+hungerloop report demo-mission-1
+```
+
+---
+
+## 5 分钟快速开始（legacy acceptance checks）
 
 ```bash
 # 1. 写一个验收规范
@@ -192,6 +254,28 @@ hungerloop run <task_id> \
 ```
 
 **resume 预检（preflight）**：每次 `run` 启动前会检查 task 当前状态、上次 stop 原因、锁是否陈旧，并把检查结果落库为事件。如果状态不允许恢复（如 `HUMAN_PAUSED` 但未传 `--resume`），CLI 会用清晰提示退出。
+
+### `hungerloop mission` — v0.6 mission runtime
+
+```bash
+hungerloop mission new <task_id> [--goal TEXT] [--from PATH] [--contract PATH]
+hungerloop mission run <task_id> [--max-loops N] [--refill N] [--resume] [--reset]
+hungerloop mission status <task_id> [--json]
+hungerloop mission features <task_id> [--phase PHASE_ID] [--json]
+hungerloop mission validation <task_id> [--phase PHASE_ID] [--json]
+hungerloop mission edit <task_id>
+hungerloop mission import <task_id> --from PATH
+```
+
+7 个 mission 子命令覆盖 v0.6 的完整 mission 生命周期：
+
+- `mission new`：从 `mission.md` / `features.yaml` / `validation-contract.yaml` 创建 mission task；若传 `--accept` 则回退 legacy task 创建路径。
+- `mission run`：运行 mission-aware orchestrator；`HUNGERLOOP_MISSION_RUNTIME=0` 是 **DEPRECATED, removable in v0.7.0** 的临时回滚旗标，会强制隐藏 mission row 并走 v0.5f legacy path。
+- `mission status`：显示 mission cockpit（phase / feature / validation 摘要），`--json` 输出结构化状态。
+- `mission features`：列出 feature 队列，可按 phase 过滤。
+- `mission validation`：列出 validation contract assertion 状态，可按 phase 过滤。
+- `mission edit`：打开 `$EDITOR`，保存后通过 import/compiler 路径写入 SQLite。
+- `mission import`：仅允许在 `HUMAN_PAUSED` 状态下从 artifact 显式导入；SQLite 是单一真源，`best/*.yaml` 由 `MissionStateUpdater` 在 commit tail 重新生成。
 
 ### `hungerloop status` — 查看任务状态
 
@@ -340,6 +424,12 @@ retry:
 src/hungerloop/
   models/         # Pydantic 冻结快照模型；不要往里加可变方法
   services/       # 无状态服务；统一通过 DI 拿 repo
+    mission_planner.py       # v0.6 mission feature → assignment planner
+    worker_scheduler.py      # v0.6 sequential topology executor
+    handoff_processor.py     # v0.6 structured handoff → ledger compiler path
+    validation_pipeline.py   # deterministic + scrutiny + user-testing stages
+    mission_state_updater.py # SQLite → best/mission.md|features.yaml|validation-contract.yaml|services.yaml mirror
+    validators/              # deterministic/scrutiny/user-testing validators
   repository/     # Protocol + InMemoryRepository + SQLiteRepository + 迁移
     migrations/   # v1__initial.sql、v2__memory_candidate_lifecycle.sql、
                   # v3__sqlite_runtime_tables.sql、v4__memory_candidate_sources.sql
@@ -390,17 +480,17 @@ hungerloop run smoke
 
 **文档**：
 
-- `hungerloop_v0_5b_c_prd.md` — v0.5b/c 产品需求
-- `hungerloop_v0_5_2_prd.md` — v0.5.2 产品需求
-- `HungerLoop_MVP_PRD_v0.4.1_engineering_fix.md` — v0.4.1 基线
+- `specs/PRD/hungerloop_v0_6_prd.md` — v0.6 产品需求与 ADR-007/008/009 收敛口径
+- `specs/v0.6_implementation/` — M1..M6 + RC 的 EARS 实现规格
+- `docs/architecture/v0.6/adr/` — v0.6 架构决策记录
 - `CLAUDE.md` — 不变量、约定、MCP 工具用法
 - `RELEASE_CHECKLIST.md` — 发布前验证步骤
 
 **路线图**：
 
-- **v0.5c**：记忆推广 CLI、更多技能触发器
-- **v0.5d**：`LearningWorker`、`ResearchWorker`
-- **v0.6**：`LLMPlanner`、多 Worker 调度、可选并行执行
+- **v0.6.x**：mission runtime bugfix / hardening
+- **v0.7**：`LLMPlanner`、并发 fan-out + join、cross-task memory recall、`services.yaml` rich semantics
+- **v0.8+**：Web UI
 
 ---
 

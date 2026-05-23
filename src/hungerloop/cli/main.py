@@ -16,6 +16,7 @@ workspace. Tests can still inject a :class:`CliContext` carrying any
 """
 from __future__ import annotations
 
+import tomllib
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 
@@ -42,8 +43,23 @@ from hungerloop.repository.migration_errors import (
 from hungerloop.repository.sqlite_migrator import ReadOnlyDbOutdatedError
 from hungerloop.repository.sqlite_repo import SQLiteRepository
 
+
+def _read_source_tree_version() -> str | None:
+    """Return the pyproject version for source-tree CLI invocations."""
+    pyproject = Path(__file__).resolve().parents[3] / "pyproject.toml"
+    try:
+        data = tomllib.loads(pyproject.read_text(encoding="utf-8"))
+    except (OSError, tomllib.TOMLDecodeError):
+        return None
+    project = data.get("project")
+    if not isinstance(project, dict):
+        return None
+    raw_version = project.get("version")
+    return raw_version if isinstance(raw_version, str) else None
+
+
 try:
-    _PACKAGE_VERSION = version("hungerloop")
+    _PACKAGE_VERSION = _read_source_tree_version() or version("hungerloop")
 except PackageNotFoundError:
     # Editable install / source checkout without metadata: fall back gracefully.
     _PACKAGE_VERSION = "0+source"

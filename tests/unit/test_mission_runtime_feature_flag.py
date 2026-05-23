@@ -79,6 +79,7 @@ def test_rollback_flag(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-
 
     assert result.exit_code == 0, result.output
     assert "deprecated" in result.output
+    assert "DEPRECATED, removable in v0.7.0" in result.output
     mission_events = [
         event
         for event in ctx.repo.list_events(task_id)

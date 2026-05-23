@@ -1,7 +1,7 @@
 # HungerLoop — Claude Code Project Notes
 
-Python 3.11+ async agent harness. Current shipped version: **v0.4.1** (MVP).
-Next milestone PRD: `HungerLoop_Next_Step_PRD.md` (v0.5).
+Python 3.11+ async agent harness. Current shipped version: **v0.6.0** (mission runtime).
+Canonical v0.6 PRD: `specs/PRD/hungerloop_v0_6_prd.md`.
 
 ## Code search — use MCP tools, not grep/Explore
 
@@ -23,18 +23,23 @@ Fall back to `Bash` `grep` / `Read` only when the MCP tools are unavailable or w
 
 ```
 src/hungerloop/
-  models/       # Pydantic models — frozen snapshots. Do not add mutating methods.
+  models/       # Pydantic v2 data models. Do not add mutating business methods.
     enums.py, hunger.py, blackboard.py, planning.py, validation.py,
     context.py, tracing.py, worker.py, workspace.py
+    mission.py, validation_contract.py, handoff.py
   services/     # Stateless services; all take repo via DI.
     hunger_engine.py, hunger_update.py, cost_guard.py, validation_gate.py,
     commit_manager.py, integrator.py, context_builder.py,
     workspace_manager.py, sandbox_runner.py, acceptance_runner.py,
-    stagnation_detector.py, requirement_compiler.py, path_safety.py
-  repository/   # Protocol + InMemoryRepository (no SQLite yet)
-  cli/          # click-based: workspace, checks
-tests/unit/     # 89 tests, all green on main
-docs/superpowers/plans/   # implementation plans
+    stagnation_detector.py, requirement_compiler.py, path_safety.py,
+    mission_planner.py, worker_scheduler.py, handoff_processor.py,
+    mission_state_updater.py, validation_pipeline.py, mission_loader.py,
+    validators/  # deterministic/scrutiny/user-testing; no ModelClient imports
+  repository/   # Protocol + InMemoryRepository + SQLiteRepository + migrations
+  cli/          # click-based: new/run/status/report/trace/mission/etc.
+tests/unit/     # v0.6 baseline: ≥761 unit tests
+tests/integration/ # v0.6 baseline: ≥19 integration tests collected
+docs/architecture/v0.6/adr/ # ADR-007/008/009 accepted decisions
 ```
 
 ## Invariants — DO NOT VIOLATE
@@ -57,12 +62,13 @@ These are encoded in code and tests. Breaking one is a regression, not a refacto
 
 ```bash
 pip install -e ".[dev]"
-pytest tests/                       # 89 tests
+pytest tests/                       # v0.6 baseline: ≥761 unit + ≥19 integration collected
 mypy --strict src/                  # must be clean
 ruff check src/ tests/
 hungerloop --version                # CLI smoke
 hungerloop workspace inspect <task_id>
 hungerloop checks status <task_id>
+hungerloop mission --help           # v0.6 mission CLI surface
 ```
 
 - **Python:** 3.11+, `from __future__ import annotations` in every module.
@@ -70,17 +76,18 @@ hungerloop checks status <task_id>
 - **Async:** `pytest-asyncio` in `auto` mode. Service methods that touch I/O or subprocesses are async.
 - **Models:** Pydantic v2. The `pydantic.mypy` plugin is **disabled** (incompatible with mypy ≥1.18); see `pyproject.toml` note. Don't re-enable without checking versions.
 - **Repository typing:** Several services still take `repo: Any` with `TODO(Task 14)`. When tightening, use `RepositoryProtocol` from `repository/protocol.py`.
+- **CI lint rules:** no `ModelClient` imports under `services/validators/`; no `yaml.load*` in `mission_state_updater.py`; no repository save/update/delete writes inside `mission_state_updater.py`; no direct ledger writes outside compilers (`requirement_compiler.py` / `refinement_compiler.py`).
+- **Mission runtime rollback flag:** `HUNGERLOOP_MISSION_RUNTIME=0` is **DEPRECATED, removable in v0.7.0**. Keep only for RC/v0.6 rollback compatibility.
 
 ## Conventions
 
 - **Commit style:** `feat:`, `fix:`, `docs:`, `refactor:`, `test:` (see `git log`).
 - **No score-based logic in commits, hunger updates, or validation.** If you find yourself reaching for `score`, you are doing the wrong thing — re-read I-3.
-- **Frozen models.** Models are data containers; behavior lives in services. Don't add `def apply()` to a `BaseModel`.
+- **Models are data containers.** Behavior lives in services. Don't add `def apply()` to a `BaseModel`.
 - **Evidence is mandatory.** A candidate with no evidence_ids cannot commit (I-3). Sandbox runs auto-emit evidence; LLM/tool wrappers must do the same.
+- **Mission artifacts are mirrors.** SQLite is the single source of truth; `MissionStateUpdater` regenerates `best/mission.md`, `best/features.yaml`, `best/validation-contract.yaml`, and `best/services.yaml` after successful commits. Manual changes go through `hungerloop mission edit/import`.
 
 ## Things in flight / known gaps
 
-- Repository is `InMemoryRepository` only — no persistence layer yet.
-- No Orchestrator, no Worker implementations, no `ModelClient` — all v0.5 work.
-- Several services have `TODO(Task 14)` markers for repo-protocol typing.
-- `gap_score` decrement is fractional (`hunger_update.py:48`); equality check at zero may need an epsilon when extending.
+- `HUNGERLOOP_MISSION_RUNTIME=0` remains as a deprecated v0.6 rollback valve and should be removed in v0.7.0.
+- True concurrent fan-out/join, LLMPlanner, richer `services.yaml`, cross-task memory recall, and Web UI are v0.7+ placeholders.

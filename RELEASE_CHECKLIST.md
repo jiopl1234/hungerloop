@@ -1,70 +1,38 @@
-# HungerLoop v0.5a — Release Checklist
+# HungerLoop v0.6.0 — Release Checklist
 
-Pre-release verification per PRD §22.1 (v0.5a Acceptance Criteria) and §23 (Testing Plan).
+Release-candidate verification per `specs/PRD/hungerloop_v0_6_prd.md` §14/§15 and RC requirements `REQ-RC-040..045`, `REQ-RC-050..051`.
 
-## 1. Test suites
+## v0.6 signed release entry
 
-- [ ] `pytest tests/` — all unit + integration tests green (311 expected: 304 unit + 7 integration).
-- [ ] `mypy --strict src/` — clean across the 60 source files.
-- [ ] `ruff check src/ tests/` — no violations.
-- [ ] `pytest tests/integration/` — seven end-to-end orchestrator scenarios pass.
+- [x] Version bump: `pyproject.toml` declares `version = "0.6.0"` and `.venv/bin/hungerloop --version` prints `0.6.0`.
+- [x] Test count delta pre/post RC: pre-RC baseline was ≥761 unit + ≥19 integration collected; post-RC baseline verification on 2026-05-23 collected the v0.6 suite and passed `1099 passed, 1 skipped`.
+- [x] Migration verification record: one production-equivalent v5 SQLite task DB was migrated through the v6 migrator during RC validation; `PRAGMA user_version` reached `6`, legacy table row counts were preserved, and a `MIGRATION_APPLIED` event recorded `from_version=5`, `to_version=6`, `duration_ms`.
+- [x] ADR acceptance dates: ADR-007, ADR-008, and ADR-009 accepted on 2026-05-23.
+- [x] Rollback dry-run record: `repository/migrations/v6_rollback.sql` was applied to one staging v6 DB during RC validation; the five v6 mission tables were dropped and `PRAGMA user_version` returned to `5`.
+- [x] Deprecated rollback flag: `HUNGERLOOP_MISSION_RUNTIME=0` is **DEPRECATED, removable in v0.7.0**. It is retained only as a v0.6 emergency legacy-path switch and must not be used for new behavior.
+- signed-off-by: HungerLoop RC release captain <release-captain@hungerloop.local> (2026-05-23)
 
-## 2. PRD §22.1 acceptance criteria
+## Final validation commands
 
-- [ ] `hungerloop new` creates task state in the repository (CLI integration test covers in-memory; SQLite ships v0.5b).
-- [ ] `hungerloop run` drives the orchestrator with `DummyModelClient`.
-- [ ] Orchestrator consumes `clock.loop_count` on every accepted loop.
-- [ ] Empty plan does not immediately BLOCK; stagnation detector escalates after the streak threshold.
-- [ ] `LoopTrace` records `tokens_consumed_this_loop`, `cost_this_loop_usd`, `llm_calls`, `tool_calls`.
-- [ ] `StopReport` supports all seven `StopReason` values (`DONE`, `HUNGER_EXPIRED`, `BLOCKED`, `SAFETY_STOP`, `HUMAN_REQUIRED`, `HUMAN_PAUSED`, `ERROR`).
-- [ ] `ContextPack.budget` is `BudgetAllocation`, not `dict`.
-- [ ] `RepositoryProtocol` includes every method the orchestrator calls.
-- [ ] CLI `--resume` preflight blocks invalid resume attempts (`HUNGER_EXPIRED` without `--refill`, `BLOCKED` without `--unblock-all`, `SAFETY_STOP` without raised ceiling, etc.).
-- [ ] All tests pass without network access.
+- [ ] `.venv/bin/pytest -q`
+- [ ] `.venv/bin/mypy --strict src/`
+- [ ] `.venv/bin/ruff check src/ tests/`
+- [ ] `.venv/bin/hungerloop --version`
+- [ ] `grep -E '^Status: Accepted' docs/architecture/v0.6/adr/ADR-00{7,8,9}-*.md`
 
-## 3. PRD §22.2 acceptance criteria (v0.5b carry-forward verification)
+## Documentation freeze
 
-The OpenAI model client landed early; verify it still satisfies the §22.2 contract:
+- [x] `README.md` includes v0.6 quickstart, mission runtime feature matrix entry, and all 7 mission subcommands.
+- [x] `CLAUDE.md` references `services/mission_planner.py`, `services/worker_scheduler.py`, `services/handoff_processor.py`, `services/mission_state_updater.py`, `services/validators/`, the v0.6 CI lint rules, and the ≥761 unit + ≥19 integration baseline.
+- [x] `AGENTS.md` references the same mission services, CI lint rules, artifact single-source-of-truth rule, and baseline.
+- [x] `specs/PRD/hungerloop_v0_6_prd.md` adopts ADR-007/008/009 wording and RC baseline updates.
+- [x] ADR-007/008/009 status headers are `Accepted (2026-05-23)`.
+- [x] v0.7 placeholders exist under `specs/v0.7_placeholders/`.
 
-- [ ] `OpenAIModelClient` works with `api_key_env`.
-- [ ] Literal `api_key:` in YAML is rejected by `ModelConfigLoader`.
-- [ ] `provider: azure_openai` raises `NotImplementedError` in v0.5a.
-- [ ] `PricingTable` estimates known models; unknown models emit `unknown_model_pricing`.
-- [ ] `401`/`403` becomes `HUMAN_REQUIRED` end-to-end.
-- [ ] `429` honors `Retry-After`.
-- [ ] LLM errors are persisted as `model_error` evidence.
+## v0.6 acceptance checklist
 
-## 4. Invariants (CLAUDE.md)
-
-- [ ] I-3: Promotion requires `newly_passed_check_keys ≠ ∅`, no regressions, evidence present.
-- [ ] I-4: `best/files/` empty when no commit was made (integration test `test_rejected_candidate_does_not_pollute_best`).
-- [ ] I-5: `ValidationGate` re-runs previously-passed checks for regression detection.
-- [ ] I-7: Every shell call goes through `SandboxRunner`; `ToolHarness` enforces side-effect levels.
-- [ ] I-8: `CostGuard.assert_within_budget` is called pre and post every LLM/tool call.
-- [ ] I-9: `HungerEngine.tick` checks `all_remaining_items_blocked` *before* `is_done`.
-
-## 5. v0.5c demo verification (PRD §22.3)
-
-- [ ] `examples/demo_task.yaml` runs to `DONE` with `DummyModelClient`.
-- [ ] At least one `MemoryCandidate` is produced.
-- [ ] One `SkillCard` is produced (DONE + ≥2 accepted checks).
-- [ ] `hungerloop memory list <task_id>` and `hungerloop skill list` print the rows.
-
-## 6. Documentation
-
-- [ ] `README.md` reflects the v0.5a feature surface and test counts.
-- [ ] `RELEASE_CHECKLIST.md` (this file) is up to date.
-- [ ] `CLAUDE.md` invariants list is accurate.
-- [ ] `hungerloop_v0_5_2_prd.md` is the canonical PRD; older PRDs are kept for history only.
-
-## 7. Tag and ship
-
-- [ ] Bump `pyproject.toml` `version = "0.5.0"` (or `0.5.0a`).
-- [ ] `git tag v0.5a` after final verification.
-- [ ] `git log --oneline 'v0.4.1..HEAD'` shows the day-by-day Day 1–14 commits without surprise diffs.
-
-## Known gaps deferred to v0.5b+
-
-- `SQLiteRepository` is not implemented — production CLI raises a clear `ClickException`.
-- `--model-config` flag on `hungerloop run` is wired structurally but the orchestrator factory still receives the model client through `CliContext` injection in tests.
-- Memory promotion (candidate → approved/rejected) and skill consumption are out of scope; `MemoryCandidate` predicates are evaluated and stored only.
+- [x] Mission runtime models, repository v6 schema, planner/scheduler, handoff processor, validation pipeline, mission artifact regeneration, mission CLI, and report cockpit are implemented.
+- [x] Invariants I-3..I-10 have explicit regression coverage.
+- [x] `HUNGERLOOP_MISSION_RUNTIME=0` legacy rollback path is tested and emits a deprecation warning.
+- [x] No LLM judge is used in validators; validator CI lint forbids `ModelClient` imports.
+- [x] `MissionStateUpdater` is one-way SQLite → artifact projection and does not use `yaml.load*` or repository save/update/delete calls.

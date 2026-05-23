@@ -214,8 +214,8 @@ def mission_run(
         )
         try:
             click.echo(
-                f"{_MISSION_RUNTIME_ENV}=0 is deprecated and will be removed in "
-                "v0.7.0; running legacy path."
+                f"{_MISSION_RUNTIME_ENV}=0 is deprecated (DEPRECATED, removable in "
+                "v0.7.0); running legacy path."
             )
             click_ctx.invoke(
                 legacy_run,
