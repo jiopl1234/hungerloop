@@ -36,7 +36,7 @@ class StagnationDetector:
     def __init__(
         self,
         repo: RepositoryProtocol,
-        max_item_consecutive_failures: int = 3,
+        max_item_consecutive_failures: int = 10,
         max_global_no_progress_loops: int = 5,
     ) -> None:
         self.repo = repo
