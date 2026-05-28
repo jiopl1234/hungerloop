@@ -54,6 +54,11 @@ class ModelConfig(BaseModel):
     model_name: str = "dummy"
     api_key_env: str | None = None
     base_url: str | None = None
+    # Optional: read base_url from an env var (parallel to api_key_env).
+    # When set, the loader fills `base_url` from the named env var if
+    # `base_url` itself is null. Lets ops change endpoints per
+    # environment without rewriting YAML / committing URLs to git.
+    base_url_env: str | None = None
     timeout_seconds: int = Field(default=60, ge=1)
     max_tokens: int = Field(default=4096, ge=1)
     temperature: float = Field(default=0.1, ge=0.0)
@@ -103,6 +108,16 @@ class ModelConfigLoader:
                 raise ModelAuthError(
                     f"Environment variable {config.api_key_env} is not set"
                 )
+            # Resolve base_url_env → base_url at load time so downstream
+            # code sees a single canonical field. Explicit base_url wins
+            # over base_url_env when both are set.
+            if not config.base_url and config.base_url_env:
+                env_val = os.getenv(config.base_url_env)
+                if not env_val:
+                    raise ModelAuthError(
+                        f"Environment variable {config.base_url_env} is not set"
+                    )
+                config = config.model_copy(update={"base_url": env_val})
 
         if config.provider == ModelProvider.DUMMY:
             self._maybe_warn_dummy()

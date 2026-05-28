@@ -59,9 +59,26 @@ class AcceptanceCheckRunner:
         candidate_root = self.workspace_manager.candidate_files_dir(task_id, loop_id)
 
         if ct == AcceptanceCheckType.FILE_EXISTS:
-            path = resolve_workspace_path(candidate_root, str(check.params["path"]))
+            raw_pattern = str(check.params["path"])
+            if any(ch in raw_pattern for ch in ("*", "?", "[")):
+                # Glob pattern — Path.glob is scoped to candidate_root so
+                # path safety is preserved. ANY match (>=1 regular file)
+                # satisfies the existence check. Without this branch,
+                # `*.py` was treated as a literal filename and the check
+                # could never pass for glob-shaped acceptance criteria —
+                # the worker would commit the real file, judge would
+                # confirm it, but H-1:0 stayed pending forever and the
+                # mission burned 5+ loops chasing a phantom check.
+                matches = [p for p in candidate_root.glob(raw_pattern) if p.is_file()]
+                ok = bool(matches)
+                detail = (
+                    f"file_exists({raw_pattern}): {ok} "
+                    f"(glob matched {len(matches)} file(s))"
+                )
+                return ok, detail, None
+            path = resolve_workspace_path(candidate_root, raw_pattern)
             ok = path.exists() and path.is_file()
-            return ok, f"file_exists({check.params['path']}): {ok}", None
+            return ok, f"file_exists({raw_pattern}): {ok}", None
 
         if ct == AcceptanceCheckType.SHELL_EXIT_ZERO:
             if "argv" not in check.params:

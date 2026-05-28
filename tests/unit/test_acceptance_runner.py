@@ -177,6 +177,36 @@ async def test_file_exists_returns_true_when_file_present(
     assert ev_id is None
 
 
+async def test_file_exists_resolves_glob_pattern(
+    runner_setup: tuple[AcceptanceCheckRunner, WorkspaceManager, InMemoryRepository],
+) -> None:
+    """Glob patterns like '*.py' must be expanded — not treated as a
+    literal filename. Was the harness bug behind the glm-5.1 v8 run where
+    loop 1 wrote a complete mini_sql.py (40/40 on judge) but H-1:0
+    'file exists: *.py' stayed unaccepted for 5 more loops because
+    Path('*.py').exists() returned False."""
+    runner, wm, _ = runner_setup
+    cand_root = wm.candidate_files_dir("t1", 1)
+    (cand_root / "mini_sql.py").write_text("# stub")
+
+    check = _DummyCheck(AcceptanceCheckType.FILE_EXISTS, {"path": "*.py"})
+    passed, detail, ev_id = await runner.run(check, "t1", 1, _DummyCandidate())
+    assert passed is True
+    assert "*.py" in detail
+    assert "1 file" in detail
+    assert ev_id is None
+
+
+async def test_file_exists_glob_empty_match_returns_false(
+    runner_setup: tuple[AcceptanceCheckRunner, WorkspaceManager, InMemoryRepository],
+) -> None:
+    runner, _wm, _ = runner_setup
+    check = _DummyCheck(AcceptanceCheckType.FILE_EXISTS, {"path": "*.nonexistent"})
+    passed, detail, _ = await runner.run(check, "t1", 1, _DummyCandidate())
+    assert passed is False
+    assert "0 file" in detail
+
+
 async def test_shell_exit_zero_failure_detail_includes_output_summary(
     runner_setup: tuple[AcceptanceCheckRunner, WorkspaceManager, InMemoryRepository],
 ) -> None:
