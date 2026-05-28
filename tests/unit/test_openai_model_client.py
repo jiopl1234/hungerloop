@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import json
-from typing import Any
+from typing import Any, Literal
 
 import httpx
 import pytest
@@ -23,6 +23,10 @@ def _make_client(
     handler: Any,
     *,
     model_name: str = "gpt-4o-mini",
+    tool_protocol: Literal["json_actions", "native"] = "json_actions",
+    reasoning_effort: str | None = None,
+    extra_args: dict[str, object] | None = None,
+    extra_headers: dict[str, str] | None = None,
 ) -> tuple[OpenAIModelClient, InMemoryRepository]:
     monkeypatch.setenv("HL_TEST_API_KEY", "sk-test")
     repo = InMemoryRepository()
@@ -30,6 +34,10 @@ def _make_client(
         provider=ModelProvider.OPENAI,
         model_name=model_name,
         api_key_env="HL_TEST_API_KEY",
+        tool_protocol=tool_protocol,
+        reasoning_effort=reasoning_effort,
+        extra_args=extra_args or {},
+        extra_headers=extra_headers or {},
     )
     cost_guard = CostGuard(repo)
     pricing = PricingTable(repo)
@@ -105,6 +113,218 @@ async def test_complete_json_happy_path(
     ]
     assert len(call_evidence) == 1
     assert call_evidence[0]["loop_id"] == 1
+
+
+@pytest.mark.asyncio
+async def test_openai_passthrough_options_reach_request(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.headers["Authorization"] == "Bearer sk-test"
+        assert request.headers["OpenAI-Beta"] == "responses=v1"
+        body = json.loads(request.content)
+        assert body["reasoning_effort"] == "medium"
+        assert body["metadata"] == {"mission_id": "M-1"}
+        assert body["temperature"] == 0
+        assert body["response_format"] == {"type": "json_schema"}
+        return _ok_response({"action": "noop"})
+
+    client, _ = _make_client(
+        monkeypatch,
+        handler,
+        reasoning_effort="medium",
+        extra_headers={"OpenAI-Beta": "responses=v1"},
+        extra_args={
+            "temperature": 0,
+            "response_format": {"type": "json_schema"},
+            "metadata": {"mission_id": "M-1"},
+        },
+    )
+
+    response = await client.complete_json(
+        task_id="t1",
+        loop_id=1,
+        agent_id="execution_worker_v1",
+        messages=[{"role": "user", "content": "hi"}],
+        max_tokens=64,
+    )
+
+    assert response.json_data == {"action": "noop"}
+
+
+@pytest.mark.asyncio
+async def test_native_tool_protocol_request_and_response(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        assert "response_format" not in body
+        assert body["tool_choice"] == "auto"
+        tools = body["tools"]
+        assert isinstance(tools, list)
+        tool_names = {tool["function"]["name"] for tool in tools}
+        assert {"read_file", "write_file", "patch_file", "run_shell"} <= tool_names
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "message": {
+                            "content": "Need to inspect the file.",
+                            "tool_calls": [
+                                {
+                                    "id": "call_1",
+                                    "type": "function",
+                                    "function": {
+                                        "name": "read_file",
+                                        "arguments": json.dumps(
+                                            {"path": "pyproject.toml"}
+                                        ),
+                                    },
+                                }
+                            ],
+                        }
+                    }
+                ],
+                "usage": {"prompt_tokens": 10, "completion_tokens": 5},
+            },
+        )
+
+    client, _ = _make_client(monkeypatch, handler, tool_protocol="native")
+    response = await client.complete_json(
+        task_id="t1",
+        loop_id=1,
+        agent_id="execution_worker_v1",
+        messages=[{"role": "user", "content": "inspect"}],
+        max_tokens=64,
+    )
+
+    assert response.content == "Need to inspect the file."
+    assert response.json_data == {
+        "summary": "Need to inspect the file.",
+        "actions": [{"tool_name": "read_file", "args": {"path": "pyproject.toml"}}],
+    }
+
+
+@pytest.mark.asyncio
+async def test_native_tool_protocol_streaming_tool_call(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        assert body["stream"] is True
+        assert "response_format" not in body
+        assert body["tools"]
+        return _stream_response(
+            [
+                {
+                    "choices": [
+                        {
+                            "delta": {
+                                "tool_calls": [
+                                    {
+                                        "index": 0,
+                                        "id": "call_1",
+                                        "type": "function",
+                                        "function": {
+                                            "name": "write_file",
+                                            "arguments": '{"path":"report.md",',
+                                        },
+                                    }
+                                ]
+                            }
+                        }
+                    ],
+                    "usage": None,
+                },
+                {
+                    "choices": [
+                        {
+                            "delta": {
+                                "tool_calls": [
+                                    {
+                                        "index": 0,
+                                        "function": {
+                                            "arguments": '"content":"ok"}',
+                                        },
+                                    }
+                                ]
+                            }
+                        }
+                    ],
+                    "usage": None,
+                },
+                {
+                    "choices": [],
+                    "usage": {"prompt_tokens": 17, "completion_tokens": 36},
+                },
+                "[DONE]",
+            ]
+        )
+
+    client, _ = _make_client(monkeypatch, handler, tool_protocol="native")
+    response = await client.complete_json(
+        task_id="t1",
+        loop_id=1,
+        agent_id="execution_worker_v1",
+        messages=[{"role": "user", "content": "write"}],
+        max_tokens=5000,
+    )
+
+    assert response.json_data == {
+        "summary": "",
+        "actions": [
+            {
+                "tool_name": "write_file",
+                "args": {"path": "report.md", "content": "ok"},
+            }
+        ],
+    }
+
+
+@pytest.mark.asyncio
+async def test_native_tool_protocol_invalid_arguments_preserved(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "message": {
+                            "content": "",
+                            "tool_calls": [
+                                {
+                                    "type": "function",
+                                    "function": {
+                                        "name": "write_file",
+                                        "arguments": '{"path":"broken"',
+                                    },
+                                }
+                            ],
+                        }
+                    }
+                ],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1},
+            },
+        )
+
+    client, _ = _make_client(monkeypatch, handler, tool_protocol="native")
+    response = await client.complete_json(
+        task_id="t1",
+        loop_id=1,
+        agent_id="execution_worker_v1",
+        messages=[{"role": "user", "content": "write"}],
+        max_tokens=64,
+    )
+
+    assert response.json_data == {
+        "summary": "",
+        "actions": [
+            {"tool_name": "write_file", "args": {"_raw": '{"path":"broken"'}}
+        ],
+    }
 
 
 @pytest.mark.asyncio
@@ -257,9 +477,14 @@ async def test_server_error_retries_then_exhausts(
 
 
 @pytest.mark.asyncio
-async def test_invalid_json_response_not_retryable(
+async def test_invalid_json_response_is_retryable(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Invalid JSON envelopes are retryable (post-A patch): deepseek and
+    similar providers occasionally emit corrupt JSON for large/quoted
+    payloads, and a retry at temperature>0 usually recovers. Was
+    historically non-retryable, which hard-failed entire assignments on
+    a single envelope hiccup and triggered mission.feature_blocked."""
     calls = {"n": 0}
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -281,8 +506,8 @@ async def test_invalid_json_response_not_retryable(
             max_retries=3,
             retry_base_delay_seconds=0.0,
         )
-    # Invalid JSON is non-retryable; only one HTTP call.
-    assert calls["n"] == 1
+    # max_retries=3 means 1 initial + 3 retries = 4 HTTP calls total.
+    assert calls["n"] == 4
 
 
 @pytest.mark.asyncio

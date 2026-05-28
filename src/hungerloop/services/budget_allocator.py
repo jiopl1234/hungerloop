@@ -30,17 +30,23 @@ class BudgetAllocator:
     def __init__(
         self,
         *,
-        explore_max_tokens: int = 4000,
-        explore_max_tool_calls: int = 10,
-        explore_max_wall_clock_seconds: int = 300,
-        exploit_max_tokens: int = 4000,
-        exploit_max_tool_calls: int = 8,
-        exploit_max_wall_clock_seconds: int = 180,
-        cooldown_max_tokens: int = 500,
-        cooldown_max_tool_calls: int = 1,
-        cooldown_max_wall_clock_seconds: int = 60,
+        # Phase budgets sized for the A-patched ExecutionWorker (inner
+        # self-repair, up to MAX_SELF_REPAIR_ITERATIONS+1 model calls per
+        # loop). The original v0.4.1 defaults (4000/10) were for a strict
+        # single-call worker and trigger worker_budget_exceeded on the
+        # first reasoning-heavy response. Mirror BudgetAllocation's
+        # post-A defaults (60000/80) so both code paths agree.
+        explore_max_tokens: int = 60000,
+        explore_max_tool_calls: int = 80,
+        explore_max_wall_clock_seconds: int = 900,
+        exploit_max_tokens: int = 60000,
+        exploit_max_tool_calls: int = 60,
+        exploit_max_wall_clock_seconds: int = 600,
+        cooldown_max_tokens: int = 8000,
+        cooldown_max_tool_calls: int = 8,
+        cooldown_max_wall_clock_seconds: int = 180,
         max_workers_per_loop: int = 1,
-        max_model_retries: int = 2,
+        max_model_retries: int = 4,
         retry_base_delay_seconds: float = 1.0,
         retry_max_delay_seconds: float = 20.0,
         allow_shell: bool = True,

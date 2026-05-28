@@ -40,6 +40,7 @@ from hungerloop.services.model_client import (
     ModelResponse,
 )
 from hungerloop.services.model_config import ModelConfig, PricingTable
+from hungerloop.services.tools import BUILTIN_TOOL_ARG_SCHEMAS
 
 # Default ratio for the "actual usage diverged from estimate" alarm
 # (PRD §8.7.1). Operators can tighten via env var per deployment; the
@@ -53,6 +54,18 @@ _COST_DELTA_THRESHOLD_DEFAULT = 0.20
 # precisely so ops can see when this heuristic is wrong.
 _CHARS_PER_TOKEN = 4
 _STREAM_REQUIRED_MAX_TOKENS = 4096
+_NATIVE_TOOL_NAMES = ("read_file", "write_file", "patch_file", "run_shell")
+_RESERVED_PAYLOAD_KEYS: frozenset[str] = frozenset(
+    {
+        "model",
+        "messages",
+        "max_tokens",
+        "tools",
+        "tool_choice",
+        "stream",
+        "stream_options",
+    }
+)
 
 
 class OpenAIModelClient:
@@ -280,7 +293,7 @@ class OpenAIModelClient:
         try:
             response = await client.post(
                 f"{self.base_url}/chat/completions",
-                headers={"Authorization": f"Bearer {self.api_key}"},
+                headers=self._request_headers(),
                 json=request_payload,
             )
         except httpx.TransportError as exc:
@@ -327,6 +340,7 @@ class OpenAIModelClient:
         content = message.get("content", "") if isinstance(message, dict) else ""
         if not isinstance(content, str):
             raise ModelCallError("invalid_content_type", retryable=False)
+        json_data = self._native_tool_json_data(message) if isinstance(message, dict) else None
 
         return self._build_model_response(
             task_id=task_id,
@@ -337,6 +351,7 @@ class OpenAIModelClient:
             usage_raw=data.get("usage", {}) or {},
             response_preview=str(data),
             content=content,
+            json_data=json_data,
         )
 
     async def _call_once_streaming(
@@ -358,7 +373,7 @@ class OpenAIModelClient:
             async with client.stream(
                 "POST",
                 f"{self.base_url}/chat/completions",
-                headers={"Authorization": f"Bearer {self.api_key}"},
+                headers=self._request_headers(),
                 json=request_payload,
             ) as response:
                 if response.status_code in {401, 403}:
@@ -383,6 +398,7 @@ class OpenAIModelClient:
 
                 content_parts: list[str] = []
                 reasoning_parts: list[str] = []
+                tool_call_parts: dict[int, dict[str, str]] = {}
                 usage_raw: dict[str, object] = {}
                 async for line in response.aiter_lines():
                     if not line or not line.startswith("data: "):
@@ -416,6 +432,26 @@ class OpenAIModelClient:
                             content_parts.append(content_piece)
                         if isinstance(reasoning_piece, str):
                             reasoning_parts.append(reasoning_piece)
+                        for tool_call in delta.get("tool_calls") or []:
+                            if not isinstance(tool_call, dict):
+                                continue
+                            index_raw = tool_call.get("index", 0)
+                            index = index_raw if isinstance(index_raw, int) else 0
+                            current = tool_call_parts.setdefault(
+                                index, {"id": "", "name": "", "arguments": ""}
+                            )
+                            call_id = tool_call.get("id")
+                            if isinstance(call_id, str) and call_id:
+                                current["id"] = call_id
+                            function = tool_call.get("function")
+                            if not isinstance(function, dict):
+                                continue
+                            name = function.get("name")
+                            if isinstance(name, str) and name:
+                                current["name"] = name
+                            arguments = function.get("arguments")
+                            if isinstance(arguments, str):
+                                current["arguments"] += arguments
         except httpx.TransportError as exc:
             raise ModelCallError(
                 f"network_error:{type(exc).__name__}: {exc}", retryable=True
@@ -426,6 +462,7 @@ class OpenAIModelClient:
         reasoning_text = "".join(reasoning_parts)
         if reasoning_text:
             preview_parts.append(f"\n[reasoning]\n{reasoning_text}")
+        json_data = self._native_stream_tool_json_data(tool_call_parts)
         return self._build_model_response(
             task_id=task_id,
             loop_id=loop_id,
@@ -435,6 +472,7 @@ class OpenAIModelClient:
             usage_raw=usage_raw,
             response_preview="".join(preview_parts),
             content=content,
+            json_data=json_data,
         )
 
     def _build_model_response(
@@ -448,6 +486,7 @@ class OpenAIModelClient:
         usage_raw: object,
         response_preview: str,
         content: str,
+        json_data: dict[str, object] | None = None,
     ) -> ModelResponse:
         usage_payload = usage_raw if isinstance(usage_raw, dict) else {}
         input_tokens = _coerce_int(
@@ -494,19 +533,28 @@ class OpenAIModelClient:
             actual_cost_usd=cost_usd,
         )
 
-        try:
-            json_data = json.loads(_extract_json_object_text(content))
-        except json.JSONDecodeError as exc:
-            raise ModelCallError(
-                f"invalid_json_response: {exc.msg}",
-                retryable=False,
-            ) from exc
+        if json_data is None:
+            try:
+                json_data = json.loads(_extract_json_object_text(content))
+            except json.JSONDecodeError as exc:
+                # Retryable: with temperature > 0 (and especially with
+                # deepseek-v4-pro's known JSON envelope corruption on
+                # large outputs containing heavily-quoted code), a retry
+                # is likely to produce a different — and parseable —
+                # response. Was retryable=False historically; that hard-
+                # failed the whole assignment on a single envelope hiccup
+                # and the feature got `mission.feature_blocked` for the
+                # rest of the run.
+                raise ModelCallError(
+                    f"invalid_json_response: {exc.msg}",
+                    retryable=True,
+                ) from exc
 
-        if not isinstance(json_data, dict):
-            raise ModelCallError(
-                f"json_response_not_object: type={type(json_data).__name__}",
-                retryable=False,
-            )
+            if not isinstance(json_data, dict):
+                raise ModelCallError(
+                    f"json_response_not_object: type={type(json_data).__name__}",
+                    retryable=True,
+                )
 
         return ModelResponse(
             content=content,
@@ -527,12 +575,73 @@ class OpenAIModelClient:
             "messages": messages,
             "max_tokens": max_tokens,
             "temperature": self.config.temperature,
-            "response_format": {"type": "json_object"},
         }
+        if self.config.tool_protocol == "native":
+            payload["tools"] = _native_openai_tools()
+            payload["tool_choice"] = "auto"
+        else:
+            payload["response_format"] = {"type": "json_object"}
+        if self.config.reasoning_effort:
+            payload["reasoning_effort"] = self.config.reasoning_effort
+        if self.config.thinking:
+            payload["thinking"] = self.config.thinking
+        for key, value in self.config.extra_args.items():
+            if key in _RESERVED_PAYLOAD_KEYS:
+                continue
+            payload[key] = value
         if stream:
             payload["stream"] = True
             payload["stream_options"] = {"include_usage": True}
         return payload
+
+    def _request_headers(self) -> dict[str, str]:
+        return {
+            "Authorization": f"Bearer {self.api_key}",
+            **self.config.extra_headers,
+        }
+
+    @staticmethod
+    def _native_tool_json_data(message: dict[str, object]) -> dict[str, object] | None:
+        raw_tool_calls = message.get("tool_calls")
+        if not isinstance(raw_tool_calls, list) or not raw_tool_calls:
+            return None
+        actions: list[dict[str, object]] = []
+        for raw_call in raw_tool_calls:
+            if not isinstance(raw_call, dict):
+                continue
+            function = raw_call.get("function")
+            if not isinstance(function, dict):
+                continue
+            name = function.get("name")
+            if not isinstance(name, str) or not name:
+                continue
+            arguments_raw = function.get("arguments", "{}")
+            args = _parse_tool_arguments(arguments_raw)
+            actions.append({"tool_name": name, "args": args})
+        if not actions:
+            return None
+        summary = message.get("content")
+        return {"summary": summary if isinstance(summary, str) else "", "actions": actions}
+
+    @staticmethod
+    def _native_stream_tool_json_data(
+        tool_call_parts: dict[int, dict[str, str]]
+    ) -> dict[str, object] | None:
+        actions: list[dict[str, object]] = []
+        for index in sorted(tool_call_parts):
+            part = tool_call_parts[index]
+            name = part.get("name", "")
+            if not name:
+                continue
+            actions.append(
+                {
+                    "tool_name": name,
+                    "args": _parse_tool_arguments(part.get("arguments", "")),
+                }
+            )
+        if not actions:
+            return None
+        return {"summary": "", "actions": actions}
 
     def _maybe_emit_reconciliation(
         self,
@@ -637,6 +746,96 @@ def _clip_http_error_body(text: str, max_chars: int = 500) -> str:
     if max_chars <= 1:
         return "…"
     return f"{stripped[: max_chars - 1]}…"
+
+
+def _parse_tool_arguments(raw: object) -> dict[str, object]:
+    """Parse OpenAI tool-call arguments into a dict."""
+    if isinstance(raw, dict):
+        return raw
+    if not isinstance(raw, str) or not raw:
+        return {}
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        return {"_raw": raw}
+    return parsed if isinstance(parsed, dict) else {"_raw": raw}
+
+
+def _native_openai_tools() -> list[dict[str, object]]:
+    """Return OpenAI-compatible native function tool schemas."""
+    missing = set(_NATIVE_TOOL_NAMES) - set(BUILTIN_TOOL_ARG_SCHEMAS)
+    if missing:
+        raise RuntimeError(f"missing native tool schemas: {sorted(missing)}")
+    return [
+        {
+            "type": "function",
+            "function": {
+                "name": "read_file",
+                "description": "Read a UTF-8 file from the candidate workspace.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"path": {"type": "string"}},
+                    "required": ["path"],
+                    "additionalProperties": False,
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "write_file",
+                "description": (
+                    "Create or overwrite a UTF-8 file under the candidate workspace. "
+                    "For large content, keep each call small and use multiple files."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string"},
+                        "content": {"type": "string"},
+                    },
+                    "required": ["path", "content"],
+                    "additionalProperties": False,
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "patch_file",
+                "description": "Replace one unique old_text occurrence in a file.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string"},
+                        "old_text": {"type": "string"},
+                        "new_text": {"type": "string"},
+                    },
+                    "required": ["path", "old_text", "new_text"],
+                    "additionalProperties": False,
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "run_shell",
+                "description": (
+                    "Run an argv-only command in the candidate workspace. "
+                    "Pipes, redirects, globs, and && require argv ['sh', '-c', '...']."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "argv": {"type": "array", "items": {"type": "string"}},
+                        "timeout": {"type": "integer", "default": 60},
+                    },
+                    "required": ["argv"],
+                    "additionalProperties": False,
+                },
+            },
+        },
+    ]
 
 
 def _extract_json_object_text(content: str) -> str:

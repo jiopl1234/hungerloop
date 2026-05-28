@@ -579,10 +579,14 @@ def test_run_model_config_openai_resolves_budget_allocator(
         )
     )
 
-    assert budget.max_tokens == 60000
+    # Per-call max_tokens=60000 × inner_loop_headroom (6 iterations × 2
+    # safety pad = 12) = 720_000 cumulative per-assignment budget. The
+    # YAML value is the response cap per call, not the per-assignment
+    # cap; CLI multiplies so the inner-loop has real headroom.
+    assert budget.max_tokens == 60000 * 12
 
 
-def test_run_model_config_unknown_openai_pricing_requires_confirmation(
+def test_run_model_config_unknown_openai_pricing_warns_by_event(
     context: CliContext, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from hungerloop.cli.run_cmd import _resolve_model_client
@@ -598,8 +602,9 @@ def test_run_model_config_unknown_openai_pricing_requires_confirmation(
         encoding="utf-8",
     )
 
-    with pytest.raises(ValueError, match="no configured pricing"):
-        _resolve_model_client(context, path)
+    client = _resolve_model_client(context, path)
+
+    assert isinstance(client, OpenAIModelClient)
 
 
 def test_run_model_config_unknown_openai_pricing_can_be_accepted(

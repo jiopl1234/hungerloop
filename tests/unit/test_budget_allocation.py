@@ -10,11 +10,17 @@ from hungerloop.models.planning import BudgetAllocation
 
 def test_defaults_match_prd() -> None:
     b = BudgetAllocation(phase=LoopPhase.EXPLORE)
-    assert b.max_tokens == 4000
-    assert b.max_tool_calls == 10
+    # NOTE: original PRD defaults (v0.4.1) were max_tokens=4000,
+    # max_tool_calls=10 — sized for strictly single-call workers. With the
+    # A-patched ExecutionWorker (inner self-repair, up to
+    # MAX_SELF_REPAIR_ITERATIONS+1 model calls per loop) those caps trigger
+    # worker_budget_exceeded after one reasoning-heavy call. Bumped to
+    # 60K / 80 to give the inner loop real headroom.
+    assert b.max_tokens == 60000
+    assert b.max_tool_calls == 80
     assert b.max_wall_clock_seconds == 300
     assert b.max_workers_per_loop == 1
-    assert b.max_model_retries == 2
+    assert b.max_model_retries == 4
     assert b.retry_base_delay_seconds == 1.0
     assert b.retry_max_delay_seconds == 20.0
     assert b.allow_shell is True

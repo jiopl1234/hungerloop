@@ -18,25 +18,30 @@ def _snapshot(phase: LoopPhase) -> HungerSnapshot:
 
 
 def test_explore_uses_explore_caps() -> None:
+    # Post-A-patch defaults: BudgetAllocator phase caps mirror
+    # BudgetAllocation.max_tokens=60000 / max_tool_calls=80 so the
+    # inner self-repair loop (MAX_SELF_REPAIR_ITERATIONS+1 model calls
+    # per loop) doesn't trip worker_budget_exceeded after one
+    # reasoning-heavy response.
     alloc = BudgetAllocator()
     budget = alloc.allocate(_snapshot(LoopPhase.EXPLORE))
     assert budget.phase == LoopPhase.EXPLORE
-    assert budget.max_tokens == 4000
-    assert budget.max_tool_calls == 10
-    assert budget.max_wall_clock_seconds == 300
+    assert budget.max_tokens == 60000
+    assert budget.max_tool_calls == 80
+    assert budget.max_wall_clock_seconds == 900
 
 
 def test_exploit_shortens_wall_clock() -> None:
     alloc = BudgetAllocator()
     budget = alloc.allocate(_snapshot(LoopPhase.EXPLOIT))
-    assert budget.max_wall_clock_seconds == 180
+    assert budget.max_wall_clock_seconds == 600
 
 
 def test_cooldown_caps_tokens_hard() -> None:
     alloc = BudgetAllocator()
     budget = alloc.allocate(_snapshot(LoopPhase.COOLDOWN))
-    assert budget.max_tokens == 500
-    assert budget.max_tool_calls == 1
+    assert budget.max_tokens == 8000
+    assert budget.max_tool_calls == 8
 
 
 def test_constructor_kwargs_override_defaults() -> None:

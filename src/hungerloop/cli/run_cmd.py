@@ -475,15 +475,14 @@ def _resolve_model_client(
     if config.provider == ModelProvider.DUMMY:
         return DummyModelClient()
     if config.provider == ModelProvider.OPENAI:
-        if (
-            config.model_name not in PricingTable.PRICES
-            and not accept_unknown_pricing
-        ):
-            raise ValueError(
-                f"openai model '{config.model_name}' has no configured "
-                "pricing. Add pricing support or pass "
-                "--accept-unknown-pricing to acknowledge that cost_usd will "
-                "be recorded as 0.0 and only token ceilings apply."
+        if config.model_name not in PricingTable.PRICES:
+            ctx.repo.append_event(
+                EventType.UNKNOWN_MODEL_PRICING,
+                {
+                    "model": config.model_name,
+                    "source": "model_config",
+                    "accepted_by_flag": accept_unknown_pricing,
+                },
             )
         return OpenAIModelClient(
             config,
@@ -502,6 +501,15 @@ def _resolve_budget_allocator(model_config_path: Path | None) -> BudgetAllocator
     YAML. That left long-code tasks prone to truncated JSON responses. Keep the
     default behavior for runs without a model config, but let an OpenAI-backed
     config raise the per-loop request budget.
+
+    NOTE: ``config.max_tokens`` is the **per-call response cap** — the
+    deepseek/OpenAI ``max_tokens`` request parameter. The
+    ``BudgetAllocator`` allocates a **per-assignment cumulative budget**
+    that the worker spends across MAX_SELF_REPAIR_ITERATIONS+1 inner-loop
+    calls. Using the same value for both clamps a 6-call inner-loop to a
+    single response and trips ``worker_budget_exceeded`` after the first
+    reasoning-heavy call. Pre-multiply by an inner-loop headroom factor
+    so the cumulative cap actually accommodates the inner-loop.
     """
     if model_config_path is None:
         return BudgetAllocator()
@@ -510,7 +518,13 @@ def _resolve_budget_allocator(model_config_path: Path | None) -> BudgetAllocator
     if config.provider != ModelProvider.OPENAI:
         return BudgetAllocator()
 
+    # MAX_SELF_REPAIR_ITERATIONS + 1 outer-call budget, with a small
+    # safety pad for input-side accumulation across iterations. The
+    # constant lives in execution_worker; import here would create a
+    # cycle, so reference the same numeric value.
+    inner_loop_headroom = 6 * 2
+    cumulative_cap = max(60_000, config.max_tokens * inner_loop_headroom)
     return BudgetAllocator(
-        explore_max_tokens=config.max_tokens,
-        exploit_max_tokens=config.max_tokens,
+        explore_max_tokens=cumulative_cap,
+        exploit_max_tokens=cumulative_cap,
     )

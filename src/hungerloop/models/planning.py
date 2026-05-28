@@ -70,8 +70,17 @@ class BudgetAllocation(BaseModel):
     phase: LoopPhase
 
     # Resources
-    max_tokens: int = Field(default=4000, ge=0)
-    max_tool_calls: int = Field(default=10, ge=0)
+    # NOTE: max_tokens is a per-loop CUMULATIVE budget across all model
+    # calls the worker makes (including inner self-repair iterations from
+    # the A-patched ExecutionWorker). 4000 was the v0.4.1 default when the
+    # worker was strictly single-call; with MAX_SELF_REPAIR_ITERATIONS=5
+    # and reasoning-heavy models the worker can comfortably need 50K+
+    # cumulative tokens per loop.
+    max_tokens: int = Field(default=60000, ge=0)
+    # max_tool_calls similarly needs headroom for inner-loop (write + N
+    # run_shell verifies + edits all count). 10 was too tight on harder
+    # tasks like mini-sql (41 verification_steps imply many run_shell).
+    max_tool_calls: int = Field(default=80, ge=0)
     max_wall_clock_seconds: int = Field(default=300, ge=1)
 
     # Concurrency
@@ -81,7 +90,7 @@ class BudgetAllocation(BaseModel):
 
     # Retry policy (read by ModelClient.complete_json)
     max_assignment_retries: int = Field(default=1, ge=0)
-    max_model_retries: int = Field(default=2, ge=0)
+    max_model_retries: int = Field(default=4, ge=0)
     retry_base_delay_seconds: float = Field(default=1.0, ge=0.0)
     retry_max_delay_seconds: float = Field(default=20.0, ge=0.0)
 
