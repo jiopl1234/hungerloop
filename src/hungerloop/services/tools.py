@@ -22,6 +22,7 @@ have one place that enforces evidence-on-every-call (PRD §28.5 / M18).
 """
 from __future__ import annotations
 
+from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Literal, Protocol
 
@@ -29,6 +30,114 @@ from pydantic import BaseModel
 
 from hungerloop.services.path_safety import resolve_workspace_path
 from hungerloop.services.sandbox_runner import SandboxRunner, SandboxRunResult
+
+# Total diagnostic envelope size for failed patch_file calls. The whole
+# rendered ToolOutcome.summary (header + closest matches / occurrences)
+# is capped at this many characters so the inner-loop follow-up message
+# never balloons even on huge files.
+_PATCH_DIAGNOSTIC_CHAR_BUDGET = 1500
+_PATCH_DIAGNOSTIC_MAX_CLOSEST = 3
+_PATCH_DIAGNOSTIC_MAX_OCCURRENCES = 5
+# Single-line clip so one absurdly long source line cannot eat the whole
+# diagnostic budget by itself.
+_PATCH_DIAGNOSTIC_LINE_CLIP = 200
+
+
+def _clip_line(line: str, limit: int = _PATCH_DIAGNOSTIC_LINE_CLIP) -> str:
+    """Trim a single source line for inclusion in the diagnostic block."""
+    if len(line) <= limit:
+        return line
+    head = limit // 2
+    tail = limit - head - 1
+    return f"{line[:head]}…{line[-tail:]}"
+
+
+def _first_line(text: str) -> str:
+    """Take the first line of a multi-line target for the diagnostic header."""
+    if not text:
+        return ""
+    return text.split("\n", 1)[0]
+
+
+def _closest_match_diagnostic(
+    *,
+    original: str,
+    old_text: str,
+    max_matches: int = _PATCH_DIAGNOSTIC_MAX_CLOSEST,
+) -> str:
+    """Render the top-N lines most similar to ``old_text`` for no_match.
+
+    Uses difflib.SequenceMatcher on the FIRST line of ``old_text`` against
+    each line in the file so we don't accidentally rank long multi-line
+    targets by total length. Tool-agnostic: works for any text file.
+    """
+    needle = _first_line(old_text).strip()
+    if not needle:
+        return ""
+    lines = original.splitlines()
+    if not lines:
+        return ""
+    scored: list[tuple[float, int, str]] = []
+    for idx, raw in enumerate(lines, start=1):
+        ratio = SequenceMatcher(None, needle, raw.strip()).ratio()
+        scored.append((ratio, idx, raw))
+    scored.sort(key=lambda tup: (-tup[0], tup[1]))
+    out: list[str] = ["closest_matches:"]
+    for ratio, lineno, raw in scored[:max_matches]:
+        if ratio <= 0.0:
+            break
+        out.append(
+            f"  L{lineno} (ratio={ratio:.2f}): {_clip_line(raw)}"
+        )
+    return "\n".join(out) if len(out) > 1 else ""
+
+
+def _ambiguous_occurrences_diagnostic(
+    *,
+    original: str,
+    old_text: str,
+    max_occurrences: int = _PATCH_DIAGNOSTIC_MAX_OCCURRENCES,
+) -> str:
+    """Render line numbers + 1 line of context for each occurrence."""
+    if not old_text:
+        return ""
+    lines = original.splitlines()
+    if not lines:
+        return ""
+    needle_first = _first_line(old_text)
+    hits: list[int] = []
+    for idx, raw in enumerate(lines, start=1):
+        if needle_first and needle_first in raw:
+            hits.append(idx)
+            if len(hits) >= max_occurrences:
+                break
+    if not hits:
+        # Fallback: scan via raw count if needle_first didn't catch lines
+        # (e.g. needle spans multiple lines and no single-line surrogate
+        # exists). Skip diagnostic in that edge case rather than mislead.
+        return ""
+    out: list[str] = [f"occurrences (showing up to {max_occurrences}):"]
+    for lineno in hits:
+        target = lines[lineno - 1]
+        prev_ctx = lines[lineno - 2] if lineno - 2 >= 0 else ""
+        next_ctx = lines[lineno] if lineno < len(lines) else ""
+        out.append(f"  L{lineno}: {_clip_line(target)}")
+        if prev_ctx or next_ctx:
+            ctx_pieces: list[str] = []
+            if prev_ctx:
+                ctx_pieces.append(f"prev=L{lineno - 1}:{_clip_line(prev_ctx)}")
+            if next_ctx:
+                ctx_pieces.append(f"next=L{lineno + 1}:{_clip_line(next_ctx)}")
+            out.append("    " + " | ".join(ctx_pieces))
+    return "\n".join(out)
+
+
+def _cap_diagnostic(text: str, limit: int = _PATCH_DIAGNOSTIC_CHAR_BUDGET) -> str:
+    """Hard cap the entire patch_file diagnostic blob."""
+    if len(text) <= limit:
+        return text
+    marker = "\n…[diagnostic truncated]"
+    return text[: max(0, limit - len(marker))] + marker
 
 SideEffectLevel = Literal["read", "file_write", "shell"]
 """Tool side-effect tiers gated by :class:`BudgetAllocation` (PRD §28.11):
@@ -208,16 +317,34 @@ class PatchFileTool:
         original = safe.read_text(encoding="utf-8")
         occurrences = original.count(old_text)
         if occurrences == 0:
+            header = (
+                f"old_text not found in {path_arg}\n"
+                f"old_text_preview ({len(old_text)} chars): "
+                f"{_clip_line(_first_line(old_text))}"
+            )
+            closest = _closest_match_diagnostic(
+                original=original, old_text=old_text
+            )
+            body = f"{header}\n{closest}" if closest else header
             return ToolOutcome(
                 success=False,
-                summary=f"old_text not found in {path_arg}",
+                summary=_cap_diagnostic(body),
                 args_summary=f"path={path_arg}",
                 result_summary="no_match",
             )
         if occurrences > 1:
+            header = (
+                f"old_text matches {occurrences} times in {path_arg}\n"
+                f"old_text_preview ({len(old_text)} chars): "
+                f"{_clip_line(_first_line(old_text))}"
+            )
+            occ_block = _ambiguous_occurrences_diagnostic(
+                original=original, old_text=old_text
+            )
+            body = f"{header}\n{occ_block}" if occ_block else header
             return ToolOutcome(
                 success=False,
-                summary=f"old_text matches {occurrences} times in {path_arg}",
+                summary=_cap_diagnostic(body),
                 args_summary=f"path={path_arg}",
                 result_summary=f"ambiguous:{occurrences}",
             )

@@ -271,6 +271,89 @@ async def test_execution_worker_rejects_empty_handoff_when_no_writes_under_verif
     assert call_count["n"] == MAX_SELF_REPAIR_ITERATIONS + 1
 
 
+async def test_execution_worker_followup_surfaces_patch_file_diagnostic(
+    tmp_path: Path,
+) -> None:
+    """A failed patch_file in iter 0 must yield a follow-up user message
+    whose body includes the new closest_matches / occurrences diagnostic
+    so the model has something concrete to act on in iter 1.
+
+    Generic harness check — uses neutral text (no SQL/mission-specific
+    content) so any mission benefits from the surfaced diagnostic.
+    """
+    import json
+
+    from hungerloop.models.usage import ModelUsage
+    from hungerloop.services.model_client import ModelResponse
+
+    # Set up a target file with a near-miss line so closest_matches is
+    # meaningful.
+    (tmp_path / "alpha.txt").write_text(
+        "apple\nbanana\ncherry\ndate\n", encoding="utf-8"
+    )
+
+    # iter 0: attempt to patch a line that doesn't exist (triggers
+    # no_match + diagnostic).
+    fail_body: dict[str, object] = {
+        "summary": "first attempt",
+        "actions": [
+            {
+                "tool_name": "patch_file",
+                "args": {
+                    "path": "alpha.txt",
+                    "old_text": "bananna",
+                    "new_text": "BANANA",
+                },
+            }
+        ],
+    }
+    # iter 1: capture follow-up by handing off cleanly.
+    handoff_body: dict[str, object] = {
+        "summary": "stopping",
+        "actions": [],
+    }
+    captured_messages: list[list[dict[str, str]]] = []
+
+    class _CapturingClient(DummyModelClient):
+        async def complete_json(self, **kw):  # type: ignore[override]
+            captured_messages.append(list(kw["messages"]))
+            return await super().complete_json(**kw)
+
+    client = _CapturingClient(
+        [
+            ModelResponse(
+                content=json.dumps(fail_body),
+                json_data=fail_body,
+                usage=ModelUsage(input_tokens=1, output_tokens=1),
+            ),
+            ModelResponse(
+                content=json.dumps(handoff_body),
+                json_data=handoff_body,
+                usage=ModelUsage(input_tokens=1, output_tokens=1),
+            ),
+        ]
+    )
+    worker, _, workspace = _build_worker(tmp_path, client)
+    # acceptance_criteria=[] so iter 1's empty actions is a clean handoff.
+    await worker.run(context=_ctx(), workspace_root=workspace)
+
+    # iter 1 should have been called with the stitched follow-up. Find
+    # the trailing user message and assert the diagnostic surfaced.
+    assert len(captured_messages) >= 2
+    followup_messages = captured_messages[1]
+    last_user = next(
+        m for m in reversed(followup_messages) if m["role"] == "user"
+    )
+    body = last_user["content"]
+    assert "Tool results from your previous action batch" in body
+    assert "patch_file" in body
+    # The new diagnostic header text and closest_matches block must be
+    # visible — this is the regression check that previously surfaced
+    # only "success=False".
+    assert "old_text not found" in body
+    assert "closest_matches:" in body
+
+
 async def test_execution_worker_passes_retry_kwargs(tmp_path: Path) -> None:
     """Sanity-check the call site threads retry params from budget."""
     captured: dict[str, object] = {}

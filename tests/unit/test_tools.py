@@ -104,6 +104,111 @@ async def test_patch_file_rejects_no_match(workspace: Path) -> None:
     assert outcome.result_summary == "no_match"
 
 
+async def test_patch_file_no_match_includes_closest_matches_diagnostic(
+    workspace: Path,
+) -> None:
+    """When old_text does not appear, surface the most similar lines and
+    their line numbers so the inner-loop follow-up gives the model
+    something concrete to retry with (and stays under the 1500-char cap).
+    """
+    file_content = (
+        "def hello():\n"
+        "    return 1\n"
+        "\n"
+        "def helo_world():\n"
+        "    return 2\n"
+        "\n"
+        "def goodbye():\n"
+        "    return 3\n"
+    )
+    (workspace / "src.py").write_text(file_content, encoding="utf-8")
+    outcome = await PatchFileTool().run(
+        args={
+            "path": "src.py",
+            "old_text": "def hello_world():",
+            "new_text": "def hello_world_v2():",
+        },
+        workspace_root=workspace,
+        task_id="t1",
+        loop_id=1,
+    )
+    assert outcome.success is False
+    assert outcome.result_summary == "no_match"
+    # Diagnostic header + body must be in summary.
+    assert "old_text not found in src.py" in outcome.summary
+    assert "closest_matches:" in outcome.summary
+    # The near-miss "def helo_world():" should rank highly and carry its
+    # line number.
+    assert "helo_world" in outcome.summary
+    assert "L4" in outcome.summary
+    # Total diagnostic stays under the documented cap.
+    assert len(outcome.summary) <= 1500
+
+
+async def test_patch_file_ambiguous_includes_occurrence_lines(
+    workspace: Path,
+) -> None:
+    """When old_text matches N times, surface each occurrence's line
+    number plus 1 line of context (capped at 5) so the model can
+    disambiguate by widening its old_text on retry.
+    """
+    file_content = (
+        "alpha\n"
+        "    return value\n"
+        "beta\n"
+        "    return value\n"
+        "gamma\n"
+        "    return value\n"
+        "delta\n"
+    )
+    (workspace / "code.py").write_text(file_content, encoding="utf-8")
+    outcome = await PatchFileTool().run(
+        args={
+            "path": "code.py",
+            "old_text": "    return value",
+            "new_text": "    return new",
+        },
+        workspace_root=workspace,
+        task_id="t1",
+        loop_id=1,
+    )
+    assert outcome.success is False
+    assert outcome.result_summary.startswith("ambiguous:3")
+    assert "old_text matches 3 times" in outcome.summary
+    assert "occurrences" in outcome.summary
+    # Each of the 3 occurrence line numbers must be reported.
+    assert "L2" in outcome.summary
+    assert "L4" in outcome.summary
+    assert "L6" in outcome.summary
+    # Context labels appear for surrounding lines.
+    assert "prev=" in outcome.summary or "next=" in outcome.summary
+    assert len(outcome.summary) <= 1500
+
+
+async def test_patch_file_ambiguous_caps_at_five_occurrences(
+    workspace: Path,
+) -> None:
+    """The occurrence list is capped at 5 even when the file has more."""
+    lines = ["target"] * 12
+    (workspace / "many.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    outcome = await PatchFileTool().run(
+        args={"path": "many.txt", "old_text": "target", "new_text": "X"},
+        workspace_root=workspace,
+        task_id="t1",
+        loop_id=1,
+    )
+    assert outcome.success is False
+    assert outcome.result_summary == "ambiguous:12"
+    # Count how many "L<digit>:" entries appear at the start of a line
+    # (occurrence list lines start with two spaces + L).
+    occurrence_lines = [
+        line for line in outcome.summary.splitlines()
+        if line.startswith("  L") and ":" in line
+    ]
+    assert len(occurrence_lines) == 5
+    assert len(outcome.summary) <= 1500
+
+
 async def test_patch_file_missing_target(workspace: Path) -> None:
     outcome = await PatchFileTool().run(
         args={"path": "missing.py", "old_text": "a", "new_text": "b"},

@@ -230,14 +230,25 @@ class ExecutionWorker:
                     line = f"- {tn}: success={r.success}"
                     if r.error_type:
                         line += f" error_type={r.error_type}"
+                    # Cap aligned with the patch_file tool's diagnostic
+                    # budget (1500 chars) so the closest_matches /
+                    # occurrences block emitted by failed patches is
+                    # actually visible to the model on its repair turn.
                     if r.error:
-                        line += f"\n  error: {r.error[:600]}"
-                    if r.output_excerpt:
-                        line += f"\n  output:\n    " + r.output_excerpt.replace(
+                        line += "\n  error:\n    " + r.error[:1500].replace(
                             "\n", "\n    "
                         )
-                    elif r.summary:
-                        line += f"\n  summary: {r.summary[:400]}"
+                    if r.output_excerpt:
+                        line += "\n  output:\n    " + r.output_excerpt.replace(
+                            "\n", "\n    "
+                        )
+                    elif r.summary and r.summary != r.error:
+                        # Surface summary only when it carries info not
+                        # already in `error` (which mirrors summary for
+                        # most failure paths).
+                        line += "\n  summary:\n    " + r.summary[:1500].replace(
+                            "\n", "\n    "
+                        )
                     results_lines.append(line)
                 followup = (
                     "Tool results from your previous action batch:\n\n"
