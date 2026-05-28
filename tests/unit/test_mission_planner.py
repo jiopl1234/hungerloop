@@ -389,7 +389,12 @@ def test_sort_order_tier_then_score(repo: InMemoryRepository) -> None:
 
 
 def test_assignment_field_population(repo: InMemoryRepository) -> None:
-    feature = _feature("F-1", "H-1")
+    feature = _feature(
+        "F-1",
+        "H-1",
+        preconditions=["database is migrated"],
+        verification_steps=["command: python -m pytest -q"],
+    )
     _save_ledger(repo, [_item("H-1")])
 
     plan = MissionPlanner(repo).plan(
@@ -416,6 +421,12 @@ def test_assignment_field_population(repo: InMemoryRepository) -> None:
     assert re.match(r"^ASGN-task-1-42-0$", assignment.assignment_id)
     assert "Mission title" in assignment.mission
     assert "F-1" in assignment.mission
+    assert "Preconditions:" in assignment.mission
+    assert "- database is migrated" in assignment.mission
+    assert "Expected behavior:" in assignment.mission
+    assert "- F-1 works" in assignment.mission
+    assert "Verification steps:" in assignment.mission
+    assert "- command: python -m pytest -q" in assignment.mission
 
 
 def test_depends_on_from_preconditions(repo: InMemoryRepository) -> None:

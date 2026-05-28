@@ -21,9 +21,10 @@ from hungerloop.services.evidence_render import (
 from hungerloop.services.prior_loop_context import render_prior_loop_context_block
 from hungerloop.services.workspace_reader import WorkspaceReader
 
-K_REJECT_WINDOW = 3
+K_REJECT_WINDOW = 5
 K_EVIDENCE_WINDOW = 2
 MAX_LINE_CHARS = 500
+MAX_FAILED_CHECK_CHARS = 3000
 MAX_BEST_SUMMARY_CHARS = 800
 MAX_LAST_SELF_SUMMARY_CHARS = 200
 MAX_WORKSPACE_FILE_PATH_CHARS = 120
@@ -237,7 +238,7 @@ class ContextBuilder:
                         summarize_failed_check(
                             check,
                             trace.loop_id,
-                            max_chars=MAX_LINE_CHARS,
+                            max_chars=MAX_FAILED_CHECK_CHARS,
                         )
                     )
 

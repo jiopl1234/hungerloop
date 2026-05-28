@@ -19,7 +19,7 @@ from hungerloop.cli.run_cmd import run as legacy_run
 from hungerloop.cli.status_format import format_status
 from hungerloop.models.enums import AcceptanceCheckType
 from hungerloop.models.events import EventType
-from hungerloop.models.mission import Mission, MissionFeature
+from hungerloop.models.mission import Mission, MissionFeature, MissionPhase
 from hungerloop.models.validation_contract import ValidationAssertion, ValidationContract
 from hungerloop.repository.protocol import RepositoryProtocol
 from hungerloop.services.mission_loader import (
@@ -35,6 +35,12 @@ from hungerloop.services.requirement_compiler import (
 
 _MISSION_NEW_CREATED = "MISSION_NEW_CREATED"
 _MISSION_LOAD_FAILED = "MISSION_LOAD_FAILED"
+_DEFAULT_GOAL_VERIFICATION_STEP = 'command: python -c "import sys; sys.exit(0)"'
+_GOAL_QUICKSTART_WARNING = (
+    "warning: --goal quick-start uses a smoke verification step that always "
+    "passes; add real verification_steps via 'hungerloop mission edit' or "
+    "'hungerloop mission import' before relying on validation."
+)
 _MISSION_IMPORT_APPLIED = "MISSION_IMPORT_APPLIED"
 _MISSION_IMPORT_REJECTED = "MISSION_IMPORT_REJECTED"
 _MISSION_IMPORT_FAILED = "MISSION_IMPORT_FAILED"
@@ -141,6 +147,8 @@ def mission_new(
         f"task_id={task_id} mission_id={result.mission.mission_id} "
         f"features={len(result.mission.features)}"
     )
+    if from_path is None and goal is not None:
+        click.echo(_GOAL_QUICKSTART_WARNING, err=True)
 
 
 @mission.command("run")
@@ -160,6 +168,12 @@ def mission_new(
     help="Credit N loop budgets before resuming.",
 )
 @click.option(
+    "--budget-loops",
+    type=int,
+    default=None,
+    help="Explicit loop work budget for this run.",
+)
+@click.option(
     "--spend-budget",
     is_flag=True,
     default=False,
@@ -172,11 +186,70 @@ def mission_new(
     help="Refinement profile to use with --spend-budget, e.g. python_medium.",
 )
 @click.option(
+    "--max-refinement-tier",
+    type=int,
+    default=0,
+    show_default=True,
+    help="Highest deterministic refinement tier to generate.",
+)
+@click.option(
+    "--ignore-stagnation",
+    is_flag=True,
+    default=False,
+    help="In spend-budget mode, keep running until budget exhaustion.",
+)
+@click.option(
+    "--unblock-all",
+    is_flag=True,
+    default=False,
+    help="Reset every BLOCKED hunger item to OPEN; required after BLOCKED stop.",
+)
+@click.option(
     "--resume",
     "resume_human",
     is_flag=True,
     default=False,
     help="Confirm that HUMAN_REQUIRED / HUMAN_PAUSED preconditions are resolved.",
+)
+@click.option(
+    "--raise-cost-ceiling",
+    "raise_cost_ceiling",
+    type=float,
+    default=None,
+    help=(
+        "New max_total_cost_usd; required when the previous stop_reason "
+        "was SAFETY_STOP."
+    ),
+)
+@click.option(
+    "--steal-lock",
+    "steal_lock",
+    is_flag=True,
+    default=False,
+    help="Force-take the task lock from a stale or live owner.",
+)
+@click.option(
+    "--lock-stale-sec",
+    "lock_stale_sec",
+    type=int,
+    default=None,
+    help="Stale-lock threshold in seconds.",
+)
+@click.option(
+    "--model-config",
+    "model_config_path",
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    default=None,
+    help="YAML model config. Supports provider: dummy or openai.",
+)
+@click.option(
+    "--accept-unknown-pricing",
+    is_flag=True,
+    default=False,
+    help=(
+        "Allow openai model names that are not in PricingTable.PRICES. "
+        "Cost will be recorded as 0.0 except for token ceilings."
+    ),
 )
 @click.option(
     "--reset",
@@ -196,9 +269,18 @@ def mission_run(
     task_id: str,
     max_loops: int,
     refill_loops: int | None,
+    budget_loops: int | None,
     spend_budget: bool,
     refinement_profile: str | None,
+    max_refinement_tier: int,
+    ignore_stagnation: bool,
+    unblock_all: bool,
     resume_human: bool,
+    raise_cost_ceiling: float | None,
+    steal_lock: bool,
+    lock_stale_sec: int | None,
+    model_config_path: Path | None,
+    accept_unknown_pricing: bool,
     reset: bool,
     skip_repair_check: bool,
 ) -> None:
@@ -222,18 +304,18 @@ def mission_run(
                 task_id=task_id,
                 max_loops=max_loops,
                 refill_loops=refill_loops,
-                budget_loops=None,
+                budget_loops=budget_loops,
                 spend_budget=spend_budget,
                 refinement_profile=refinement_profile,
-                max_refinement_tier=0,
-                ignore_stagnation=False,
-                unblock_all=False,
+                max_refinement_tier=max_refinement_tier,
+                ignore_stagnation=ignore_stagnation,
+                unblock_all=unblock_all,
                 resume_human=resume_human,
-                raise_cost_ceiling=None,
-                steal_lock=False,
-                lock_stale_sec=None,
-                model_config_path=None,
-                accept_unknown_pricing=False,
+                raise_cost_ceiling=raise_cost_ceiling,
+                steal_lock=steal_lock,
+                lock_stale_sec=lock_stale_sec,
+                model_config_path=model_config_path,
+                accept_unknown_pricing=accept_unknown_pricing,
                 reset=reset,
                 skip_repair_check=skip_repair_check,
             )
@@ -246,18 +328,18 @@ def mission_run(
         task_id=task_id,
         max_loops=max_loops,
         refill_loops=refill_loops,
-        budget_loops=None,
+        budget_loops=budget_loops,
         spend_budget=spend_budget,
         refinement_profile=refinement_profile,
-        max_refinement_tier=0,
-        ignore_stagnation=False,
-        unblock_all=False,
+        max_refinement_tier=max_refinement_tier,
+        ignore_stagnation=ignore_stagnation,
+        unblock_all=unblock_all,
         resume_human=resume_human,
-        raise_cost_ceiling=None,
-        steal_lock=False,
-        lock_stale_sec=None,
-        model_config_path=None,
-        accept_unknown_pricing=False,
+        raise_cost_ceiling=raise_cost_ceiling,
+        steal_lock=steal_lock,
+        lock_stale_sec=lock_stale_sec,
+        model_config_path=model_config_path,
+        accept_unknown_pricing=accept_unknown_pricing,
         reset=reset,
         skip_repair_check=skip_repair_check,
     )
@@ -730,8 +812,25 @@ def _load_new_mission_spec(
         parsed = ParsedMissionSpec(
             title=goal,
             description=goal,
-            phases=[],
-            features=[],
+            phases=[
+                MissionPhase(
+                    phase_id="phase-1",
+                    title="Initial phase",
+                    description=goal,
+                    feature_ids=["feature-1"],
+                )
+            ],
+            features=[
+                MissionFeature(
+                    feature_id="feature-1",
+                    hunger_item_id="H-001",
+                    phase_id="phase-1",
+                    title=goal,
+                    description=goal,
+                    expected_behavior=[goal],
+                    verification_steps=[_DEFAULT_GOAL_VERIFICATION_STEP],
+                )
+            ],
             validation_contract=None,
             source_files=[],
             mission_markdown_loaded=True,

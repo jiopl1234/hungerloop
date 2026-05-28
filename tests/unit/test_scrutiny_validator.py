@@ -100,7 +100,11 @@ def _phase() -> MissionPhase:
     )
 
 
-def _mission(phase: MissionPhase) -> Mission:
+def _mission(
+    phase: MissionPhase,
+    *,
+    services_manifest: dict[str, object] | None = None,
+) -> Mission:
     return Mission(
         mission_id=MISSION_ID,
         task_id=TASK_ID,
@@ -108,6 +112,7 @@ def _mission(phase: MissionPhase) -> Mission:
         description="Mission description",
         phases=[phase],
         created_at=datetime(2026, 5, 20, tzinfo=timezone.utc),
+        services_manifest=services_manifest,
     )
 
 
@@ -128,6 +133,7 @@ def _setup(
     results: list[SandboxRunResult],
     *,
     create_candidate_files: bool = True,
+    services_manifest: dict[str, object] | None = None,
 ) -> tuple[
     ScrutinyValidator,
     InMemoryRepository,
@@ -141,7 +147,7 @@ def _setup(
     repo.create_task(TASK_ID, "Run scrutiny")
     repo.save_hunger_ledger(TASK_ID, HungerLedger(task_id=TASK_ID, items=[]))
     phase = _phase()
-    repo.save_mission(_mission(phase))
+    repo.save_mission(_mission(phase, services_manifest=services_manifest))
     contract = ValidationContract(mission_id=MISSION_ID)
     repo.save_validation_contract(contract)
 
@@ -258,6 +264,86 @@ async def test_mypy_invoked_via_sandbox(tmp_path: Path) -> None:
     )
 
     assert sandbox.calls[2]["argv"] == MYPY_ARGV
+
+
+async def test_services_manifest_commands_override_default_argv(tmp_path: Path) -> None:
+    services_manifest = {
+        "commands": {
+            "test": ["python", "-m", "pytest", "tests/unit"],
+            "lint": "ruff check src",
+            "typecheck": "mypy --strict src",
+        }
+    }
+    validator, _repo, sandbox, candidate, contract, phase, _candidate_files = _setup(
+        tmp_path,
+        _success_results(),
+        services_manifest=services_manifest,
+    )
+
+    await validator.validate(
+        TASK_ID,
+        LOOP_ID,
+        candidate,
+        contract=contract,
+        phase=phase,
+        budget=_budget(),
+    )
+
+    assert [call["argv"] for call in sandbox.calls] == [
+        ["python", "-m", "pytest", "tests/unit"],
+        ["ruff", "check", "src"],
+        ["mypy", "--strict", "src"],
+    ]
+
+
+async def test_services_manifest_empty_commands_disables_scrutiny(tmp_path: Path) -> None:
+    validator, repo, sandbox, candidate, contract, phase, _candidate_files = _setup(
+        tmp_path,
+        [],
+        services_manifest={"commands": {}},
+    )
+
+    report = await validator.validate(
+        TASK_ID,
+        LOOP_ID,
+        candidate,
+        contract=contract,
+        phase=phase,
+        budget=_budget(),
+    )
+
+    assert sandbox.calls == []
+    assert report.verdict is ValidationVerdict.PASS
+    assertions = repo.list_validation_assertions(
+        mission_id=MISSION_ID,
+        phase_id=PHASE_ID,
+    )
+    assert all(
+        assertion.check_type not in {"scrutiny_test", "scrutiny_lint", "scrutiny_typecheck"}
+        for assertion in assertions
+    )
+
+
+async def test_services_manifest_partial_commands_runs_only_configured(
+    tmp_path: Path,
+) -> None:
+    services_manifest = {"commands": {"test": ["python", "-m", "pytest"]}}
+    validator, _repo, sandbox, candidate, contract, phase, _candidate_files = _setup(
+        tmp_path,
+        [_sandbox_result(evidence_id="ev-pytest")],
+        services_manifest=services_manifest,
+    )
+
+    await validator.validate(
+        TASK_ID,
+        LOOP_ID,
+        candidate,
+        contract=contract,
+        phase=phase,
+        budget=_budget(),
+    )
+
+    assert [call["argv"] for call in sandbox.calls] == [["python", "-m", "pytest"]]
 
 
 async def test_exit_zero_passed_and_timeout_override(tmp_path: Path) -> None:

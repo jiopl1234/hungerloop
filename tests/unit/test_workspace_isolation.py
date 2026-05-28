@@ -29,6 +29,69 @@ def test_candidate_does_not_affect_best(ws: WorkspaceManager) -> None:
     assert not (best / "new_file.py").exists()
 
 
+def test_create_candidate_can_seed_from_project_source(
+    ws: WorkspaceManager, tmp_path: Path
+) -> None:
+    source = tmp_path / "project"
+    (source / "src").mkdir(parents=True)
+    (source / "tests").mkdir()
+    (source / "src" / "app.py").write_text("print('ok')", encoding="utf-8")
+    (source / "tests" / "test_app.py").write_text("def test_ok(): pass", encoding="utf-8")
+    (source / "pyproject.toml").write_text("[project]\nname='demo'\n", encoding="utf-8")
+    (source / ".git").mkdir()
+    (source / ".git" / "HEAD").write_text("ref: main\n", encoding="utf-8")
+    (source / ".venv").mkdir()
+    (source / ".venv" / "ignored.py").write_text("", encoding="utf-8")
+
+    candidate = ws.create_candidate_workspace(
+        "task_001",
+        loop_id=1,
+        seed_source_dir=source,
+    )
+
+    assert (candidate / "src" / "app.py").read_text(encoding="utf-8") == "print('ok')"
+    assert (candidate / "tests" / "test_app.py").exists()
+    assert (candidate / "pyproject.toml").exists()
+    assert not (candidate / ".git").exists()
+    assert not (candidate / ".venv").exists()
+
+
+def test_best_workspace_overlays_seeded_project_source(
+    ws: WorkspaceManager, tmp_path: Path
+) -> None:
+    source = tmp_path / "project"
+    source.mkdir()
+    (source / "app.py").write_text("source", encoding="utf-8")
+    ws.ensure_task_workspace("task_001")
+    (ws.best_files_dir("task_001") / "app.py").write_text("best", encoding="utf-8")
+
+    candidate = ws.create_candidate_workspace(
+        "task_001",
+        loop_id=1,
+        seed_source_dir=source,
+    )
+
+    assert (candidate / "app.py").read_text(encoding="utf-8") == "best"
+
+
+def test_seed_source_skips_hungerloop_runtime_tree(tmp_path: Path) -> None:
+    source = tmp_path / "project"
+    source.mkdir()
+    (source / "app.py").write_text("source", encoding="utf-8")
+    (source / "hungerloop.sqlite").write_text("db", encoding="utf-8")
+    wm = WorkspaceManager(source)
+
+    candidate = wm.create_candidate_workspace(
+        "task_001",
+        loop_id=1,
+        seed_source_dir=source,
+    )
+
+    assert (candidate / "app.py").exists()
+    assert not (candidate / "tasks").exists()
+    assert not (candidate / "hungerloop.sqlite").exists()
+
+
 def test_promote_updates_best(ws: WorkspaceManager) -> None:
     ws.ensure_task_workspace("task_001")
     best = ws.best_files_dir("task_001")

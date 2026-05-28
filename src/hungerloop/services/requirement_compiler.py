@@ -8,6 +8,7 @@ compilation).
 from __future__ import annotations
 
 import hashlib
+import shlex
 from collections import Counter
 from datetime import datetime, timezone
 from typing import Any, Literal, cast
@@ -63,6 +64,17 @@ _ASSERTION_COMPARISON_FIELDS = (
     "evidence_requirements",
 )
 _OP_PAST_TENSE = {"add": "added", "update": "updated", "remove": "removed"}
+_FILE_VERIFICATION_PREFIXES = (
+    "file exists:",
+    "file_exists:",
+    "exists:",
+)
+_COMMAND_VERIFICATION_PREFIXES = (
+    "command:",
+    "run:",
+    "shell:",
+)
+_COMMAND_TIMEOUT_PREFIX = "timeout="
 
 
 class MissionChangeOperation(BaseModel):
@@ -240,6 +252,7 @@ class RequirementCompiler(RuleBasedCompiler):
             parsed_spec=parsed_spec,
             existing_contract=None,
         )
+        self._validate_assertion_phase_ids(mission, contract)
         ledger = self.compile_mission_features(task_id, mission)
 
         with repo.transaction():
@@ -337,12 +350,63 @@ class RequirementCompiler(RuleBasedCompiler):
         self,
         feature: MissionFeature,
     ) -> list[AcceptanceCheck]:
-        """Compile default acceptance checks for a mission feature."""
+        """Compile feature verification steps into deterministic checks.
+
+        Recognised prefixes (case-insensitive):
+        - ``file exists:`` / ``file_exists:`` / ``exists:`` -> FILE_EXISTS
+        - ``command:`` / ``run:`` / ``shell:`` -> SHELL_EXIT_ZERO
+
+        Steps without a recognised prefix are skipped to avoid false
+        positives from natural-language descriptions that happen to
+        begin with a tool name (e.g. ``"Python 3.11+ syntax"``).
+        """
+        checks: list[AcceptanceCheck] = []
+        for step in feature.verification_steps:
+            normalized = step.strip()
+            lowered = normalized.lower()
+            file_path = _prefixed_value(normalized, lowered, _FILE_VERIFICATION_PREFIXES)
+            if file_path is not None:
+                checks.append(
+                    AcceptanceCheck(
+                        check_type=AcceptanceCheckType.FILE_EXISTS,
+                        params={"path": file_path},
+                        description=normalized,
+                    )
+                )
+                continue
+
+            argv_text = _prefixed_value(
+                normalized,
+                lowered,
+                _COMMAND_VERIFICATION_PREFIXES,
+            )
+            if argv_text is not None:
+                argv, timeout = _command_argv_and_timeout(argv_text)
+                if argv:
+                    params: dict[str, Any] = {"argv": argv}
+                    if timeout is not None:
+                        params["timeout"] = timeout
+                    checks.append(
+                        AcceptanceCheck(
+                            check_type=AcceptanceCheckType.SHELL_EXIT_ZERO,
+                            params=params,
+                            description=normalized,
+                        )
+                    )
+                continue
+
+        if checks:
+            return checks
+
         return [
             AcceptanceCheck(
-                check_type=AcceptanceCheckType.EVIDENCE_COUNT_MIN,
-                params={"evidence_type": "any", "min_count": 1},
-                description=f"At least one evidence item for {feature.feature_id}.",
+                check_type=AcceptanceCheckType.HUMAN_APPROVAL,
+                params={"approval_id": f"{feature.feature_id}-verification"},
+                description=(
+                    "Manual verification required for "
+                    f"{feature.feature_id}; add verification_steps with "
+                    "'file exists:' or 'command:' for automated checks."
+                ),
             )
         ]
 
@@ -871,6 +935,35 @@ def _ordered_child_ids(existing: list[str], desired: list[str]) -> list[str]:
 
 def _should_preserve_item(item: HungerItem) -> bool:
     return item.generated_by is not None or item.id.startswith("H-DISC-")
+
+
+def _prefixed_value(
+    original: str,
+    lowered: str,
+    prefixes: tuple[str, ...],
+) -> str | None:
+    for prefix in prefixes:
+        if lowered.startswith(prefix):
+            return original[len(prefix) :].strip()
+    return None
+
+
+def _command_argv_and_timeout(argv_text: str) -> tuple[list[str], int | None]:
+    parts = shlex.split(argv_text)
+    if not parts:
+        return [], None
+    last = parts[-1]
+    if not last.startswith(_COMMAND_TIMEOUT_PREFIX):
+        return parts, None
+    timeout_text = last[len(_COMMAND_TIMEOUT_PREFIX) :]
+    try:
+        timeout = int(timeout_text)
+    except ValueError:
+        return parts, None
+    if timeout <= 0:
+        return parts, None
+    del parts[-1]
+    return parts, timeout
 
 
 def _changed_fields(

@@ -38,6 +38,78 @@ def _make_feature(feature_id: str, phase_id: str, hunger_item_id: str) -> Missio
     )
 
 
+def test_compile_checks_for_feature_uses_verification_steps() -> None:
+    feature = _make_feature("feature-1", "phase-1", "H-101").model_copy(
+        update={
+            "verification_steps": [
+                "file exists: report.md",
+                "command: python -m pytest -q",
+                "shell: hungerloop mission status demo-mission-1",
+            ]
+        }
+    )
+
+    checks = RequirementCompiler().compile_checks_for_feature(feature)
+
+    assert [check.check_type for check in checks] == [
+        AcceptanceCheckType.FILE_EXISTS,
+        AcceptanceCheckType.SHELL_EXIT_ZERO,
+        AcceptanceCheckType.SHELL_EXIT_ZERO,
+    ]
+    assert checks[0].params == {"path": "report.md"}
+    assert checks[1].params == {"argv": ["python", "-m", "pytest", "-q"]}
+    assert checks[2].params == {
+        "argv": ["hungerloop", "mission", "status", "demo-mission-1"]
+    }
+
+
+def test_compile_checks_for_feature_parses_command_timeout_suffix() -> None:
+    feature = _make_feature("feature-1", "phase-1", "H-101").model_copy(
+        update={
+            "verification_steps": [
+                "command: python verify_inventory_soak.py timeout=360",
+            ]
+        }
+    )
+
+    checks = RequirementCompiler().compile_checks_for_feature(feature)
+
+    assert len(checks) == 1
+    assert checks[0].check_type == AcceptanceCheckType.SHELL_EXIT_ZERO
+    assert checks[0].params == {
+        "argv": ["python", "verify_inventory_soak.py"],
+        "timeout": 360,
+    }
+
+
+def test_compile_checks_for_feature_ignores_unprefixed_steps() -> None:
+    feature = _make_feature("feature-1", "phase-1", "H-101").model_copy(
+        update={
+            "verification_steps": [
+                "Python 3.11+ syntax in every module",
+                "pytest covers every public surface",
+                "ruff check should report zero issues",
+            ]
+        }
+    )
+
+    checks = RequirementCompiler().compile_checks_for_feature(feature)
+
+    assert len(checks) == 1
+    assert checks[0].check_type == AcceptanceCheckType.HUMAN_APPROVAL
+    assert checks[0].params == {"approval_id": "feature-1-verification"}
+
+
+def test_compile_checks_for_feature_without_verification_steps_requires_manual_gate() -> None:
+    feature = _make_feature("feature-1", "phase-1", "H-101")
+
+    checks = RequirementCompiler().compile_checks_for_feature(feature)
+
+    assert len(checks) == 1
+    assert checks[0].check_type == AcceptanceCheckType.HUMAN_APPROVAL
+    assert checks[0].params == {"approval_id": "feature-1-verification"}
+
+
 def test_compile_features_to_ledger() -> None:
     mission = Mission(
         mission_id="mission-1",
@@ -64,8 +136,9 @@ def test_compile_features_to_ledger() -> None:
         assert item.acceptance_mode == "all"
         assert len(item.acceptance_checks) == 1
         check = item.acceptance_checks[0]
-        assert check.check_type == AcceptanceCheckType.EVIDENCE_COUNT_MIN
-        assert check.params == {"evidence_type": "any", "min_count": 1}
+        assert check.check_type == AcceptanceCheckType.HUMAN_APPROVAL
+        feature_suffix = item.id.replace("H-10", "feature-")
+        assert check.params == {"approval_id": f"{feature_suffix}-verification"}
 
 
 def test_compile_mission_features_uses_phase_local_priority_without_mutating_mission() -> None:
@@ -145,6 +218,52 @@ def test_compile_mission_changes_rejects_assertion_with_unknown_phase_id(
             for row in repo.list_evidence("task-1", evidence_type="human_input")
             if row.get("kind") == "mission_import"
         ] == []
+    finally:
+        if isinstance(repo, SQLiteRepository):
+            repo.close()
+
+
+@pytest.mark.parametrize("repo_kind", ["in_memory", "sqlite"])
+def test_compile_new_mission_rejects_assertion_with_unknown_phase_id(
+    repo_kind: str,
+    tmp_path: Path,
+) -> None:
+    repo = (
+        SQLiteRepository.open(tmp_path / "hungerloop.sqlite")
+        if repo_kind == "sqlite"
+        else InMemoryRepository()
+    )
+    try:
+        repo.create_task("task-1", "New mission")
+        parsed = ParsedMissionSpec(
+            title="New Mission",
+            description="New mission with mismatched assertion phase",
+            phases=[_make_phase("phase-1", [])],
+            features=[],
+            validation_contract=ValidationContract(
+                mission_id="ignored-by-compiler",
+                assertions=[
+                    ValidationAssertion(
+                        assertion_id="VAL-BAD-PHASE",
+                        phase_id="phase-missing",
+                        title="Bad phase reference",
+                        description="References a phase that is not imported",
+                        check_type="behavioral_assertion",
+                    )
+                ],
+            ),
+            source_files=["mission.md", "validation-contract.yaml"],
+        )
+
+        with pytest.raises(ValueError) as excinfo:
+            RequirementCompiler(repo).compile_new_mission("task-1", parsed)
+
+        message = str(excinfo.value)
+        assert "VAL-BAD-PHASE" in message
+        assert "phase-missing" in message
+        assert "phase-1" in message
+        assert repo.get_mission("task-1") is None
+        assert repo.list_validation_assertions(mission_id="mission-task-1") == []
     finally:
         if isinstance(repo, SQLiteRepository):
             repo.close()

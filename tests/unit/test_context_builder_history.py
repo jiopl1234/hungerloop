@@ -20,6 +20,7 @@ from hungerloop.models.worker import WorkerResult
 from hungerloop.repository.in_memory_repo import InMemoryRepository
 from hungerloop.services.context_builder import (
     K_EVIDENCE_WINDOW,
+    K_REJECT_WINDOW,
     MAX_HISTORY_CHARS,
     MAX_WORKSPACE_FILE_PATH_CHARS,
     MAX_WORKSPACE_FILES_LINE_CHARS,
@@ -434,18 +435,23 @@ def test_20_file_and_long_path_truncation() -> None:
 
 
 def test_reject_window_caps_history() -> None:
+    # Seed enough rejected loops to exceed K_REJECT_WINDOW so we can verify
+    # the cap. With K_REJECT_WINDOW=5 we expect the 5 most recent rejected
+    # loops in the failure_patterns and earlier ones excluded.
     repo = InMemoryRepository()
-    for loop_id in range(1, 6):
+    n_seeded = K_REJECT_WINDOW + 2  # 2 should fall outside the window
+    for loop_id in range(1, n_seeded + 1):
         _seed_rejected_loop(repo, loop_id, summary=f"summary {loop_id}")
 
-    pack = _build_pack(repo, loop_id=6, path="fizzbuzz.py")
+    pack = _build_pack(repo, loop_id=n_seeded + 1, path="fizzbuzz.py")
 
     joined = "\n".join(pack.failure_patterns_to_avoid)
-    assert "loop 5:" in joined
-    assert "loop 4:" in joined
-    assert "loop 3:" in joined
-    assert "loop 2:" not in joined
-    assert "loop 1:" not in joined
+    # Top K_REJECT_WINDOW most-recent loops should be present.
+    for kept_loop in range(n_seeded, n_seeded - K_REJECT_WINDOW, -1):
+        assert f"loop {kept_loop}:" in joined
+    # Loops older than the window should be dropped.
+    for dropped_loop in range(1, n_seeded - K_REJECT_WINDOW + 1):
+        assert f"loop {dropped_loop}:" not in joined
 
 
 def test_evidence_window_excludes_loops_before_k_window() -> None:

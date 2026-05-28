@@ -474,15 +474,31 @@ class MissionPlanner:
     def _mission_for(candidate: _CandidateFeature, mission: Mission) -> str:
         feature = candidate.feature
         item = candidate.item
-        return (
-            f"Mission {mission.mission_id}: {mission.title}\n"
-            f"{mission.description}\n\n"
-            f"Feature {feature.feature_id}: {feature.title}\n"
-            f"{feature.description}\n"
+        sections = [
+            f"Mission {mission.mission_id}: {mission.title}",
+            mission.description,
+            "",
+            f"Feature {feature.feature_id}: {feature.title}",
+            feature.description,
+        ]
+        if feature.preconditions:
+            sections.append("Preconditions:")
+            sections.extend(f"- {entry}" for entry in feature.preconditions)
+        if feature.expected_behavior:
+            sections.append("Expected behavior:")
+            sections.extend(f"- {entry}" for entry in feature.expected_behavior)
+        if feature.verification_steps:
+            sections.append("Verification steps:")
+            sections.extend(f"- {entry}" for entry in feature.verification_steps)
+        if feature.fulfills:
+            sections.append("Fulfills:")
+            sections.extend(f"- {entry}" for entry in feature.fulfills)
+        sections.append(
             f"Hunger item: {feature.hunger_item_id} "
             f"(priority={item.priority} gap_score={item.gap_score} "
             f"refinement_tier={item.refinement_tier})"
         )
+        return "\n".join(sections)
 
     @staticmethod
     def _rationale(

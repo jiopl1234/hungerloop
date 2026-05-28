@@ -17,8 +17,10 @@ workspace. Tests can still inject a :class:`CliContext` carrying any
 from __future__ import annotations
 
 import tomllib
+from importlib import import_module
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
+from typing import Any, Callable
 
 import click
 
@@ -65,6 +67,20 @@ except PackageNotFoundError:
     _PACKAGE_VERSION = "0+source"
 
 
+def _load_dotenv_if_available(workspace_root: Path) -> None:
+    """Load workspace ``.env`` when python-dotenv is installed."""
+    try:
+        dotenv_module = import_module("dotenv")
+    except ImportError:
+        return
+
+    load_dotenv: Any = getattr(dotenv_module, "load_dotenv", None)
+    if not callable(load_dotenv):
+        return
+    loader: Callable[..., object] = load_dotenv
+    loader(workspace_root / ".env", override=False)
+
+
 def _default_context() -> CliContext:
     """Build the default :class:`CliContext` for production use.
 
@@ -72,6 +88,7 @@ def _default_context() -> CliContext:
     persisted in ``hungerloop.sqlite`` next to the workspace directories.
     """
     workspace_root = Path.cwd()
+    _load_dotenv_if_available(workspace_root)
     try:
         repo = SQLiteRepository.open(workspace_root / "hungerloop.sqlite")
     except ReadOnlyDbOutdatedError as exc:

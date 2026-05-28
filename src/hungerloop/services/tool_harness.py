@@ -58,6 +58,11 @@ class ToolResult(BaseModel):
     artifact_ids: list[str] = Field(default_factory=list)
     error: str | None = None
     error_type: str | None = None
+    # head+tail excerpt of stdout/stderr for tools that ran a subprocess.
+    # Populated by ToolHarness when the underlying ToolOutcome carries a
+    # SandboxRunResult; used by ExecutionWorker's self-repair inner loop to
+    # show the model exactly what its previous batch produced.
+    output_excerpt: str | None = None
 
 
 class ToolHarness:
@@ -293,6 +298,20 @@ class ToolHarness:
                 loop_id=context.loop_id,
             )
 
+        output_excerpt: str | None = None
+        if outcome.sandbox_result is not None:
+            from hungerloop.services.evidence_render import clip_head_tail
+
+            sandbox = outcome.sandbox_result
+            parts: list[str] = [
+                f"exit={sandbox.exit_code} timed_out={sandbox.timed_out}"
+            ]
+            if sandbox.stdout.strip():
+                parts.append("stdout:\n" + clip_head_tail(sandbox.stdout, 2000))
+            if sandbox.stderr.strip():
+                parts.append("stderr:\n" + clip_head_tail(sandbox.stderr, 2000))
+            output_excerpt = "\n".join(parts)
+
         return ToolResult(
             tool_name=tool_name,
             success=outcome.success,
@@ -301,6 +320,7 @@ class ToolHarness:
             artifact_ids=artifact_ids,
             error=None if outcome.success else outcome.summary,
             error_type=None if outcome.success else "tool_failed",
+            output_excerpt=output_excerpt,
         )
 
     @staticmethod

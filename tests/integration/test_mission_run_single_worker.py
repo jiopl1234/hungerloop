@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from hungerloop.models.context import ContextPack
-from hungerloop.models.enums import AcceptanceCheckType
+from hungerloop.models.enums import AcceptanceCheckType, StopReason
 from hungerloop.models.hunger import AcceptanceCheck, HungerItem, HungerLedger, HungerPolicy
 from hungerloop.models.mission import Mission, MissionFeature, MissionPhase
 from hungerloop.models.planning import BudgetAllocation, LoopPlan
@@ -31,6 +31,9 @@ from hungerloop.services.rule_based_planner import RuleBasedPlanner
 from hungerloop.services.sandbox_runner import SandboxRunner
 from hungerloop.services.stagnation_detector import StagnationDetector
 from hungerloop.services.validation_gate import ValidationGate
+from hungerloop.services.validation_pipeline import ValidationPipeline
+from hungerloop.services.validators.scrutiny_validator import ScrutinyValidator
+from hungerloop.services.validators.user_testing_validator import UserTestingValidator
 from hungerloop.services.worker_runtime import WorkerRuntime
 from hungerloop.services.worker_scheduler import WorkerScheduler
 from hungerloop.services.workspace_manager import WorkspaceManager
@@ -130,6 +133,28 @@ class _RecordingWorker:
         )
 
 
+class _SequenceWorker:
+    def __init__(self, writes: list[tuple[str, str]]) -> None:
+        self.writes = writes
+        self.contexts: list[ContextPack] = []
+
+    async def run(self, *, context: ContextPack, workspace_root: Path) -> WorkerHandoff:
+        self.contexts.append(context)
+        index = min(len(self.contexts) - 1, len(self.writes) - 1)
+        path, content = self.writes[index]
+        target = workspace_root / path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content, encoding="utf-8")
+        return WorkerHandoff(
+            agent_id=context.agent_id,
+            task_id=context.task_id,
+            loop_id=context.loop_id,
+            summary=f"completed attempt {len(self.contexts)}",
+            artifact_ids=[path],
+            evidence_ids=[f"EV-attempt-{len(self.contexts)}"],
+        )
+
+
 class _RecordingMissionPlanner(MissionPlanner):
     def __init__(self, repo: InMemoryRepository) -> None:
         super().__init__(repo)
@@ -193,7 +218,7 @@ def _build_orchestrator(
     *,
     repo: InMemoryRepository,
     tmp_path: Path,
-    worker: _RecordingWorker,
+    worker: Any,
     max_workers_per_loop: int,
     mission_planner: MissionPlanner | None = None,
     legacy_planner: RuleBasedPlanner | None = None,
@@ -205,6 +230,10 @@ def _build_orchestrator(
     cost_guard = CostGuard(repo)
     budget_guard = BudgetGuard()
     runtime = WorkerRuntime({AGENT_ID: worker}, cost_guard, budget_guard, repo)
+    validation_gate = ValidationGate(
+        repo,
+        AcceptanceCheckRunner(repo, workspace_manager, sandbox),
+    )
     return LoopOrchestrator(
         repo=repo,
         hunger_engine=HungerEngine(),
@@ -221,9 +250,21 @@ def _build_orchestrator(
         context_builder=ContextBuilder(repo, workspace_reader=workspace_manager),
         worker_runtime=runtime,
         integrator=Integrator(),
-        validation_gate=ValidationGate(
-            repo,
-            AcceptanceCheckRunner(repo, workspace_manager, sandbox),
+        validation_gate=validation_gate,
+        validation_pipeline=ValidationPipeline.from_validation_gate(
+            repo=repo,
+            cost_guard=cost_guard,
+            validation_gate=validation_gate,
+            scrutiny_validator=ScrutinyValidator(
+                repo=repo,
+                sandbox_runner=sandbox,
+                workspace_manager=workspace_manager,
+            ),
+            user_testing_validator=UserTestingValidator(
+                repo=repo,
+                sandbox_runner=sandbox,
+                workspace_manager=workspace_manager,
+            ),
         ),
         commit_manager=CommitManager(repo, workspace_manager),
         handoff_processor=HandoffProcessor(repo),
@@ -266,6 +307,98 @@ async def test_single_worker_mission_emits_one_assignment(tmp_path: Path) -> Non
     assert outcome.assignment_traces[0]["target_feature_ids"] == ["F-1"]
     assert outcome.validation_pipeline_trace is not None
     assert outcome.validation_pipeline_trace["pipeline_verdict"] == "pass"
+
+
+async def test_single_feature_mission_reaches_done_after_boundary_validation(
+    tmp_path: Path,
+) -> None:
+    repo = InMemoryRepository()
+    _seed_policy(repo)
+    repo.save_hunger_ledger(
+        TASK_ID,
+        HungerLedger(task_id=TASK_ID, items=[_item("H-1", "one.txt")]),
+    )
+    mission = _mission(["F-1"], max_parallel_features=1).model_copy(
+        update={"services_manifest": {"commands": {}}},
+    )
+    _save_mission(repo, mission)
+    worker = _RecordingWorker({"F-1": ("one.txt", "one")})
+    orchestrator = _build_orchestrator(
+        repo=repo,
+        tmp_path=tmp_path,
+        worker=worker,
+        max_workers_per_loop=1,
+    )
+
+    report = await orchestrator.run(TASK_ID)
+
+    assert report.stop_reason is StopReason.DONE
+    completed_mission = repo.get_mission(TASK_ID)
+    assert completed_mission is not None
+    assert [feature.status for feature in completed_mission.features] == ["done"]
+    assert [phase.status for phase in completed_mission.phases] == ["done"]
+    assert len(repo.list_events(TASK_ID, event_types=["mission.feature_assigned"])) == 1
+    assert len(repo.list_events(TASK_ID, event_types=["mission.feature_completed"])) == 1
+    assert repo.list_events(TASK_ID, event_types=["mission.phase_validation_started"])
+    assert repo.list_events(TASK_ID, event_types=["mission.phase_completed"])
+
+
+async def test_partial_commit_does_not_complete_feature_or_enter_validation(
+    tmp_path: Path,
+) -> None:
+    repo = InMemoryRepository()
+    _seed_policy(repo)
+    item = _item("H-1", "one.txt").model_copy(
+        update={
+            "acceptance_checks": [
+                AcceptanceCheck(
+                    check_type=AcceptanceCheckType.FILE_EXISTS,
+                    params={"path": "one.txt"},
+                    description="one.txt exists",
+                ),
+                AcceptanceCheck(
+                    check_type=AcceptanceCheckType.FILE_EXISTS,
+                    params={"path": "two.txt"},
+                    description="two.txt exists",
+                ),
+            ]
+        }
+    )
+    repo.save_hunger_ledger(TASK_ID, HungerLedger(task_id=TASK_ID, items=[item]))
+    mission = _mission(["F-1"], max_parallel_features=1).model_copy(
+        update={"services_manifest": {"commands": {}}},
+    )
+    _save_mission(repo, mission)
+    worker = _SequenceWorker([("one.txt", "one"), ("two.txt", "two")])
+    orchestrator = _build_orchestrator(
+        repo=repo,
+        tmp_path=tmp_path,
+        worker=worker,
+        max_workers_per_loop=1,
+    )
+
+    first = await orchestrator.step(TASK_ID)
+
+    assert isinstance(first, LoopTrace)
+    assert first.committed is True
+    assert first.verdict == "partial"
+    mission_after_first = repo.get_mission(TASK_ID)
+    assert mission_after_first is not None
+    assert [feature.status for feature in mission_after_first.features] == [
+        "in_progress"
+    ]
+    assert [phase.status for phase in mission_after_first.phases] == ["in_progress"]
+    assert repo.list_events(TASK_ID, event_types=["mission.feature_completed"]) == []
+    assert repo.list_events(TASK_ID, event_types=["mission.phase_validation_started"]) == []
+
+    second = await orchestrator.step(TASK_ID)
+
+    assert isinstance(second, LoopTrace)
+    assert len(worker.contexts) == 2
+    mission_after_second = repo.get_mission(TASK_ID)
+    assert mission_after_second is not None
+    assert [feature.status for feature in mission_after_second.features] == ["done"]
+    assert len(repo.list_events(TASK_ID, event_types=["mission.feature_completed"])) == 1
 
 
 async def test_orchestrator_routes_planner_by_mission_presence(tmp_path: Path) -> None:

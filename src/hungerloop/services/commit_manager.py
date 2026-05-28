@@ -59,6 +59,8 @@ class CommitManager:
         self,
         candidate: CandidateState,
         validation: ValidationReport | ValidationPipelineResult,
+        *,
+        completed_feature_ids: list[str] | None = None,
     ) -> CommitDecision:
         """Apply validation: promote if I-3 conditions hold, else reject.
 
@@ -115,6 +117,8 @@ class CommitManager:
                             validation_id=report.id,
                             evidence_id=evidence_by_key.get(check_key),
                         )
+                    for feature_id in dict.fromkeys(completed_feature_ids or []):
+                        self.repo.update_feature_status(feature_id, "done")
                     if self.repo.get_mission(candidate.task_id) is not None:
                         try:
                             self.mission_state_updater.regenerate(

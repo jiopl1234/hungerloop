@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from hungerloop.models.validation import CheckResult
 
-DEFAULT_FAILED_CHECK_CHARS = 500
+DEFAULT_FAILED_CHECK_CHARS = 3000
 
 
 def _clip_line(line: str, max_chars: int) -> str:
@@ -20,6 +20,25 @@ def _clip_middle(text: str, max_chars: int) -> str:
     head_chars = max(1, (max_chars - 1) // 2)
     tail_chars = max(1, max_chars - 1 - head_chars)
     return f"{text[:head_chars]}…{text[-tail_chars:]}"
+
+
+def clip_head_tail(text: str, max_chars: int, *, head_fraction: float = 0.4) -> str:
+    """Keep the head and tail; drop the middle.
+
+    Pytest, ruff, and mypy all put the actionable summary (FAILED lines,
+    final stats) at the END of stdout while keeping a setup banner at the
+    START. Middle-clipping cuts out exactly the names of failed tests.
+    Head+tail keeps both edges where the signal lives.
+    """
+    if len(text) <= max_chars:
+        return text
+    if max_chars <= 1:
+        return "…"
+    sep = "\n…\n"
+    budget = max_chars - len(sep)
+    head_chars = max(1, int(budget * head_fraction))
+    tail_chars = max(1, budget - head_chars)
+    return f"{text[:head_chars]}{sep}{text[-tail_chars:]}"
 
 
 def summarize_tool_call(
@@ -49,15 +68,22 @@ def summarize_failed_check(
     *,
     max_chars: int = DEFAULT_FAILED_CHECK_CHARS,
 ) -> str:
-    """Format one failed validation check for prompt history."""
+    """Format one failed validation check for prompt history.
+
+    Uses head+tail clipping so the pytest/ruff/mypy "FAILED" summary at the
+    end of stdout survives the budget — middle-clip used to drop exactly the
+    lines naming the failed tests.
+    """
     prefix = (
         f"loop {loop_id}: {check_result.check_key} "
         f"{check_result.check_type.value} → "
     )
     detail_budget = max(1, max_chars - len(prefix))
-    detail = _clip_middle(check_result.detail or "", detail_budget)
+    detail = clip_head_tail(check_result.detail or "", detail_budget)
     line = f"{prefix}{detail}"
-    return _clip_line(line, max_chars)
+    if len(line) <= max_chars:
+        return line
+    return f"{line[: max_chars - 1]}…"
 
 
 def _tool_location_hint(payload: dict[str, object]) -> str:

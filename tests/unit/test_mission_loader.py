@@ -390,9 +390,9 @@ def test_compile_mission_changes_persists_diff_and_import_evidence(
     assert item_by_id["H-KEEP"].title == "New keep title"
     assert item_by_id["H-KEEP"].status == HungerItemStatus.BLOCKED
     assert item_by_id["H-KEEP"].evidence_ids == ["EV-OLD"]
-    assert item_by_id["H-NEW"].acceptance_checks[0].check_type == (
-        AcceptanceCheckType.EVIDENCE_COUNT_MIN
-    )
+    new_check = item_by_id["H-NEW"].acceptance_checks[0]
+    assert new_check.check_type == AcceptanceCheckType.HUMAN_APPROVAL
+    assert new_check.params == {"approval_id": "feature-new-verification"}
     assert result.summary["features_added"] == 1
     assert result.summary["assertions_added"] == 1
     assert repo.count_evidence_by_type(

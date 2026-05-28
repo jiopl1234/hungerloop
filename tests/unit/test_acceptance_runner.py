@@ -202,7 +202,9 @@ async def test_shell_exit_zero_failure_detail_includes_output_summary(
 
     assert passed is False
     assert "exit=7" in detail
-    assert "stdout=stdout clue" in detail
-    assert "stderr=stderr traceback clue" in detail
+    # Format changed: "stdout=" → "stdout:\n" (multiline preserved so pytest
+    # tracebacks survive into the worker's next-loop context).
+    assert "stdout:" in detail and "stdout clue" in detail
+    assert "stderr:" in detail and "stderr traceback clue" in detail
     assert ev_id is not None
     assert ev_id in repo._evidence

@@ -615,7 +615,7 @@ WorkerHandoff(
 本节描述的是**v0.6 拟新增**的 `HandoffProcessor`。**当前 v0.5f 代码库中尚不存在** `HandoffProcessor`、`WorkerHandoff`、`HandoffItem` 等符号；当前 runtime 保存的是较轻量的 `WorkerResult`。在该前提下，v0.6 拟由 `HandoffProcessor` 提炼 `list[WorkerHandoff]` 为：
 
 - **Prior handoffs summary**：传递给下一轮 `MissionPlanner` 和 `ContextBuilder`
-- **提前停止信号**：检测 `HandoffItem(type=blocker)` 是否触发 `StopReason.BLOCKED`
+- **StopReason-less 设计（ADR-008）**：`HandoffProcessor` 通过将 `HandoffItem(type=blocker)` 的 `HungerItem` 标记为 `BLOCKED`，让 `HungerEngine.tick()` 在下一次循环中自行检测 `BLOCKED` 状态并返回 `StopReason.BLOCKED`；HandoffProcessor 本身**不返回任何 StopReason**。
 - **Mission state 更新**：将 `HandoffItem(type=discovered_issue)` 注入 `HungerLedger`（通过 `RequirementCompiler`）
 
 ### 8.2 处理流程
@@ -633,7 +633,6 @@ async def process_handoffs(
     Returns:
         HandoffProcessingResult(
             prior_handoff_summary: str,       # 传递给 ContextBuilder
-            early_stop_reason: StopReason | None,  # BLOCKED / HUMAN_PAUSED
             discovered_issues: list[DiscoveredFact],  # 注入 RequirementCompiler
         )
     """
@@ -643,9 +642,9 @@ async def process_handoffs(
         for item in handoff.handoff_items:
             match item.item_type:
                 case "blocker":
-                    # 检测是否所有 active items 都被 blocked
-                    if self._all_remaining_items_blocked(task_id, item):
-                        result.early_stop_reason = StopReason.BLOCKED
+                    # 标记对应的 HungerItem 为 BLOCKED;
+                    # HungerEngine.tick() 在下一次循环中检测到 BLOCKED 后返回 StopReason.BLOCKED (ADR-008)
+                    result.blocked_item_ids.append(item.id)
 
                 case "follow_up":
                     # 记录到 prior_handoff_summary（传递给下一轮）

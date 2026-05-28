@@ -327,7 +327,7 @@ def test_mission_commit_regenerates_after_repository_writes(
     cm_with_updater = CommitManager(
         repo=repo,
         workspace_manager=ws,
-        mission_state_updater=updater,  # type: ignore[arg-type]
+        mission_state_updater=updater,
     )
     result = cm_with_updater.apply(
         _candidate(),
@@ -347,6 +347,40 @@ def test_mission_commit_regenerates_after_repository_writes(
     assert updater.calls == [("t1", ws.best_files_dir("t1"))]
 
 
+def test_mission_commit_marks_completed_features_before_regeneration(
+    repo: MagicMock,
+    ws: WorkspaceManager,
+) -> None:
+    order: list[str] = []
+    repo.get_mission.return_value = object()
+    repo.transaction.return_value = _RecordingTransaction(order)
+    repo.update_feature_status.side_effect = lambda feature_id, status: order.append(
+        f"feature:{feature_id}:{status}"
+    )
+    updater = _RecordingUpdater(order)
+    ws.create_candidate_workspace("t1", 1)
+
+    cm_with_updater = CommitManager(
+        repo=repo,
+        workspace_manager=ws,
+        mission_state_updater=updater,
+    )
+    result = cm_with_updater.apply(
+        _candidate(),
+        _report(newly_passed=["H-001:0"], currently_passed=["H-001:0"]),
+        completed_feature_ids=["F-1"],
+    )
+
+    assert result["committed"] is True
+    assert order == [
+        "transaction_enter",
+        "feature:F-1:done",
+        "regenerate",
+        "transaction_exit",
+    ]
+    repo.update_feature_status.assert_called_once_with("F-1", "done")
+
+
 def test_legacy_commit_skips_mission_state_regeneration(
     repo: MagicMock,
     ws: WorkspaceManager,
@@ -359,7 +393,7 @@ def test_legacy_commit_skips_mission_state_regeneration(
     cm_with_updater = CommitManager(
         repo=repo,
         workspace_manager=ws,
-        mission_state_updater=updater,  # type: ignore[arg-type]
+        mission_state_updater=updater,
     )
     result = cm_with_updater.apply(
         _candidate(),
@@ -391,7 +425,7 @@ def test_regeneration_failure_rejects_candidate_and_returns_fail_verdict(
     cm_with_updater = CommitManager(
         repo=repo,
         workspace_manager=ws,
-        mission_state_updater=updater,  # type: ignore[arg-type]
+        mission_state_updater=updater,
     )
     result = cm_with_updater.apply(
         _candidate(),

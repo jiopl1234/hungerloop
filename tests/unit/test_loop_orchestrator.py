@@ -176,6 +176,14 @@ def _mission_for_item(item_id: str = "H-001") -> Mission:
     )
 
 
+def _mission_for_item_with_services(
+    services_manifest: dict[str, object],
+    item_id: str = "H-001",
+) -> Mission:
+    mission = _mission_for_item(item_id)
+    return mission.model_copy(update={"services_manifest": services_manifest})
+
+
 def _save_mission_graph(repo: InMemoryRepository, mission: Mission) -> None:
     repo.save_mission(mission)
     for phase in mission.phases:
@@ -345,6 +353,49 @@ async def test_step_persists_handoff_and_emits_scoped_events(
     assert received_payload["assignment_id"] == emitted_payload["assignment_id"]
     assert received_payload["handoff_count"] == 1
     assert received_payload["handoff_ids"] == [emitted_payload["handoff_id"]]
+
+
+async def test_mission_services_manifest_seeds_project_snapshot(
+    tmp_path: Path,
+) -> None:
+    repo = InMemoryRepository()
+    item = HungerItem(
+        id="H-001",
+        title="touch seeded project",
+        priority=1.0,
+        gap_score=1.0,
+        acceptance_checks=[
+            AcceptanceCheck(
+                check_type=AcceptanceCheckType.FILE_EXISTS,
+                params={"path": "src/app.py"},
+            ),
+        ],
+    )
+    _seed_task(repo, [item])
+    project = tmp_path / "project"
+    (project / "src").mkdir(parents=True)
+    (project / "src" / "app.py").write_text("print('seeded')\n", encoding="utf-8")
+    _save_mission_graph(
+        repo,
+        _mission_for_item_with_services(
+            {"workspace": {"source": str(project)}},
+        ),
+    )
+    actions = [{"tool_name": "read_file", "args": {"path": "src/app.py"}}]
+    orchestrator = _build_full_orchestrator(
+        tmp_path=tmp_path / "workspace",
+        repo=repo,
+        model_client=DummyModelClient.with_actions(actions),
+    )
+
+    outcome = await orchestrator.step("t1")
+
+    assert isinstance(outcome, LoopTrace)
+    candidate = orchestrator.workspace_manager.candidate_files_dir("t1", 1)
+    assert (candidate / "src" / "app.py").read_text(encoding="utf-8") == (
+        "print('seeded')\n"
+    )
+    assert outcome.committed is True
 
 
 async def test_process_handoffs_runs_before_integration_and_validation(

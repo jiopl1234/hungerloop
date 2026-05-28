@@ -85,6 +85,52 @@ def test_loader_loads_openai_with_env(
     assert config.api_key_env == "MY_OPENAI_KEY"
 
 
+def test_loader_loads_native_tool_protocol(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("MY_OPENAI_KEY", "sk-test")
+    p = _write(
+        tmp_path,
+        (
+            "provider: openai\nmodel_name: gpt-4o-mini\n"
+            "api_key_env: MY_OPENAI_KEY\ntool_protocol: native\n"
+        ),
+    )
+    config = ModelConfigLoader().load(p)
+    assert config.tool_protocol == "native"
+
+
+def test_loader_loads_openai_passthrough_options(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("MY_OPENAI_KEY", "sk-test")
+    p = _write(
+        tmp_path,
+        (
+            "provider: openai\n"
+            "model_name: gpt-4o-mini\n"
+            "api_key_env: MY_OPENAI_KEY\n"
+            "reasoning_effort: medium\n"
+            "extra_headers:\n"
+            "  OpenAI-Beta: responses=v1\n"
+            "extra_args:\n"
+            "  response_format:\n"
+            "    type: json_object\n"
+            "  metadata:\n"
+            "    mission_id: M-1\n"
+        ),
+    )
+
+    config = ModelConfigLoader().load(p)
+
+    assert config.reasoning_effort == "medium"
+    assert config.extra_headers == {"OpenAI-Beta": "responses=v1"}
+    assert config.extra_args == {
+        "response_format": {"type": "json_object"},
+        "metadata": {"mission_id": "M-1"},
+    }
+
+
 def test_loader_dummy_skips_env_check(tmp_path: Path) -> None:
     p = _write(tmp_path, "provider: dummy\nmodel_name: dummy\n")
     config = ModelConfigLoader().load(p)
@@ -126,3 +172,7 @@ def test_model_config_defaults() -> None:
     assert cfg.provider is ModelProvider.DUMMY
     assert cfg.timeout_seconds == 60
     assert cfg.max_tokens == 4096
+    assert cfg.tool_protocol == "json_actions"
+    assert cfg.reasoning_effort is None
+    assert cfg.extra_args == {}
+    assert cfg.extra_headers == {}

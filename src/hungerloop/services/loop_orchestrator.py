@@ -24,6 +24,7 @@ the orchestrator skips those steps when they are not provided.
 """
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Protocol, runtime_checkable
 
 from hungerloop.models.blackboard import CandidateState
@@ -31,7 +32,12 @@ from hungerloop.models.context import ContextPack
 from hungerloop.models.enums import CompletionMode, LoopPhase, StopReason
 from hungerloop.models.events import EventType
 from hungerloop.models.hunger import HungerClockState, HungerLedger, HungerPolicy, HungerSnapshot
-from hungerloop.models.mission import Mission, MissionFeature, MissionPhase
+from hungerloop.models.mission import (
+    Mission,
+    MissionFeature,
+    MissionFeatureStatus,
+    MissionPhase,
+)
 from hungerloop.models.planning import Assignment, BudgetAllocation, LoopPlan
 from hungerloop.models.tracing import LoopTrace, StopReport
 from hungerloop.models.validation import ValidationReport
@@ -91,6 +97,18 @@ def _mission_snapshot(mission: Mission | None) -> dict[str, object] | None:
         "phases": [phase.model_dump(mode="json") for phase in mission.phases],
         "features": [feature.model_dump(mode="json") for feature in mission.features],
     }
+
+
+def _mission_workspace_seed_source(mission: Mission | None) -> Path | None:
+    if mission is None or not isinstance(mission.services_manifest, dict):
+        return None
+    workspace = mission.services_manifest.get("workspace")
+    if not isinstance(workspace, dict):
+        return None
+    source = workspace.get("source")
+    if not isinstance(source, str) or not source.strip():
+        return None
+    return Path(source).expanduser()
 
 
 def _validation_pipeline_trace(
@@ -261,7 +279,12 @@ class LoopOrchestrator:
         best_before = self.repo.get_best_state(task_id)
         best_state_id_before = best_before.state_id if best_before else None
 
-        self.workspace_manager.create_candidate_workspace(task_id, loop_id)
+        mission = self.repo.get_mission(task_id)
+        self.workspace_manager.create_candidate_workspace(
+            task_id,
+            loop_id,
+            seed_source_dir=_mission_workspace_seed_source(mission),
+        )
         self.repo.append_event(
             EventType.LOOP_STARTED,
             {
@@ -279,7 +302,6 @@ class LoopOrchestrator:
         usage_before = self.repo.get_usage_snapshot(task_id).model_copy()
 
         budget = self.budget_allocator.allocate(snapshot)
-        mission = self.repo.get_mission(task_id)
         previous_loop_id = loop_id - 1
         prior_handoffs = self.repo.list_worker_handoffs(
             task_id,
@@ -325,6 +347,15 @@ class LoopOrchestrator:
             mission=mission,
             plan=plan,
         )
+        if mission is not None and plan.assignments:
+            self.hunger_engine.tick(
+                policy,
+                self.repo.get_hunger_clock(task_id),
+                self.repo.get_hunger_ledger(task_id),
+                previous_phase=previous_phase,
+                task_id=task_id,
+            )
+            mission = self.repo.get_mission(task_id)
         self.repo.save_loop_plan(plan)
         # PRD §7.5: LOOP_PLANNED fires once after the planner returns,
         # regardless of whether the plan has assignments.
@@ -471,7 +502,16 @@ class LoopOrchestrator:
             loop_id=loop_id,
         )
 
-        commit_decision = self.commit_manager.apply(candidate, pipeline_result)
+        completed_feature_ids = self._completed_feature_ids(
+            mission=mission,
+            plan=plan,
+            validation=validation,
+        )
+        commit_decision = self.commit_manager.apply(
+            candidate,
+            pipeline_result,
+            completed_feature_ids=completed_feature_ids,
+        )
         commit_verdict = commit_decision["verdict"]
         effective_validation = validation
         effective_pipeline_result = pipeline_result
@@ -499,6 +539,13 @@ class LoopOrchestrator:
                 },
                 task_id=task_id,
                 loop_id=loop_id,
+            )
+            self._emit_feature_completed_events(
+                task_id=task_id,
+                loop_id=loop_id,
+                mission=mission,
+                plan=plan,
+                completed_feature_ids=completed_feature_ids,
             )
         else:
             self.repo.append_event(
@@ -664,7 +711,7 @@ class LoopOrchestrator:
                 task_id=task_id,
                 loop_id=loop_id,
             )
-            self._emit_feature_terminal_event_from_handoff(
+            self._emit_feature_blocked_event_from_handoff(
                 task_id=task_id,
                 loop_id=loop_id,
                 mission=mission,
@@ -674,6 +721,41 @@ class LoopOrchestrator:
             )
             emitted_payloads.append(payload)
         return worker_handoffs, emitted_payloads
+
+    def _update_feature_status_for_assignment(
+        self,
+        mission: Mission | None,
+        assignment: Assignment,
+        status: MissionFeatureStatus,
+    ) -> None:
+        feature = self._feature_for_assignment(mission, assignment)
+        if feature is None:
+            return
+        self.repo.update_feature_status(feature.feature_id, status)
+
+    @staticmethod
+    def _completed_feature_ids(
+        *,
+        mission: Mission | None,
+        plan: LoopPlan,
+        validation: ValidationReport,
+    ) -> list[str]:
+        if mission is None:
+            return []
+        satisfied_hunger_item_ids = set(validation.satisfied_hunger_item_ids)
+        completed_feature_ids: list[str] = []
+        for assignment in plan.assignments:
+            if not assignment.target_hunger_item_ids:
+                continue
+            if not all(
+                item_id in satisfied_hunger_item_ids
+                for item_id in assignment.target_hunger_item_ids
+            ):
+                continue
+            feature = LoopOrchestrator._feature_for_assignment(mission, assignment)
+            if feature is not None:
+                completed_feature_ids.append(feature.feature_id)
+        return list(dict.fromkeys(completed_feature_ids))
 
     def _emit_feature_assigned_events(
         self,
@@ -689,6 +771,7 @@ class LoopOrchestrator:
             feature = self._feature_for_assignment(mission, assignment)
             if feature is None:
                 continue
+            self.repo.update_feature_status(feature.feature_id, "in_progress")
             self.repo.append_event(
                 EventType.MISSION_FEATURE_ASSIGNED,
                 {
@@ -709,7 +792,7 @@ class LoopOrchestrator:
                 loop_id=loop_id,
             )
 
-    def _emit_feature_terminal_event_from_handoff(
+    def _emit_feature_blocked_event_from_handoff(
         self,
         *,
         task_id: str,
@@ -722,24 +805,59 @@ class LoopOrchestrator:
         feature = self._feature_for_assignment(mission, assignment)
         if mission is None or feature is None:
             return
+        if not (handoff.requires_human or handoff.error_type is not None):
+            return
         event_payload = {
             **payload,
             "mission_id": mission.mission_id,
             "phase_id": feature.phase_id,
             "feature_id": feature.feature_id,
         }
-        if handoff.requires_human or handoff.error_type is not None:
-            event_type = EventType.MISSION_FEATURE_BLOCKED
-            event_payload["error_type"] = handoff.error_type
-            event_payload["requires_human"] = handoff.requires_human
-        else:
-            event_type = EventType.MISSION_FEATURE_COMPLETED
+        event_payload["error_type"] = handoff.error_type
+        event_payload["requires_human"] = handoff.requires_human
+        self._update_feature_status_for_assignment(mission, assignment, "blocked")
         self.repo.append_event(
-            event_type,
+            EventType.MISSION_FEATURE_BLOCKED,
             event_payload,
             task_id=task_id,
             loop_id=loop_id,
         )
+
+    def _emit_feature_completed_events(
+        self,
+        *,
+        task_id: str,
+        loop_id: int,
+        mission: Mission | None,
+        plan: LoopPlan,
+        completed_feature_ids: list[str],
+    ) -> None:
+        if mission is None or not completed_feature_ids:
+            return
+        completed = set(completed_feature_ids)
+        for assignment_index, assignment in enumerate(plan.assignments):
+            feature = self._feature_for_assignment(mission, assignment)
+            if feature is None or feature.feature_id not in completed:
+                continue
+            self.repo.append_event(
+                EventType.MISSION_FEATURE_COMPLETED,
+                {
+                    "mission_id": mission.mission_id,
+                    "phase_id": feature.phase_id,
+                    "feature_id": feature.feature_id,
+                    "assignment_id": self._assignment_id(
+                        assignment,
+                        task_id=task_id,
+                        loop_id=loop_id,
+                        assignment_index=assignment_index,
+                    ),
+                    "agent_id": assignment.agent_id,
+                    "target_hunger_item_ids": list(assignment.target_hunger_item_ids),
+                    "target_feature_ids": list(assignment.target_feature_ids),
+                },
+                task_id=task_id,
+                loop_id=loop_id,
+            )
 
     def _handoff_event_payload(
         self,

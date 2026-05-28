@@ -30,6 +30,21 @@ from typing import Literal
 from hungerloop.models.workspace import WorkspaceStatus
 
 _HASH_BUFFER_BYTES = 64 * 1024
+_DEFAULT_SEED_IGNORE_NAMES = frozenset(
+    {
+        ".git",
+        ".hg",
+        ".mypy_cache",
+        ".pytest_cache",
+        ".ruff_cache",
+        ".tox",
+        ".venv",
+        "__pycache__",
+        "hungerloop.sqlite*",
+        "node_modules",
+        "tasks",
+    }
+)
 
 
 def _sha256_of_file(path: Path) -> str:
@@ -47,6 +62,17 @@ def _sha256_of_file(path: Path) -> str:
                 break
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _copy_seed_source(source: Path, destination: Path) -> None:
+    source = source.resolve()
+    if not source.is_dir():
+        raise ValueError(f"seed source is not a directory: {source}")
+    shutil.copytree(
+        source,
+        destination,
+        ignore=shutil.ignore_patterns(*sorted(_DEFAULT_SEED_IGNORE_NAMES)),
+    )
 
 
 class WorkspaceManager:
@@ -97,18 +123,30 @@ class WorkspaceManager:
         """Create the ``best/files`` directory if missing."""
         self.best_files_dir(task_id).mkdir(parents=True, exist_ok=True)
 
-    def create_candidate_workspace(self, task_id: str, loop_id: int) -> Path:
-        """Copy ``best/files`` into ``candidates/loop_NNN/files`` and return it."""
+    def create_candidate_workspace(
+        self,
+        task_id: str,
+        loop_id: int,
+        *,
+        seed_source_dir: Path | None = None,
+    ) -> Path:
+        """Create candidate files from an optional project seed plus ``best``."""
         self.ensure_task_workspace(task_id)
 
-        src = self.best_files_dir(task_id)
+        best = self.best_files_dir(task_id)
         dst = self.candidate_files_dir(task_id, loop_id)
 
         if dst.exists():
             shutil.rmtree(dst)
 
-        if src.exists() and any(src.iterdir()):
-            shutil.copytree(src, dst)
+        best_has_content = best.exists() and any(best.iterdir())
+
+        if seed_source_dir is not None:
+            _copy_seed_source(seed_source_dir, dst)
+            if best_has_content:
+                shutil.copytree(best, dst, dirs_exist_ok=True)
+        elif best_has_content:
+            shutil.copytree(best, dst)
         else:
             dst.mkdir(parents=True, exist_ok=True)
 

@@ -255,6 +255,34 @@ def test_new_from_directory_creates_task_mission_ledger_contract(
     assert [event["event_type"] for event in events].count("MISSION_NEW_CREATED") == 1
 
 
+def test_new_goal_creates_default_phase_feature_and_ledger(tmp_path: Path) -> None:
+    ctx = _context(tmp_path)
+
+    result = CliRunner().invoke(
+        cli,
+        ["mission", "new", "T-goal", "--goal", "Write a concise status report"],
+        obj=ctx,
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "smoke verification step" in result.output
+    mission = ctx.repo.get_mission("T-goal")
+    assert mission is not None
+    assert [phase.phase_id for phase in mission.phases] == ["phase-1"]
+    assert [feature.feature_id for feature in mission.features] == ["feature-1"]
+    assert mission.features[0].hunger_item_id == "H-001"
+    assert mission.features[0].verification_steps == [
+        'command: python -c "import sys; sys.exit(0)"'
+    ]
+    ledger = ctx.repo.get_hunger_ledger("T-goal")
+    assert [item.id for item in ledger.items] == ["H-001"]
+    check = ledger.items[0].acceptance_checks[0]
+    assert check.check_type is AcceptanceCheckType.SHELL_EXIT_ZERO
+    assert check.params == {
+        "argv": ["python", "-c", "import sys; sys.exit(0)"]
+    }
+
+
 def test_new_duplicate_rejected_without_rewriting_rows(tmp_path: Path) -> None:
     ctx = _context(tmp_path)
     mission_dir = _write_mission_dir(tmp_path)
@@ -385,13 +413,60 @@ def test_mission_run_help_exposes_required_flag_parity(tmp_path: Path) -> None:
     for flag in (
         "--max-loops",
         "--refill",
+        "--budget-loops",
         "--resume",
         "--reset",
         "--refinement-profile",
+        "--max-refinement-tier",
+        "--ignore-stagnation",
+        "--unblock-all",
+        "--raise-cost-ceiling",
+        "--steal-lock",
+        "--lock-stale-sec",
+        "--model-config",
+        "--accept-unknown-pricing",
         "--spend-budget",
         "--skip-repair-check",
     ):
         assert flag in result.output
+
+
+def test_mission_run_model_config_dummy_reaches_legacy_run(tmp_path: Path) -> None:
+    ctx = _context(tmp_path)
+    task_id = "T-model"
+    ctx.repo.create_task(task_id, "Build report")
+    ctx.repo.save_mission(_mission(task_id))
+    item = HungerItem(
+        id="H-001",
+        title="report",
+        status=HungerItemStatus.OPEN,
+        acceptance_checks=[
+            AcceptanceCheck(
+                check_type=AcceptanceCheckType.FILE_EXISTS,
+                params={"path": "report.md"},
+            )
+        ],
+    )
+    ctx.repo.save_hunger_ledger(task_id, HungerLedger(task_id=task_id, items=[item]))
+    model_config = tmp_path / "model.yaml"
+    model_config.write_text("provider: dummy\nmodel_name: dummy\n", encoding="utf-8")
+
+    result = CliRunner().invoke(
+        cli,
+        [
+            "mission",
+            "run",
+            task_id,
+            "--model-config",
+            str(model_config),
+            "--max-loops",
+            "2",
+        ],
+        obj=ctx,
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "Task T-model stopped:" in result.output
 
 
 def test_mission_runtime_zero_prints_notice_and_uses_legacy_path(

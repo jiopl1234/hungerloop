@@ -18,7 +18,7 @@ import os
 import sys
 from enum import Enum
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import yaml
 from pydantic import BaseModel, Field
@@ -57,6 +57,11 @@ class ModelConfig(BaseModel):
     timeout_seconds: int = Field(default=60, ge=1)
     max_tokens: int = Field(default=4096, ge=1)
     temperature: float = Field(default=0.1, ge=0.0)
+    tool_protocol: Literal["json_actions", "native"] = "json_actions"
+    reasoning_effort: str | None = None
+    thinking: dict[str, Any] | None = None
+    extra_args: dict[str, Any] = Field(default_factory=dict)
+    extra_headers: dict[str, str] = Field(default_factory=dict)
 
     azure_endpoint: str | None = None
     azure_deployment: str | None = None

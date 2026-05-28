@@ -1,6 +1,7 @@
 """Deterministic scrutiny validator for HungerLoop v0.6."""
 from __future__ import annotations
 
+import shlex
 from pathlib import Path
 
 from hungerloop.models.blackboard import CandidateState
@@ -27,6 +28,11 @@ _SCRUTINY_COMMANDS: list[tuple[str, list[str], str]] = [
     ("scrutiny_lint", ["ruff", "check", "src", "tests"], "ruff"),
     ("scrutiny_typecheck", ["mypy", "--strict", "src/"], "mypy"),
 ]
+_SCRUTINY_COMMAND_KEYS: tuple[tuple[str, str, str], ...] = (
+    ("test", "scrutiny_test", "pytest"),
+    ("lint", "scrutiny_lint", "ruff"),
+    ("typecheck", "scrutiny_typecheck", "mypy"),
+)
 _WORKSPACE_CHECK_TYPE = "scrutiny_workspace"
 _MAX_EVENT_OUTPUT_CHARS = 5000
 
@@ -115,7 +121,7 @@ class ScrutinyValidator:
                 )
             return report
 
-        for check_type, argv, label in _SCRUTINY_COMMANDS:
+        for check_type, argv, label in self._commands_for_task(task_id):
             timeout = budget.scrutiny_timeout_seconds
             result = await self.sandbox_runner.run_argv(
                 task_id=task_id,
@@ -432,7 +438,7 @@ class ScrutinyValidator:
 
     @staticmethod
     def _decide_verdict(assertions: list[ValidationAssertion]) -> ValidationVerdict:
-        if assertions and all(assertion.status == "passed" for assertion in assertions):
+        if all(assertion.status == "passed" for assertion in assertions):
             return ValidationVerdict.PASS
         return ValidationVerdict.FAIL
 
@@ -458,3 +464,41 @@ class ScrutinyValidator:
                 event_types=[event_type],
             )
         )
+
+    def _commands_for_task(
+        self,
+        task_id: str,
+    ) -> list[tuple[str, list[str], str]]:
+        """Resolve scrutiny argv triples for ``task_id``.
+
+        Resolution order:
+
+        - mission has no ``services_manifest['commands']`` mapping ->
+          fall back to the hardcoded :data:`_SCRUTINY_COMMANDS`.
+        - ``commands`` is a mapping (possibly empty) -> honor exactly
+          the keys it specifies. An explicit empty mapping disables
+          scrutiny commands entirely; a partial mapping only runs the
+          configured stages.
+        """
+        mission = self.repo.get_mission(task_id)
+        manifest = mission.services_manifest if mission is not None else None
+        commands = manifest.get("commands") if isinstance(manifest, dict) else None
+        if not isinstance(commands, dict):
+            return [(key, list(argv), label) for key, argv, label in _SCRUTINY_COMMANDS]
+
+        resolved: list[tuple[str, list[str], str]] = []
+        for command_key, check_type, label in _SCRUTINY_COMMAND_KEYS:
+            if command_key not in commands:
+                continue
+            argv = _coerce_command_argv(commands.get(command_key))
+            if argv:
+                resolved.append((check_type, argv, label))
+        return resolved
+
+
+def _coerce_command_argv(raw: object) -> list[str]:
+    if isinstance(raw, str):
+        return shlex.split(raw)
+    if isinstance(raw, list) and all(isinstance(item, str) for item in raw):
+        return list(raw)
+    return []

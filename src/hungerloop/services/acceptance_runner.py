@@ -16,11 +16,12 @@ from typing import Any
 
 from hungerloop.models.enums import AcceptanceCheckType
 from hungerloop.repository.protocol import RepositoryProtocol
+from hungerloop.services.evidence_render import clip_head_tail
 from hungerloop.services.path_safety import resolve_workspace_path
 from hungerloop.services.sandbox_runner import SandboxRunner, SandboxRunResult
 from hungerloop.services.workspace_manager import WorkspaceManager
 
-SHELL_OUTPUT_SECTION_CHARS = 700
+SHELL_OUTPUT_SECTION_CHARS = 2000
 
 
 class AcceptanceCheckRunner:
@@ -121,39 +122,21 @@ class AcceptanceCheckRunner:
 
 
 def _summarize_shell_output(result: SandboxRunResult) -> str:
-    """Return a compact stdout/stderr excerpt for failed shell checks."""
+    """Return a stdout/stderr excerpt for failed shell checks.
+
+    Preserves newlines (pytest/ruff/mypy output is structured) and uses
+    head+tail clipping so both the setup banner AND the final FAILED
+    summary survive the budget.
+    """
     parts: list[str] = []
     if result.stdout.strip():
         parts.append(
-            "stdout="
-            + _clip_middle(
-                _one_line(result.stdout),
-                SHELL_OUTPUT_SECTION_CHARS,
-            )
+            "stdout:\n"
+            + clip_head_tail(result.stdout, SHELL_OUTPUT_SECTION_CHARS)
         )
     if result.stderr.strip():
         parts.append(
-            "stderr="
-            + _clip_middle(
-                _one_line(result.stderr),
-                SHELL_OUTPUT_SECTION_CHARS,
-            )
+            "stderr:\n"
+            + clip_head_tail(result.stderr, SHELL_OUTPUT_SECTION_CHARS)
         )
-    return "; ".join(parts)
-
-
-def _one_line(text: str) -> str:
-    """Keep shell output prompt-safe without hiding traceback structure."""
-    normalized = text.replace("\r\n", "\n").replace("\r", "\n")
-    lines = [line.strip() for line in normalized.splitlines() if line.strip()]
-    return r"\n".join(lines)
-
-
-def _clip_middle(text: str, max_chars: int) -> str:
-    if len(text) <= max_chars:
-        return text
-    if max_chars <= 1:
-        return "…"
-    head_chars = max(1, (max_chars - 1) // 2)
-    tail_chars = max(1, max_chars - 1 - head_chars)
-    return f"{text[:head_chars]}…{text[-tail_chars:]}"
+    return "\n".join(parts)
