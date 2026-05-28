@@ -299,9 +299,17 @@ class ExecutionWorker:
         outputs it observed. A boundary marker is appended to the last
         user message of the replay to flag the new loop start.
         """
-        acceptance_lines = "\n".join(
-            f"- {item}" for item in context.acceptance_criteria
-        ) or "- (none provided)"
+        keys = context.acceptance_check_keys
+        if keys and len(keys) == len(context.acceptance_criteria):
+            acceptance_lines = "\n".join(
+                f"- [{key}] {item}"
+                for key, item in zip(keys, context.acceptance_criteria, strict=False)
+            ) or "- (none provided)"
+        else:
+            acceptance_lines = "\n".join(
+                f"- {item}" for item in context.acceptance_criteria
+            ) or "- (none provided)"
+        progress_block = ExecutionWorker._acceptance_progress_block(context)
         tool_schema_lines = describe_tool_arg_schemas(context.allowed_tools)
         system = (
             "You are an execution worker that emits structured JSON actions. "
@@ -331,6 +339,7 @@ class ExecutionWorker:
         user = (
             f"Mission:\n{context.mission}\n\n"
             f"Acceptance criteria:\n{acceptance_lines}\n\n"
+            f"{progress_block}"
             f"Allowed tools and args schema:\n{tool_schema_lines}\n\n"
             f"{prior_context}"
             "Required JSON shape example:\n"
@@ -373,6 +382,42 @@ class ExecutionWorker:
             {"role": "system", "content": system},
             {"role": "user", "content": user},
         ]
+
+    @staticmethod
+    def _acceptance_progress_block(context: ContextPack) -> str:
+        """Render the pass/fail status of acceptance check_keys at start of loop.
+
+        Empty string when there's nothing to report (no keys, or every
+        criterion is still pending without best/ history). When best/
+        already passes some checks, the block tells the worker exactly
+        which criteria are already green (don't regress) and which keys
+        to focus on. Generic: only uses check_key strings the operator
+        already put in the mission ledger — no descriptive text.
+        """
+        passed = context.passed_check_keys
+        failing = context.failing_check_keys
+        if not passed and not failing:
+            return ""
+        total = len(passed) + len(failing)
+        lines = [
+            "Acceptance check status in best/ workspace at start of this loop:",
+            f"- {len(passed)} of {total} ALREADY PASSING — do NOT regress.",
+        ]
+        if failing:
+            # Cap failing keys list to keep prompt bounded. The model can
+            # cross-reference [<key>] tags in the acceptance criteria
+            # list above. Show first MAX_FAILING_KEYS, then "+M more".
+            MAX_FAILING_KEYS = 40
+            shown = failing[:MAX_FAILING_KEYS]
+            more = max(0, len(failing) - len(shown))
+            keys_csv = ", ".join(shown)
+            tail = f", +{more} more" if more else ""
+            lines.append(
+                f"- {len(failing)} still FAILING — focus inner-loop here. "
+                f"Keys (cross-reference [<key>] in the list above): "
+                f"{keys_csv}{tail}"
+            )
+        return "\n".join(lines) + "\n\n"
 
     @staticmethod
     def _prior_loop_context(context: ContextPack) -> str:

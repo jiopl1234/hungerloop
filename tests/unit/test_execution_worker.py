@@ -226,6 +226,50 @@ async def test_execution_worker_persists_inner_loop_replay_across_runs(
     assert "Begin loop 2 now." in messages_loop_2[-1]["content"]
 
 
+def test_execution_worker_renders_acceptance_progress_block() -> None:
+    """When ContextPack carries acceptance_check_keys + a non-empty pass/fail
+    split, _messages emits the progress block after acceptance_criteria so
+    the worker sees what's already passing in best/ and which keys to
+    target. Confirms the R3 generic-feedback channel for cross-loop focus."""
+    ctx = ContextPack(
+        task_id="t1",
+        loop_id=2,
+        agent_id="execution_worker_v1",
+        mission="m",
+        phase=LoopPhase.EXPLORE.value,
+        target_hunger_item_ids=["H-1"],
+        candidate_workspace_ref="cand",
+        acceptance_criteria=[
+            "file exists: *.py",
+            "command: pytest test_a",
+            "command: pytest test_b",
+        ],
+        acceptance_check_keys=["H-1:0", "H-1:1", "H-1:2"],
+        passed_check_keys=["H-1:0", "H-1:1"],
+        failing_check_keys=["H-1:2"],
+        allowed_tools=["read_file", "write_file", "patch_file", "run_shell"],
+        budget=BudgetAllocation(phase=LoopPhase.EXPLORE),
+    )
+    user_msg = ExecutionWorker._messages(ctx)[1]["content"]
+    assert "[H-1:0] file exists: *.py" in user_msg
+    assert "[H-1:1] command: pytest test_a" in user_msg
+    assert "[H-1:2] command: pytest test_b" in user_msg
+    assert "2 of 3 ALREADY PASSING" in user_msg
+    assert "1 still FAILING" in user_msg
+    assert "H-1:2" in user_msg.split("still FAILING")[1]
+
+
+def test_execution_worker_omits_progress_block_when_no_keys_set() -> None:
+    """Legacy ContextPacks built outside ContextBuilder (test fixtures
+    that don't set acceptance_check_keys/passed/failing) must keep the
+    old keyless rendering so existing tests stay valid."""
+    user_msg = ExecutionWorker._messages(_ctx())[1]["content"]
+    assert "ALREADY PASSING" not in user_msg
+    assert "still FAILING" not in user_msg
+    # And the criteria render without [key] prefix when keys list is empty.
+    assert "[H-001:" not in user_msg
+
+
 async def test_execution_worker_rejects_empty_handoff_when_no_writes_under_verification(
     tmp_path: Path,
 ) -> None:

@@ -19,6 +19,7 @@ from hungerloop.services.evidence_render import (
     summarize_tool_call,
 )
 from hungerloop.services.prior_loop_context import render_prior_loop_context_block
+from hungerloop.services.validation_gate import make_check_key
 from hungerloop.services.workspace_reader import WorkspaceReader
 
 K_REJECT_WINDOW = 5
@@ -182,9 +183,19 @@ class ContextBuilder:
 
         items = self.repo.get_hunger_items(target_hunger_item_ids)
         acceptance_criteria = []
+        assignment_check_keys: list[str] = []
         for item in items:
-            for check in item.acceptance_checks:
+            for idx, check in enumerate(item.acceptance_checks):
                 acceptance_criteria.append(_format_check(check))
+                assignment_check_keys.append(make_check_key(item.id, idx))
+        # Per-assignment passed/failing split, derived from BestState's
+        # already-accepted check_keys. This is what the worker would
+        # otherwise have to re-discover via run_shell on each loop. Both
+        # lists preserve the order of acceptance_criteria so the model
+        # can cross-reference by index (no operator text leakage).
+        already_accepted = set(best.accepted_check_keys) if best else set()
+        passed_check_keys = [k for k in assignment_check_keys if k in already_accepted]
+        failing_check_keys = [k for k in assignment_check_keys if k not in already_accepted]
 
         return ContextPack(
             task_id=task_id,
@@ -195,6 +206,9 @@ class ContextBuilder:
             target_hunger_item_ids=target_hunger_item_ids,
             target_feature_ids=target_feature_ids,
             acceptance_criteria=acceptance_criteria,
+            acceptance_check_keys=assignment_check_keys,
+            passed_check_keys=passed_check_keys,
+            failing_check_keys=failing_check_keys,
             best_state_summary=best_summary,
             candidate_workspace_ref=candidate_workspace_ref,
             relevant_evidence_ids=evidence_ids,

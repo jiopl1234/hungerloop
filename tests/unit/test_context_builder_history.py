@@ -41,7 +41,11 @@ Create a file named hello.txt in the workspace root containing the word hello.
 Acceptance: hello.txt exists.
 
 Acceptance criteria:
-- hello.txt exists [file_exists params={"path": "hello.txt"}]
+- [H-001:0] hello.txt exists [file_exists params={"path": "hello.txt"}]
+
+Acceptance check status in best/ workspace at start of this loop:
+- 0 of 1 ALREADY PASSING — do NOT regress.
+- 1 still FAILING — focus inner-loop here. Keys (cross-reference [<key>] in the list above): H-001:0
 
 Allowed tools and args schema:
 - read_file: args = {path: str (required)}

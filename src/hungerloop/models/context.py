@@ -39,6 +39,24 @@ class ContextPack(BaseModel):
     target_hunger_item_ids: list[str]
     target_feature_ids: list[str] = Field(default_factory=list)
     acceptance_criteria: list[str] = Field(default_factory=list)
+    # Per-criterion check_key, parallel to acceptance_criteria: i-th
+    # entry is the canonical key for the i-th rendered criterion. Lets
+    # ExecutionWorker._messages tag each criterion with [<key>] so the
+    # model can cross-reference the pass/fail status block by key.
+    # Empty when callers (legacy tests) construct ContextPack directly
+    # without going through ContextBuilder; in that case _messages falls
+    # back to the keyless format.
+    acceptance_check_keys: list[str] = Field(default_factory=list)
+    # Per-assignment check-key splits derived from BestState before this
+    # loop runs. `passed_check_keys` are check_keys for THIS assignment's
+    # target items that are already in `best.accepted_check_keys`;
+    # `failing_check_keys` are the remaining check_keys. Both are
+    # generic harness data — just identifier strings the operator already
+    # put in the mission ledger. Used by ExecutionWorker._messages to
+    # tell the model "these N already pass, focus on these M" so the
+    # worker does not waste inner-iters re-discovering state.
+    passed_check_keys: list[str] = Field(default_factory=list)
+    failing_check_keys: list[str] = Field(default_factory=list)
 
     best_state_summary: str | None = None
     best_workspace_ref: str = "best"
