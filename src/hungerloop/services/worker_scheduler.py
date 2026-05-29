@@ -270,7 +270,19 @@ class WorkerScheduler:
         assignment_id: str,
         handoff: WorkerHandoff,
     ) -> tuple[str, WorkerHandoff]:
-        handoff_id = handoff.handoff_id or f"WH-{task_id}-{loop_id}-{assignment_id}"
+        # Each attempt of a retried assignment persists its own handoff row
+        # for the audit trail. The handoff_id is the table's primary key, so
+        # the default must be unique PER ATTEMPT — otherwise retry attempt 2
+        # re-inserts the attempt-1 id and sqlite raises
+        # `UNIQUE constraint failed: worker_handoffs.handoff_id`, which the
+        # orchestrator surfaces as a mission-fatal IntegrityError. retry_count
+        # is 0 on the first attempt (id keeps the historical base form so
+        # existing golden expectations hold) and >0 on retries (suffixed).
+        retry_suffix = f"-r{handoff.retry_count}" if handoff.retry_count else ""
+        handoff_id = (
+            handoff.handoff_id
+            or f"WH-{task_id}-{loop_id}-{assignment_id}{retry_suffix}"
+        )
         handoff = handoff.model_copy(update={"handoff_id": handoff_id})
         handoff_id = self.repo.save_worker_handoff(handoff)
         loop_root = (

@@ -570,10 +570,19 @@ class OpenAIModelClient:
         max_tokens: int,
         stream: bool,
     ) -> dict[str, object]:
+        # Cap the API-side `max_tokens` (per-call response cap) by the
+        # operator-provided model_config.max_tokens. Callers (e.g.
+        # ExecutionWorker) pass `context.budget.max_tokens`, which is
+        # the per-ASSIGNMENT cumulative budget — typically much larger
+        # than any single response should be. Without this clamp, the
+        # gateway may reject the request (e.g. qwen-3.6 caps max_tokens
+        # at max_model_len ~262K; sending 288K → HTTP 400). Tracked
+        # against the budget by BudgetGuard separately.
+        per_call_cap = min(max_tokens, self.config.max_tokens)
         payload: dict[str, object] = {
             "model": self.config.model_name,
             "messages": messages,
-            "max_tokens": max_tokens,
+            "max_tokens": per_call_cap,
             "temperature": self.config.temperature,
         }
         if self.config.tool_protocol == "native":

@@ -323,6 +323,52 @@ async def test_retry_succeeds_with_same_assignment_id_and_persists_audit(
     assert json.loads(audit_path.read_text(encoding="utf-8"))["assignment_id"] == "A"
 
 
+async def test_retry_does_not_collide_handoff_id_on_sqlite(
+    tmp_path: Path,
+) -> None:
+    """Regression: a retried assignment used to reuse the handoff_id
+    WH-{task}-{loop}-{assignment_id} verbatim, so attempt 2's INSERT hit
+    `UNIQUE constraint failed: worker_handoffs.handoff_id` on the SQLite
+    repository — surfaced as a mission-fatal IntegrityError. InMemoryRepo
+    silently overwrote and never caught this. Each attempt must persist a
+    distinct handoff_id."""
+    from hungerloop.repository.sqlite_repo import SQLiteRepository
+
+    db_path = tmp_path / "hl.sqlite"
+    repo = SQLiteRepository(db_path)
+    repo.create_task(TASK_ID, "Goal")
+    repo.save_agent_spec(
+        AgentSpec(agent_id=AGENT_ID, name="ExecutionWorker", allowed_tools=["write_file"])
+    )
+
+    assignment = _assignment("A", max_retries=1)
+    runtime = _RecordingRuntime(
+        {"A": [_handoff("A", error_type="timeout", retryable=True), _handoff("A")]}
+    )
+    seen_assignments: list[Assignment] = []
+
+    # Must not raise IntegrityError.
+    result = await _scheduler(
+        repo=repo, tmp_path=tmp_path, runtime=runtime
+    ).execute_assignments(
+        TASK_ID,
+        LOOP_ID,
+        [assignment],
+        _context_factory(seen_assignments),
+    )
+
+    assert runtime.order == ["A", "A"]
+    persisted = repo.list_worker_handoffs(TASK_ID)
+    assert len(persisted) == 2
+    handoff_ids = {h.handoff_id for h in persisted}
+    assert len(handoff_ids) == 2  # distinct ids — no collision
+    # Attempt 1 keeps the historical base form; the retry is suffixed.
+    assert f"WH-{TASK_ID}-{LOOP_ID}-A" in handoff_ids
+    assert f"WH-{TASK_ID}-{LOOP_ID}-A-r1" in handoff_ids
+    # The successful final handoff is what's returned.
+    assert [h.error_type for h in result.handoffs] == [None]
+
+
 async def test_retry_exhaustion_skips_downstream_and_emits_lifecycle_events(
     repo: InMemoryRepository,
     tmp_path: Path,
