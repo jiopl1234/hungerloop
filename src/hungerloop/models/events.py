@@ -153,3 +153,6 @@ class EventType(str, Enum):
 
     # ----- Spec synthesis (v0.7) ----------------------------------------
     SYNTHESIS_ITEM_INJECTED = "synthesis_item_injected"
+    SYNTH_CHECK_REJECTED = "synth_check_rejected"
+    SYNTHESIS_ATTEMPTED = "synthesis_attempted"
+    SYNTHESIS_SKIPPED = "synthesis_skipped"

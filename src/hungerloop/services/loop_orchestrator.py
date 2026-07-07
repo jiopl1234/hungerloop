@@ -76,6 +76,22 @@ class _ProposesMemory(Protocol):
     ) -> object: ...
 
 
+@runtime_checkable
+class _SpecSynthesizerProtocol(Protocol):
+    """Optional :class:`SpecCheckSynthesizer` shape for post-commit synthesis."""
+
+    async def synthesize_post_commit(
+        self,
+        *,
+        task_id: str,
+        loop_id: int,
+        mission_prose: str,
+        feature_descriptions: list[str],
+        synthesis_max_total_items: int,
+        covered_check_digest: str | None,
+    ) -> list[str]: ...
+
+
 def _build_delta_summary(
     *, committed: bool, newly_passed: list[str], regressed: list[str], reason: str
 ) -> str:
@@ -156,6 +172,7 @@ class LoopOrchestrator:
         validation_pipeline: ValidationPipeline | None = None,
         memory_manager: _ProposesMemory | None = None,
         max_loops_safety_cap: int = 1000,
+        spec_check_synthesizer: _SpecSynthesizerProtocol | None = None,
     ) -> None:
         self.repo = repo
         self.hunger_engine = hunger_engine
@@ -189,6 +206,7 @@ class LoopOrchestrator:
         self.stagnation_detector = stagnation_detector
         self.refinement_compiler = refinement_compiler
         self.memory_manager = memory_manager
+        self.spec_check_synthesizer = spec_check_synthesizer
         self.max_loops_safety_cap = max_loops_safety_cap
         # Set inside ``_step_inner`` immediately after ``next_loop_id`` is
         # allocated so ``_emit_error_stop`` can persist the ERROR LoopTrace
@@ -566,6 +584,21 @@ class LoopOrchestrator:
             attempted_hunger_item_ids=attempted_hunger_item_ids,
             respect_stagnation=policy.respect_stagnation,
         )
+
+        # Post-commit synthesis: runs once after a successful commit and
+        # before the next planning decision, when synthesis_enabled is True.
+        if (
+            commit_decision["committed"]
+            and self.spec_check_synthesizer is not None
+            and policy.synthesis_enabled
+            and policy.synthesis_max_total_items > 0
+        ):
+            await self._run_post_commit_synthesis(
+                task_id=task_id,
+                loop_id=loop_id,
+                policy=policy,
+                mission=mission,
+            )
 
         if self.memory_manager is not None:
             self.memory_manager.propose_from_loop(task_id, loop_id, effective_validation)
@@ -1590,3 +1623,55 @@ class LoopOrchestrator:
         except Exception:  # pragma: no cover — defensive
             pass
         return report
+
+    async def _run_post_commit_synthesis(
+        self,
+        *,
+        task_id: str,
+        loop_id: int,
+        policy: HungerPolicy,
+        mission: Mission | None,
+    ) -> None:
+        """Run post-commit synthesis after a successful commit.
+
+        This runs exactly once after a successful commit and before the
+        next planning decision. Accepted proposals route through the
+        compiler-owned ``RefinementCompiler.compile_spec_coverage`` path.
+        """
+        assert self.spec_check_synthesizer is not None
+        mission_prose = ""
+        feature_descriptions: list[str] = []
+        if mission is not None:
+            mission_prose = mission.description or mission.title
+            for feature in mission.features:
+                desc = feature.description or feature.title
+                if feature.expected_behavior:
+                    desc = f"{desc}. Expected: {'; '.join(feature.expected_behavior)}"
+                feature_descriptions.append(f"{feature.feature_id}: {desc}")
+
+        try:
+            from hungerloop.services.spec_check_synthesizer import (
+                build_covered_check_digest,
+            )
+
+            covered_digest = build_covered_check_digest(
+                repo=self.repo, task_id=task_id
+            )
+            await self.spec_check_synthesizer.synthesize_post_commit(
+                task_id=task_id,
+                loop_id=loop_id,
+                mission_prose=mission_prose,
+                feature_descriptions=feature_descriptions,
+                synthesis_max_total_items=policy.synthesis_max_total_items,
+                covered_check_digest=covered_digest,
+            )
+        except Exception as exc:
+            self.repo.append_event(
+                EventType.ERROR,
+                {
+                    "error_type": "post_commit_synthesis_error",
+                    "error_message": type(exc).__name__,
+                },
+                task_id=task_id,
+                loop_id=loop_id,
+            )

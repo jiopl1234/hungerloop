@@ -150,6 +150,8 @@ def mission_new(
     if from_path is None and goal is not None:
         click.echo(_GOAL_QUICKSTART_WARNING, err=True)
 
+    _maybe_run_plan_time_synthesis(ctx, task_id, parsed, result.mission)
+
 
 @mission.command("run")
 @click.argument("task_id")
@@ -502,6 +504,8 @@ def mission_import(ctx: CliContext, task_id: str, from_path: Path) -> None:
     """Import updated mission specs through the compiler write path."""
     result = _import_mission_from_path(ctx, task_id, from_path, source="import")
     _print_change_summary(result.summary)
+    parsed = MissionLoader().load_from_path(from_path)
+    _maybe_run_plan_time_synthesis(ctx, task_id, parsed, result.mission)
 
 
 def _require_mission(ctx: CliContext, task_id: str) -> Mission:
@@ -753,6 +757,148 @@ def _print_change_summary(summary: dict[str, int]) -> None:
         f"{summary.get('features_added', 0)} features added, "
         f"{summary.get('assertions_added', 0)} assertions added"
     )
+
+
+def _maybe_run_plan_time_synthesis(
+    ctx: CliContext,
+    task_id: str,
+    parsed: ParsedMissionSpec,
+    mission: Mission,
+) -> None:
+    """Run plan-time synthesis if ``synthesis_enabled`` is true in policy.
+
+    When disabled (the default), this function does nothing: no model
+    client is constructed, no credentials are read, no synthesis events
+    are emitted, and no ledger mutation occurs.
+
+    When enabled, the function constructs a real completion client from
+    ``.env`` credentials, runs synthesis, and routes accepted proposals
+    through ``RefinementCompiler.compile_spec_coverage`` at the configured
+    ``synthesis_plan_time_tier``.
+    """
+    import asyncio
+
+    policy = ctx.repo.get_hunger_policy(task_id)
+    if not policy.synthesis_enabled:
+        return
+
+    if policy.synthesis_max_total_items <= 0:
+        return
+
+    # Build mission prose and feature descriptions from the parsed spec
+    mission_prose = parsed.description or parsed.title or mission.title
+    feature_descriptions: list[str] = []
+    for feature in mission.features:
+        desc = feature.description or feature.title
+        if feature.expected_behavior:
+            desc = f"{desc}. Expected: {'; '.join(feature.expected_behavior)}"
+        feature_descriptions.append(f"{feature.feature_id}: {desc}")
+
+    # Build the completion client from env credentials
+    client = _build_synthesis_completion_client(ctx)
+    if client is None:
+        return
+
+    from hungerloop.services.check_proposal_gate import CheckProposalGate
+    from hungerloop.services.cost_guard import CostGuard
+    from hungerloop.services.refinement_compiler import RefinementCompiler
+    from hungerloop.services.spec_check_synthesizer import run_plan_time_synthesis
+
+    cost_guard = CostGuard(ctx.repo)
+    gate = CheckProposalGate()
+    compiler = RefinementCompiler(ctx.repo)
+
+    try:
+        injected = asyncio.run(
+            run_plan_time_synthesis(
+                task_id=task_id,
+                repo=ctx.repo,
+                cost_guard=cost_guard,
+                completion_client=client,
+                gate=gate,
+                refinement_compiler=compiler,
+                mission_prose=mission_prose,
+                feature_descriptions=feature_descriptions,
+                synthesis_plan_time_tier=policy.synthesis_plan_time_tier,
+                synthesis_max_total_items=policy.synthesis_max_total_items,
+                model_name="glm-5.2",
+            )
+        )
+    except Exception as exc:
+        ctx.repo.append_event(
+            "synthesis_plan_time_failed",
+            {"task_id": task_id, "error_type": type(exc).__name__},
+            task_id=task_id,
+        )
+        click.echo(
+            f"warning: plan-time synthesis failed: {type(exc).__name__}",
+            err=True,
+        )
+        return
+
+    if injected:
+        click.echo(
+            f"Plan-time synthesis: {len(injected)} items injected "
+            f"({', '.join(injected)})"
+        )
+
+
+def _build_synthesis_completion_client(
+    ctx: CliContext,
+) -> Any | None:
+    """Build a real completion client from ``.env`` credentials.
+
+    Returns ``None`` if credentials are not available. Never prints
+    secret values.
+    """
+    api_key = os.environ.get("HUNGERLOOP_API_KEY")
+    base_url = os.environ.get("HUNGERLOOP_BASE_URL")
+    if not api_key or not base_url:
+        return None
+
+    from hungerloop.models.usage import ModelUsage
+    from hungerloop.services.model_client import ModelResponse
+
+    class _RealCompletionClient:
+        """Real completion client using httpx against an OpenAI-compatible API."""
+
+        def __init__(self, api_key: str, base_url: str) -> None:
+            self._api_key = api_key
+            self._base_url = base_url
+
+        async def complete(
+            self,
+            *,
+            messages: list[dict[str, str]],
+            max_tokens: int,
+        ) -> ModelResponse:
+            import httpx
+
+            async with httpx.AsyncClient(timeout=60) as client:
+                response = await client.post(
+                    f"{self._base_url}/chat/completions",
+                    headers={
+                        "Authorization": f"Bearer {self._api_key}",
+                        "Content-Type": "application/json",
+                    },
+                    json={
+                        "model": "glm-5.2",
+                        "messages": messages,
+                        "max_tokens": max_tokens,
+                    },
+                )
+                response.raise_for_status()
+                data = response.json()
+                content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
+                usage_raw = data.get("usage", {})
+                usage = ModelUsage(
+                    input_tokens=usage_raw.get("prompt_tokens", 0),
+                    output_tokens=usage_raw.get("completion_tokens", 0),
+                    cost_usd=0.0,
+                )
+                return ModelResponse(content=content, usage=usage)
+
+    return _RealCompletionClient(api_key, base_url)
 
 
 def _create_legacy_task(

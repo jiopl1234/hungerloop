@@ -26,7 +26,7 @@ from hungerloop.services.handoff_processor import HandoffProcessor
 from hungerloop.services.hunger_engine import HungerEngine
 from hungerloop.services.hunger_update import HungerUpdateService
 from hungerloop.services.integrator import Integrator
-from hungerloop.services.loop_orchestrator import LoopOrchestrator
+from hungerloop.services.loop_orchestrator import LoopOrchestrator, _SpecSynthesizerProtocol
 from hungerloop.services.memory_manager import MemoryManager
 from hungerloop.services.model_client import DummyModelClient, ModelClient
 from hungerloop.services.refinement_compiler import RefinementCompiler
@@ -51,6 +51,7 @@ def build_orchestrator(
     model_client: ModelClient | None = None,
     budget_allocator: BudgetAllocator | None = None,
     max_loops_safety_cap: int = 200,
+    spec_check_synthesizer: _SpecSynthesizerProtocol | None = None,
 ) -> LoopOrchestrator:
     """Wire all v0.5a services into a :class:`LoopOrchestrator`.
 
@@ -114,4 +115,5 @@ def build_orchestrator(
         refinement_compiler=RefinementCompiler(repo),
         memory_manager=MemoryManager(repo),
         max_loops_safety_cap=max_loops_safety_cap,
+        spec_check_synthesizer=spec_check_synthesizer,
     )
