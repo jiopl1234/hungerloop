@@ -150,3 +150,6 @@ class EventType(str, Enum):
     SKILL_CARD_ACTIVATED = "skill_card_activated"
     SKILL_CARD_REJECTED = "skill_card_rejected"
     SKILL_CARD_IMPORTED = "skill_card_imported"
+
+    # ----- Spec synthesis (v0.7) ----------------------------------------
+    SYNTHESIS_ITEM_INJECTED = "synthesis_item_injected"

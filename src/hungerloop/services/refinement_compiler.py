@@ -3,24 +3,37 @@
 v0.5f.4 keeps requirement generation rule-based: once tier-0 correctness
 is done, this compiler can add concrete, check-backed refinement items
 while the user-provided loop budget remains.
+
+v0.7 adds ``compile_spec_coverage`` as the sole proposal ledger-write
+path for accepted check proposals (spec synthesis and worker discovery).
 """
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 
 from pydantic import BaseModel, Field
 
 from hungerloop.models.blackboard import BestState
 from hungerloop.models.enums import AcceptanceCheckType, CompletionMode, HungerItemType
+from hungerloop.models.events import EventType
 from hungerloop.models.hunger import (
     AcceptanceCheck,
     HungerItem,
     HungerLedger,
     HungerPolicy,
 )
+from hungerloop.models.synthesis import (
+    CheckProposal,
+    _normalize_executable,
+    _normalize_path,
+)
 from hungerloop.repository.protocol import RepositoryProtocol
 
 _PROFILE_PYTHON_MEDIUM = "python_medium"
+
+# Default per-call cap for compile_spec_coverage.
+_DEFAULT_MAX_NEW_ITEMS = 20
 
 
 class RefinementCompileResult(BaseModel):
@@ -75,6 +88,99 @@ class RefinementCompiler:
 
     def __init__(self, repo: RepositoryProtocol) -> None:
         self.repo = repo
+
+    def compile_spec_coverage(
+        self,
+        *,
+        task_id: str,
+        proposals: list[CheckProposal],
+        generated_by: str,
+        tier: int = 1,
+        max_new_items: int = _DEFAULT_MAX_NEW_ITEMS,
+    ) -> list[str]:
+        """Compile accepted proposals into ``H-SYN-NNN`` hunger items.
+
+        This is the sole ledger-write path for accepted proposal checks.
+        It creates ``H-SYN-*`` hunger items with:
+
+        - ``refinement_kind="spec_coverage"``
+        - ``refinement_tier`` set to the supplied ``tier``
+        - ``generated_by`` set to the supplied value (not the nested
+          ``proposed_by`` on the proposal)
+        - an acceptance check whose type, params, and description match
+          the proposal
+
+        Deduplication is performed against existing ledger acceptance
+        checks and existing ``H-SYN`` items, so repeated compilation of
+        proposals already present in the ledger does not add duplicates.
+
+        ``max_new_items=0`` is a valid no-op: no items are injected and
+        no repository save occurs.  When no item is new, the ledger is
+        not saved.
+        """
+        if max_new_items <= 0 or not proposals:
+            return []
+
+        ledger = self.repo.get_hunger_ledger(task_id)
+
+        # Compute dedup keys from existing ledger acceptance checks.
+        existing_keys = _collect_existing_dedup_keys(ledger)
+
+        # Determine the next H-SYN sequence number.
+        next_seq = _next_h_syn_sequence(ledger)
+
+        new_items: list[HungerItem] = []
+        matched_proposals: list[CheckProposal] = []
+        for proposal in proposals:
+            if len(new_items) >= max_new_items:
+                break
+
+            key = proposal.dedup_key()
+            if key in existing_keys:
+                continue
+
+            item_id = f"H-SYN-{next_seq:03d}"
+            next_seq += 1
+
+            new_items.append(
+                _build_spec_coverage_item(
+                    item_id=item_id,
+                    proposal=proposal,
+                    generated_by=generated_by,
+                    tier=tier,
+                )
+            )
+            matched_proposals.append(proposal)
+            existing_keys.add(key)
+
+        if not new_items:
+            return []
+
+        updated_ledger = HungerLedger(
+            task_id=task_id,
+            items=[*ledger.items, *new_items],
+        )
+        self.repo.save_hunger_ledger(task_id, updated_ledger)
+        for item, proposal in zip(new_items, matched_proposals, strict=False):
+            self.repo.save_hunger_item(item)
+            self.repo.append_event(
+                EventType.SYNTHESIS_ITEM_INJECTED,
+                {
+                    "item_id": item.id,
+                    "task_id": task_id,
+                    "generated_by": generated_by,
+                    "refinement_tier": tier,
+                    "refinement_kind": "spec_coverage",
+                    "dedup_key": proposal.dedup_key(),
+                    "source_quote": proposal.source_quote,
+                    "proposed_by": proposal.proposed_by,
+                    "check_type": proposal.check_type.value,
+                    "description": proposal.description,
+                },
+                task_id=task_id,
+            )
+
+        return [item.id for item in new_items]
 
     def ensure_next_tier(
         self,
@@ -187,3 +293,104 @@ class RefinementCompiler:
         for item in new_items:
             self.repo.save_hunger_item(item)
         return [item.id for item in new_items]
+
+
+# ---------------------------------------------------------------------------
+# Spec-coverage compilation helpers
+# ---------------------------------------------------------------------------
+
+_H_SYN_ID_RE = re.compile(r"^H-SYN-(\d+)$")
+
+
+def _check_dedup_key(check: AcceptanceCheck) -> str | None:
+    """Compute a dedup key for an existing acceptance check.
+
+    Returns ``None`` for check types that are not eligible for proposal
+    deduplication (i.e. types that ``CheckProposal`` would never produce).
+    The key format matches :meth:`CheckProposal.dedup_key`.
+    """
+    if check.check_type == AcceptanceCheckType.SHELL_EXIT_ZERO:
+        argv = check.params.get("argv")
+        if not isinstance(argv, list) or len(argv) == 0:
+            return None
+        normalized: list[str] = []
+        for i, elem in enumerate(argv):
+            if not isinstance(elem, str) or not elem.strip():
+                return None
+            if i == 0:
+                normalized.append(_normalize_executable(elem))
+            else:
+                normalized.append(elem.strip())
+        return f"shell_exit_zero:|{'|'.join(normalized)}"
+    elif check.check_type == AcceptanceCheckType.FILE_EXISTS:
+        path = check.params.get("path")
+        if not isinstance(path, str):
+            return None
+        return f"file_exists:{_normalize_path(path)}"
+    return None
+
+
+def _collect_existing_dedup_keys(ledger: HungerLedger) -> set[str]:
+    """Collect dedup keys from all acceptance checks in the ledger.
+
+    This provides idempotent deduplication against existing operator-
+    authored checks and previously injected ``H-SYN`` items.
+    """
+    keys: set[str] = set()
+    for item in ledger.items:
+        for check in item.acceptance_checks:
+            key = _check_dedup_key(check)
+            if key is not None:
+                keys.add(key)
+    return keys
+
+
+def _next_h_syn_sequence(ledger: HungerLedger) -> int:
+    """Return the next sequence number for ``H-SYN-NNN`` ids.
+
+    Scans existing item ids matching ``H-SYN-NNN`` and returns
+    ``max + 1`` (or ``1`` if none exist).
+    """
+    max_seq = 0
+    for item in ledger.items:
+        match = _H_SYN_ID_RE.match(item.id)
+        if match is not None:
+            seq = int(match.group(1))
+            if seq > max_seq:
+                max_seq = seq
+    return max_seq + 1
+
+
+def _build_spec_coverage_item(
+    *,
+    item_id: str,
+    proposal: CheckProposal,
+    generated_by: str,
+    tier: int,
+) -> HungerItem:
+    """Build a ``H-SYN`` hunger item from an accepted proposal.
+
+    The acceptance check type, params, and description are copied from
+    the proposal.  ``generated_by`` is always the compiler-supplied
+    value, never the nested ``proposed_by`` on the proposal, so worker-
+    controlled proposal provenance cannot spoof ledger provenance.
+    """
+    return HungerItem(
+        id=item_id,
+        title=proposal.description or f"Spec coverage check ({item_id})",
+        item_type=HungerItemType.GOAL_GAP,
+        priority=1.0,
+        gap_score=1.0,
+        acceptance_checks=[
+            AcceptanceCheck(
+                check_type=proposal.check_type,
+                params=dict(proposal.params),
+                description=proposal.description,
+            )
+        ],
+        acceptance_mode="all",
+        refinement_tier=tier,
+        refinement_kind="spec_coverage",
+        generated_by=generated_by,
+        source_check_keys=[],
+    )
