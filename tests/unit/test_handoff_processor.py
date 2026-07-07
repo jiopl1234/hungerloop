@@ -124,7 +124,8 @@ def _event_types(repo: RepoUnderTest, *, task_id: str = "task-1") -> list[str]:
     return [str(row["event_type"]) for row in repo.list_events(task_id)]
 
 
-def test_discovered_issue_cap(repo: RepoUnderTest) -> None:
+@pytest.mark.asyncio
+async def test_discovered_issue_cap(repo: RepoUnderTest) -> None:
     from hungerloop.services.handoff_processor import HandoffProcessor
 
     processor = HandoffProcessor(repo, requirement_compiler=RequirementCompiler(repo))
@@ -140,7 +141,7 @@ def test_discovered_issue_cap(repo: RepoUnderTest) -> None:
         ]
     )
 
-    result = processor.process_handoffs(
+    result = await processor.process_handoffs(
         "task-1",
         3,
         [handoff],
@@ -152,7 +153,8 @@ def test_discovered_issue_cap(repo: RepoUnderTest) -> None:
     assert len(repo.get_hunger_ledger("task-1").items) == 3
 
 
-def test_discovered_issue_cap_demotion_text(repo: RepoUnderTest) -> None:
+@pytest.mark.asyncio
+async def test_discovered_issue_cap_demotion_text(repo: RepoUnderTest) -> None:
     from hungerloop.services.handoff_processor import HandoffProcessor
 
     processor = HandoffProcessor(repo, requirement_compiler=RequirementCompiler(repo))
@@ -168,7 +170,7 @@ def test_discovered_issue_cap_demotion_text(repo: RepoUnderTest) -> None:
         ]
     )
 
-    result = processor.process_handoffs(
+    result = await processor.process_handoffs(
         "task-1",
         3,
         [handoff],
@@ -179,11 +181,12 @@ def test_discovered_issue_cap_demotion_text(repo: RepoUnderTest) -> None:
     assert result.prior_handoff_summary.count("Follow-up:") >= 2
 
 
-def test_follow_up_prefix(repo: RepoUnderTest) -> None:
+@pytest.mark.asyncio
+async def test_follow_up_prefix(repo: RepoUnderTest) -> None:
     from hungerloop.services.handoff_processor import HandoffProcessor
 
     processor = HandoffProcessor(repo, requirement_compiler=RequirementCompiler(repo))
-    result = processor.process_handoffs(
+    result = await processor.process_handoffs(
         "task-1",
         3,
         [
@@ -201,11 +204,12 @@ def test_follow_up_prefix(repo: RepoUnderTest) -> None:
     assert "Follow-up: check X" in result.prior_handoff_summary
 
 
-def test_critical_context_prefix(repo: RepoUnderTest) -> None:
+@pytest.mark.asyncio
+async def test_critical_context_prefix(repo: RepoUnderTest) -> None:
     from hungerloop.services.handoff_processor import HandoffProcessor
 
     processor = HandoffProcessor(repo, requirement_compiler=RequirementCompiler(repo))
-    result = processor.process_handoffs(
+    result = await processor.process_handoffs(
         "task-1",
         3,
         [
@@ -227,14 +231,15 @@ def test_critical_context_prefix(repo: RepoUnderTest) -> None:
     assert result.prior_handoff_summary.startswith("[CRITICAL] DB schema mismatch")
 
 
-def test_incomplete_work_feature_update(repo: RepoUnderTest) -> None:
+@pytest.mark.asyncio
+async def test_incomplete_work_feature_update(repo: RepoUnderTest) -> None:
     from hungerloop.services.handoff_processor import HandoffProcessor
 
     mission = _mission()
     _save_mission(repo, mission)
 
     processor = HandoffProcessor(repo, requirement_compiler=RequirementCompiler(repo))
-    processor.process_handoffs(
+    await processor.process_handoffs(
         "task-1",
         3,
         [
@@ -256,14 +261,15 @@ def test_incomplete_work_feature_update(repo: RepoUnderTest) -> None:
     assert statuses == {"feature-1": "in_progress", "feature-2": "in_progress"}
 
 
-def test_incomplete_work_idempotent(repo: RepoUnderTest) -> None:
+@pytest.mark.asyncio
+async def test_incomplete_work_idempotent(repo: RepoUnderTest) -> None:
     from hungerloop.services.handoff_processor import HandoffProcessor
 
     mission = _mission(feature_statuses={"feature-1": "in_progress"})
     _save_mission(repo, mission)
 
     processor = HandoffProcessor(repo, requirement_compiler=RequirementCompiler(repo))
-    processor.process_handoffs(
+    await processor.process_handoffs(
         "task-1",
         3,
         [
@@ -283,7 +289,8 @@ def test_incomplete_work_idempotent(repo: RepoUnderTest) -> None:
     assert feature.status == "in_progress"
 
 
-def test_idempotency_no_duplicate_injection(repo: RepoUnderTest) -> None:
+@pytest.mark.asyncio
+async def test_idempotency_no_duplicate_injection(repo: RepoUnderTest) -> None:
     from hungerloop.services.handoff_processor import HandoffProcessor
 
     processor = HandoffProcessor(repo, requirement_compiler=RequirementCompiler(repo))
@@ -296,14 +303,14 @@ def test_idempotency_no_duplicate_injection(repo: RepoUnderTest) -> None:
         )
     )
 
-    first = processor.process_handoffs(
+    first = await processor.process_handoffs(
         "task-1",
         3,
         [handoff],
         mission=None,
         budget=_budget(),
     )
-    second = processor.process_handoffs(
+    second = await processor.process_handoffs(
         "task-1",
         3,
         [handoff],
@@ -316,7 +323,8 @@ def test_idempotency_no_duplicate_injection(repo: RepoUnderTest) -> None:
     assert len(repo.get_hunger_ledger("task-1").items) == 1
 
 
-def test_schema_rejected_discovered_fact_demotes_to_follow_up(
+@pytest.mark.asyncio
+async def test_schema_rejected_discovered_fact_demotes_to_follow_up(
     repo: RepoUnderTest,
 ) -> None:
     from hungerloop.services.handoff_processor import HandoffProcessor
@@ -326,7 +334,7 @@ def test_schema_rejected_discovered_fact_demotes_to_follow_up(
         requirement_compiler=RejectingRequirementCompiler(repo),
     )
 
-    result = processor.process_handoffs(
+    result = await processor.process_handoffs(
         "task-1",
         3,
         [

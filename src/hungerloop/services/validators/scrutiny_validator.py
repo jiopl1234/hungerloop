@@ -192,7 +192,7 @@ class ScrutinyValidator:
                 )
 
         if failed_items:
-            self.handoff_processor.process_handoffs(
+            await self.handoff_processor.process_handoffs(
                 task_id,
                 loop_id,
                 [

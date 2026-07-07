@@ -75,6 +75,7 @@ def test_handoff_processing_result_exposes_expected_fields_only() -> None:
         "discovered_issues",
         "blocked_item_ids",
         "injected_hunger_item_ids",
+        "accepted_proposal_count",
     }
     assert len(result.prior_handoff_summary) == 800
     assert "early_stop_reason" not in HandoffProcessingResult.model_fields

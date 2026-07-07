@@ -14,6 +14,8 @@ from typing import Literal
 
 from pydantic import BaseModel, Field, field_validator
 
+from hungerloop.models.synthesis import CheckProposal
+
 AgentKind = Literal["execution", "learning", "research", "planner"]
 HandoffItemType = Literal[
     "blocker",
@@ -69,6 +71,11 @@ class HandoffItem(BaseModel):
     related_check_keys: list[str] = Field(default_factory=list)
     related_item_ids: list[str] = Field(default_factory=list)
     requires_orchestrator_action: bool = False
+
+    # v0.7: deterministic check proposals attached to discovered test-gap items.
+    # Defaults to an empty list; valid CheckProposal payloads are accepted,
+    # malformed or disallowed proposals are rejected at model-construction time.
+    proposed_checks: list[CheckProposal] = Field(default_factory=list)
 
     @field_validator("summary")
     @classmethod

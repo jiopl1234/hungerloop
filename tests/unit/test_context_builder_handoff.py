@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import Literal
 
+import pytest
+
 from hungerloop.models.context import ContextPack
 from hungerloop.models.enums import AcceptanceCheckType, LoopPhase
 from hungerloop.models.hunger import AcceptanceCheck, HungerItem
@@ -95,9 +97,10 @@ def test_context_pack_prior_handoff_summary_default() -> None:
     assert pack.prior_handoff_summary == ""
 
 
-def test_build_for_agent_uses_latest_cached_handoff_summary() -> None:
+@pytest.mark.asyncio
+async def test_build_for_agent_uses_latest_cached_handoff_summary() -> None:
     repo = _repo()
-    result = HandoffProcessor(
+    result = await HandoffProcessor(
         repo,
         requirement_compiler=RequirementCompiler(repo),
     ).process_handoffs(

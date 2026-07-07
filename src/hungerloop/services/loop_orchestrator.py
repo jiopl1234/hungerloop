@@ -424,7 +424,7 @@ class LoopOrchestrator:
             worker_handoffs=scheduler_result.handoffs,
             mission=mission,
         )
-        self.handoff_processor.process_handoffs(
+        await self.handoff_processor.process_handoffs(
             task_id,
             loop_id,
             worker_handoffs,

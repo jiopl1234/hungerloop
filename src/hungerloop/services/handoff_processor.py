@@ -9,24 +9,40 @@ from hungerloop.models.events import EventType
 from hungerloop.models.handoff import DiscoveredFact, HandoffProcessingResult
 from hungerloop.models.mission import Mission
 from hungerloop.models.planning import BudgetAllocation
+from hungerloop.models.synthesis import CheckProposal
 from hungerloop.models.worker import HandoffItem, WorkerHandoff
 from hungerloop.repository.protocol import RepositoryProtocol
+from hungerloop.services.check_proposal_gate import CheckProposalGate
+from hungerloop.services.refinement_compiler import RefinementCompiler
 from hungerloop.services.requirement_compiler import RequirementCompiler
 
 
 class HandoffProcessor:
-    """Route structured worker handoffs into repository updates."""
+    """Route structured worker handoffs into repository updates.
+
+    v0.7: When a ``CheckProposalGate`` and ``RefinementCompiler`` are
+    provided, ``process_handoffs`` becomes async so it can ``await`` the
+    gate exactly once for each batch of worker proposals collected from
+    discovered test-gap handoff items.  Accepted proposals are injected
+    through ``RefinementCompiler.compile_spec_coverage`` with
+    ``generated_by=f"worker:{agent_id}"``, keeping ledger writes
+    compiler-owned.
+    """
 
     def __init__(
         self,
         repo: RepositoryProtocol,
         *,
         requirement_compiler: RequirementCompiler | None = None,
+        check_proposal_gate: CheckProposalGate | None = None,
+        refinement_compiler: RefinementCompiler | None = None,
     ) -> None:
         self.repo = repo
         self.requirement_compiler = requirement_compiler or RequirementCompiler(repo)
+        self.check_proposal_gate = check_proposal_gate
+        self.refinement_compiler = refinement_compiler
 
-    def process_handoffs(
+    async def process_handoffs(
         self,
         task_id: str,
         loop_id: int,
@@ -42,6 +58,10 @@ class HandoffProcessor:
         critical_lines: list[str] = []
         discovered_issue_count = 0
         cap = budget.max_new_items_per_loop
+
+        # Collected proposals from test-gap discovered_issue items.
+        # Each entry is (proposal, agent_id, source_handoff_id).
+        collected_proposals: list[tuple[CheckProposal, str, str]] = []
 
         for handoff in handoffs:
             for item_index, item in enumerate(handoff.handoff_items):
@@ -110,6 +130,16 @@ class HandoffProcessor:
                             loop_id=loop_id,
                         )
                         summary_lines.append(f"Follow-up: {self._handoff_text(item)}")
+
+                    # Collect proposals from test-gap discovered issues only.
+                    if (
+                        fact.kind == "test_gap"
+                        and item.proposed_checks
+                    ):
+                        for proposal in item.proposed_checks:
+                            collected_proposals.append(
+                                (proposal, handoff.agent_id, source_handoff_id)
+                            )
                     continue
 
                 if item.item_type == "follow_up":
@@ -124,14 +154,139 @@ class HandoffProcessor:
                 if item.item_type == "critical_context":
                     critical_lines.insert(0, f"[CRITICAL] {self._handoff_text(item)}")
 
+        # Process collected worker proposals through the gate and compiler.
+        accepted_proposal_count = 0
+        if collected_proposals and self.check_proposal_gate is not None:
+            remaining_cap = max(0, cap - discovered_issue_count)
+            accepted_proposal_count = await self._process_worker_proposals(
+                task_id=task_id,
+                loop_id=loop_id,
+                collected_proposals=collected_proposals,
+                remaining_cap=remaining_cap,
+            )
+            # Add injected H-SYN ids to the result.
+            if self.refinement_compiler is not None:
+                ledger = self.repo.get_hunger_ledger(task_id)
+                for ledger_item in ledger.items:
+                    if (
+                        ledger_item.id.startswith("H-SYN-")
+                        and ledger_item.generated_by is not None
+                        and ledger_item.generated_by.startswith("worker:")
+                        and ledger_item.id not in injected_hunger_item_ids
+                    ):
+                        injected_hunger_item_ids.append(ledger_item.id)
+
         result = HandoffProcessingResult(
             prior_handoff_summary="\n".join([*critical_lines, *summary_lines]).strip(),
             discovered_issues=discovered_issues,
             blocked_item_ids=blocked_item_ids,
             injected_hunger_item_ids=injected_hunger_item_ids,
+            accepted_proposal_count=accepted_proposal_count,
         )
         self.repo.save_handoff_processing_result(task_id, result)
         return result
+
+    async def _process_worker_proposals(
+        self,
+        *,
+        task_id: str,
+        loop_id: int,
+        collected_proposals: list[tuple[CheckProposal, str, str]],
+        remaining_cap: int,
+    ) -> int:
+        """Gate and inject worker proposals through the compiler.
+
+        Returns the accepted proposal count.
+        """
+        if self.check_proposal_gate is None:
+            return 0
+
+        # Build existing dedup keys from the ledger and rejected proposal history.
+        existing_keys = self._collect_existing_keys(task_id)
+
+        # Extract just the proposals for the gate.
+        proposals = [p for p, _, _ in collected_proposals]
+
+        # Await the gate exactly once for the batch.
+        gate_result = await self.check_proposal_gate.filter(
+            proposals,
+            existing_keys=existing_keys,
+        )
+
+        # Emit rejection events for rejected proposals.
+        for rejected in gate_result.rejected:
+            # Find the source agent_id and handoff_id for this proposal.
+            source_agent = "unknown"
+            source_handoff_id = "unknown"
+            for prop, agent_id, handoff_id in collected_proposals:
+                if prop is rejected.proposal:
+                    source_agent = agent_id
+                    source_handoff_id = handoff_id
+                    break
+            self.repo.append_event(
+                EventType.SYNTH_CHECK_REJECTED,
+                {
+                    "source": "worker_proposal",
+                    "agent_id": source_agent,
+                    "source_handoff_id": source_handoff_id,
+                    "dedup_key": rejected.dedup_key,
+                    "reason": rejected.reason,
+                    "check_type": rejected.proposal.check_type.value,
+                },
+                task_id=task_id,
+                loop_id=loop_id,
+            )
+
+        if not gate_result.accepted or self.refinement_compiler is None:
+            return 0
+
+        # Group accepted proposals by agent_id for correct provenance.
+        accepted_by_agent: dict[str, list[CheckProposal]] = {}
+        for accepted_proposal in gate_result.accepted:
+            source_agent = "unknown"
+            for prop, agent_id, _ in collected_proposals:
+                if prop is accepted_proposal:
+                    source_agent = agent_id
+                    break
+            accepted_by_agent.setdefault(source_agent, []).append(accepted_proposal)
+
+        total_accepted = 0
+        for agent_id, agent_proposals in accepted_by_agent.items():
+            if remaining_cap <= 0:
+                break
+            generated_by = f"worker:{agent_id}"
+            injected_ids = self.refinement_compiler.compile_spec_coverage(
+                task_id=task_id,
+                proposals=agent_proposals,
+                generated_by=generated_by,
+                tier=1,
+                max_new_items=remaining_cap,
+            )
+            total_accepted += len(injected_ids)
+            remaining_cap -= len(injected_ids)
+
+        return total_accepted
+
+    def _collect_existing_keys(self, task_id: str) -> set[str]:
+        """Collect dedup keys from existing ledger checks and rejected proposal history."""
+        from hungerloop.services.refinement_compiler import _collect_existing_dedup_keys
+
+        ledger = self.repo.get_hunger_ledger(task_id)
+        keys = _collect_existing_dedup_keys(ledger)
+
+        # Also include rejected proposal dedup keys from event history.
+        rejected_events = self.repo.list_events(
+            task_id,
+            event_types=[EventType.SYNTH_CHECK_REJECTED.value],
+        )
+        for event in rejected_events:
+            payload = event.get("payload", {})
+            if isinstance(payload, dict):
+                dedup_key = payload.get("dedup_key")
+                if isinstance(dedup_key, str):
+                    keys.add(dedup_key)
+
+        return keys
 
     @staticmethod
     def _scope_payload(

@@ -431,9 +431,9 @@ async def test_process_handoffs_runs_before_integration_and_validation(
 
     original_process = orchestrator.handoff_processor.process_handoffs
 
-    def process_spy(*args: object, **kwargs: object) -> HandoffProcessingResult:
+    async def process_spy(*args: object, **kwargs: object) -> HandoffProcessingResult:
         call_order.append("process_handoffs")
-        return original_process(*args, **kwargs)
+        return await original_process(*args, **kwargs)
 
     original_integrate = orchestrator.integrator.integrate
 

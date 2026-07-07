@@ -31,6 +31,9 @@ class HandoffProcessingResult(BaseModel):
     blocked_item_ids: list[str] = Field(default_factory=list)
     injected_hunger_item_ids: list[str] = Field(default_factory=list)
 
+    # v0.7: exact count of worker proposals accepted and injected in this pass.
+    accepted_proposal_count: int = 0
+
     @field_validator("prior_handoff_summary")
     @classmethod
     def _clip_prior_handoff_summary(cls, value: str) -> str:

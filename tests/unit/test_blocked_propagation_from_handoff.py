@@ -49,13 +49,14 @@ def repo(request: pytest.FixtureRequest, tmp_path: Path) -> InMemoryRepository |
         repository.close()
 
 
-def test_handoff_processor_returns_no_stop_reason(
+@pytest.mark.asyncio
+async def test_handoff_processor_returns_no_stop_reason(
     repo: InMemoryRepository | SQLiteRepository,
 ) -> None:
     from hungerloop.services.handoff_processor import HandoffProcessor
 
     processor = HandoffProcessor(repo, requirement_compiler=RequirementCompiler(repo))
-    result = processor.process_handoffs(
+    result = await processor.process_handoffs(
         "task-1",
         2,
         [
@@ -76,13 +77,14 @@ def test_handoff_processor_returns_no_stop_reason(
     assert hasattr(result, "stop_reason") is False
 
 
-def test_blocker_sets_status(
+@pytest.mark.asyncio
+async def test_blocker_sets_status(
     repo: InMemoryRepository | SQLiteRepository,
 ) -> None:
     from hungerloop.services.handoff_processor import HandoffProcessor
 
     processor = HandoffProcessor(repo, requirement_compiler=RequirementCompiler(repo))
-    result = processor.process_handoffs(
+    result = await processor.process_handoffs(
         "task-1",
         2,
         [
@@ -104,13 +106,14 @@ def test_blocker_sets_status(
     assert result.blocked_item_ids == ["H-001"]
 
 
-def test_handoff_blocker_propagates_to_engine_blocked(
+@pytest.mark.asyncio
+async def test_handoff_blocker_propagates_to_engine_blocked(
     repo: InMemoryRepository | SQLiteRepository,
 ) -> None:
     from hungerloop.services.handoff_processor import HandoffProcessor
 
     processor = HandoffProcessor(repo, requirement_compiler=RequirementCompiler(repo))
-    processor.process_handoffs(
+    await processor.process_handoffs(
         "task-1",
         2,
         [
@@ -135,11 +138,12 @@ def test_handoff_blocker_propagates_to_engine_blocked(
     assert snapshot.stop_reason == StopReason.BLOCKED
 
 
-def test_blocked_not_done(repo: InMemoryRepository | SQLiteRepository) -> None:
+@pytest.mark.asyncio
+async def test_blocked_not_done(repo: InMemoryRepository | SQLiteRepository) -> None:
     from hungerloop.services.handoff_processor import HandoffProcessor
 
     processor = HandoffProcessor(repo, requirement_compiler=RequirementCompiler(repo))
-    result = processor.process_handoffs(
+    result = await processor.process_handoffs(
         "task-1",
         2,
         [
@@ -167,7 +171,8 @@ def test_blocked_not_done(repo: InMemoryRepository | SQLiteRepository) -> None:
     assert snapshot.stop_reason is StopReason.BLOCKED
 
 
-def test_handoff_blocker_recorded_event_emitted_per_blocked_item(
+@pytest.mark.asyncio
+async def test_handoff_blocker_recorded_event_emitted_per_blocked_item(
     repo: InMemoryRepository | SQLiteRepository,
 ) -> None:
     from hungerloop.services.handoff_processor import HandoffProcessor
@@ -183,7 +188,7 @@ def test_handoff_blocker_recorded_event_emitted_per_blocked_item(
         ),
     )
     processor = HandoffProcessor(repo, requirement_compiler=RequirementCompiler(repo))
-    processor.process_handoffs(
+    await processor.process_handoffs(
         "task-1",
         2,
         [
@@ -212,7 +217,8 @@ def test_handoff_blocker_recorded_event_emitted_per_blocked_item(
     assert [event["payload"]["item_id"] for event in events] == ["H-001", "H-002"]
 
 
-def test_blocker_on_closed_item_warns_without_reopening(
+@pytest.mark.asyncio
+async def test_blocker_on_closed_item_warns_without_reopening(
     repo: InMemoryRepository | SQLiteRepository,
 ) -> None:
     from hungerloop.services.handoff_processor import HandoffProcessor
@@ -232,7 +238,7 @@ def test_blocker_on_closed_item_warns_without_reopening(
     )
     processor = HandoffProcessor(repo, requirement_compiler=RequirementCompiler(repo))
 
-    processor.process_handoffs(
+    await processor.process_handoffs(
         "task-1",
         2,
         [
