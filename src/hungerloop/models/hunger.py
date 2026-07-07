@@ -24,7 +24,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from hungerloop.models.enums import (
     AcceptanceCheckType,
@@ -159,6 +159,44 @@ class HungerPolicy(BaseModel):
     refinement_profile: str | None = None
     max_refinement_tier: int = 0
     respect_stagnation: bool = True
+
+    # ---- v0.7 feature flags (defaults preserve v0.6 behavior) ----
+    synthesis_enabled: bool = False
+    synthesis_plan_time_tier: int = 0
+    synthesis_max_total_items: int = 20
+    refactor_transactions_enabled: bool = False
+    max_declared_regressions: int = 5
+    refactor_deadline_loops: int = 3
+    memory_auto_promote_enabled: bool = True
+    memory_recall_enabled: bool = True
+
+    @field_validator("synthesis_plan_time_tier")
+    @classmethod
+    def _validate_synthesis_plan_time_tier(cls, v: int) -> int:
+        if v < 0:
+            raise ValueError("synthesis_plan_time_tier must not be negative")
+        return v
+
+    @field_validator("synthesis_max_total_items")
+    @classmethod
+    def _validate_synthesis_max_total_items(cls, v: int) -> int:
+        if v < 0:
+            raise ValueError("synthesis_max_total_items must not be negative")
+        return v
+
+    @field_validator("max_declared_regressions")
+    @classmethod
+    def _validate_max_declared_regressions(cls, v: int) -> int:
+        if v < 0:
+            raise ValueError("max_declared_regressions must not be negative")
+        return v
+
+    @field_validator("refactor_deadline_loops")
+    @classmethod
+    def _validate_refactor_deadline_loops(cls, v: int) -> int:
+        if v < 0:
+            raise ValueError("refactor_deadline_loops must not be negative")
+        return v
 
 
 class HungerClockState(BaseModel):
