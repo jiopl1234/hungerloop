@@ -117,6 +117,16 @@ class HandoffProcessor:
                         discovered_issues.append(fact)
                         injected_hunger_item_ids.extend(injected_ids)
                         discovered_issue_count += 1
+                        # Collect proposals only after fact succeeds,
+                        # avoiding unbound or stale fact references.
+                        if (
+                            fact.kind == "test_gap"
+                            and item.proposed_checks
+                        ):
+                            for proposal in item.proposed_checks:
+                                collected_proposals.append(
+                                    (proposal, handoff.agent_id, source_handoff_id)
+                                )
                     except ValidationError as exc:
                         self.repo.append_event(
                             "DISCOVERED_FACT_REJECTED",
@@ -130,16 +140,6 @@ class HandoffProcessor:
                             loop_id=loop_id,
                         )
                         summary_lines.append(f"Follow-up: {self._handoff_text(item)}")
-
-                    # Collect proposals from test-gap discovered issues only.
-                    if (
-                        fact.kind == "test_gap"
-                        and item.proposed_checks
-                    ):
-                        for proposal in item.proposed_checks:
-                            collected_proposals.append(
-                                (proposal, handoff.agent_id, source_handoff_id)
-                            )
                     continue
 
                 if item.item_type == "follow_up":
@@ -158,23 +158,16 @@ class HandoffProcessor:
         accepted_proposal_count = 0
         if collected_proposals and self.check_proposal_gate is not None:
             remaining_cap = max(0, cap - discovered_issue_count)
-            accepted_proposal_count = await self._process_worker_proposals(
-                task_id=task_id,
-                loop_id=loop_id,
-                collected_proposals=collected_proposals,
-                remaining_cap=remaining_cap,
+            injected_proposal_ids, accepted_proposal_count = (
+                await self._process_worker_proposals(
+                    task_id=task_id,
+                    loop_id=loop_id,
+                    collected_proposals=collected_proposals,
+                    remaining_cap=remaining_cap,
+                )
             )
-            # Add injected H-SYN ids to the result.
-            if self.refinement_compiler is not None:
-                ledger = self.repo.get_hunger_ledger(task_id)
-                for ledger_item in ledger.items:
-                    if (
-                        ledger_item.id.startswith("H-SYN-")
-                        and ledger_item.generated_by is not None
-                        and ledger_item.generated_by.startswith("worker:")
-                        and ledger_item.id not in injected_hunger_item_ids
-                    ):
-                        injected_hunger_item_ids.append(ledger_item.id)
+            # Use the exact ids returned by the compiler, not a ledger scan.
+            injected_hunger_item_ids.extend(injected_proposal_ids)
 
         result = HandoffProcessingResult(
             prior_handoff_summary="\n".join([*critical_lines, *summary_lines]).strip(),
@@ -193,13 +186,22 @@ class HandoffProcessor:
         loop_id: int,
         collected_proposals: list[tuple[CheckProposal, str, str]],
         remaining_cap: int,
-    ) -> int:
+    ) -> tuple[list[str], int]:
         """Gate and inject worker proposals through the compiler.
 
-        Returns the accepted proposal count.
+        Returns a tuple of (injected_ids, accepted_count) where
+        ``injected_ids`` are the exact ids returned by the compiler
+        during this processing pass and ``accepted_count`` is the
+        number of proposals actually injected.
+
+        Cap exhaustion is deterministic: accepted proposals are
+        processed in the order they were collected (preserving handoff
+        and item order).  Proposals that cannot be injected due to
+        cap exhaustion emit ``WORKER_PROPOSAL_CAP_EXHAUSTED`` events
+        with stable, non-secret payloads.
         """
         if self.check_proposal_gate is None:
-            return 0
+            return [], 0
 
         # Build existing dedup keys from the ledger and rejected proposal history.
         existing_keys = self._collect_existing_keys(task_id)
@@ -238,34 +240,86 @@ class HandoffProcessor:
             )
 
         if not gate_result.accepted or self.refinement_compiler is None:
-            return 0
+            return [], 0
 
-        # Group accepted proposals by agent_id for correct provenance.
+        # Build a lookup from proposal identity to (agent_id, source_handoff_id)
+        # so we can group accepted proposals by agent while preserving
+        # collection order for deterministic cap consumption.
+        all_injected_ids: list[str] = []
+        total_accepted = 0
+        cap_remaining = remaining_cap
+
+        # Group accepted proposals by agent_id, preserving collection order.
+        # This ensures deterministic cap consumption: earlier-collected
+        # proposals are injected first.
         accepted_by_agent: dict[str, list[CheckProposal]] = {}
+        agent_order: list[str] = []
         for accepted_proposal in gate_result.accepted:
             source_agent = "unknown"
             for prop, agent_id, _ in collected_proposals:
                 if prop is accepted_proposal:
                     source_agent = agent_id
                     break
-            accepted_by_agent.setdefault(source_agent, []).append(accepted_proposal)
+            if source_agent not in accepted_by_agent:
+                accepted_by_agent[source_agent] = []
+                agent_order.append(source_agent)
+            accepted_by_agent[source_agent].append(accepted_proposal)
 
-        total_accepted = 0
-        for agent_id, agent_proposals in accepted_by_agent.items():
-            if remaining_cap <= 0:
-                break
+        for agent_id in agent_order:
+            agent_proposals = accepted_by_agent[agent_id]
+            if cap_remaining <= 0:
+                # Cap exhausted: emit stable cap-rejection events for
+                # the remaining accepted proposals from this agent.
+                for proposal in agent_proposals:
+                    source_handoff_id = "unknown"
+                    for prop, a_id, h_id in collected_proposals:
+                        if prop is proposal:
+                            source_handoff_id = h_id
+                            break
+                    self.repo.append_event(
+                        "WORKER_PROPOSAL_CAP_EXHAUSTED",
+                        {
+                            "source": "worker_proposal",
+                            "agent_id": agent_id,
+                            "source_handoff_id": source_handoff_id,
+                            "dedup_key": proposal.dedup_key(),
+                            "check_type": proposal.check_type.value,
+                        },
+                        task_id=task_id,
+                        loop_id=loop_id,
+                    )
+                continue
+
             generated_by = f"worker:{agent_id}"
             injected_ids = self.refinement_compiler.compile_spec_coverage(
                 task_id=task_id,
                 proposals=agent_proposals,
                 generated_by=generated_by,
                 tier=1,
-                max_new_items=remaining_cap,
+                max_new_items=cap_remaining,
             )
+            all_injected_ids.extend(injected_ids)
             total_accepted += len(injected_ids)
-            remaining_cap -= len(injected_ids)
+            cap_remaining -= len(injected_ids)
 
-        return total_accepted
+            # If the compiler injected fewer items than submitted
+            # (e.g. some were duplicates at the compiler level or cap
+            # was hit), emit a stable cap-exhaustion event noting the
+            # count of uninjected proposals.
+            uninjected_count = len(agent_proposals) - len(injected_ids)
+            if uninjected_count > 0:
+                self.repo.append_event(
+                    "WORKER_PROPOSAL_CAP_EXHAUSTED",
+                    {
+                        "source": "worker_proposal",
+                        "agent_id": agent_id,
+                        "uninjected_count": uninjected_count,
+                    },
+                    task_id=task_id,
+                    loop_id=loop_id,
+                )
+
+        return all_injected_ids, total_accepted
 
     def _collect_existing_keys(self, task_id: str) -> set[str]:
         """Collect dedup keys from existing ledger checks and rejected proposal history."""

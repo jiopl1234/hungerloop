@@ -513,15 +513,18 @@ def _build_spec_check_synthesizer(
     if completion_client is None:
         return None
 
-    from hungerloop.services.check_proposal_gate import CheckProposalGate
+    from hungerloop.services.check_proposal_gate import CheckProposalGate, SandboxDryRunner
     from hungerloop.services.cost_guard import CostGuard
+    from hungerloop.services.sandbox_runner import SandboxRunner
     from hungerloop.services.spec_check_synthesizer import SpecCheckSynthesizer
 
     return SpecCheckSynthesizer(
         repo=repo,
         cost_guard=CostGuard(repo),
         completion_client=completion_client,
-        gate=CheckProposalGate(),
+        gate=CheckProposalGate(
+            dry_runner=SandboxDryRunner(SandboxRunner(repo)),
+        ),
         model_name="glm-5.2",
     )
 

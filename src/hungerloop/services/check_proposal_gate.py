@@ -14,12 +14,15 @@ The gate is deterministic and never calls LLMs.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 from pydantic import BaseModel, ConfigDict, Field
 
 from hungerloop.models.enums import AcceptanceCheckType
 from hungerloop.models.synthesis import CheckProposal, _normalize_executable
+
+if TYPE_CHECKING:
+    from hungerloop.services.sandbox_runner import SandboxRunner
 
 # Default allowlist of executable names (already normalized).
 DEFAULT_ALLOWLIST: list[str] = ["python"]
@@ -46,6 +49,47 @@ class DryRunner(Protocol):
     async def dry_run(self, argv: list[str], cwd: Path | None = None) -> bool:
         """Run *argv* once and return whether exit code is 0."""
         ...
+
+
+class SandboxDryRunner(DryRunner):
+    """Production ``DryRunner`` that wraps :class:`SandboxRunner`.
+
+    The adapter calls ``SandboxRunner.run_argv`` with a minimal timeout
+    and output cap, a fixed task/loop pair for evidence tagging, and the
+    sandbox boundary required by invariant I-7.  It returns ``True``
+    when the process exits zero and ``False`` for any non-zero exit,
+    timeout, or execution error.
+
+    The fixed task/loop identifiers are ``__dry_run__`` / ``0`` so that
+    dry-run evidence is distinguishable from real validation evidence.
+    """
+
+    def __init__(
+        self,
+        sandbox: SandboxRunner,
+        *,
+        timeout: int = 30,
+        cwd: Path | None = None,
+    ) -> None:
+        self._sandbox = sandbox
+        self._timeout = timeout
+        self._cwd = cwd or Path.cwd()
+
+    async def dry_run(self, argv: list[str], cwd: Path | None = None) -> bool:
+        """Run *argv* once and return ``True`` iff exit code is 0."""
+        run_cwd = cwd if cwd is not None else self._cwd
+        try:
+            result = await self._sandbox.run_argv(
+                task_id="__dry_run__",
+                loop_id=0,
+                argv=list(argv),
+                cwd=run_cwd,
+                timeout=self._timeout,
+                evidence_label="check_proposal_dry_run",
+            )
+            return result.exit_code == 0
+        except (ValueError, FileNotFoundError, PermissionError, OSError):
+            return False
 
 
 class RejectedProposal(BaseModel):

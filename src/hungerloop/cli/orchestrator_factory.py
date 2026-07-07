@@ -18,7 +18,7 @@ from hungerloop.services.acceptance_runner import AcceptanceCheckRunner
 from hungerloop.services.agent_registry import AgentSpecRegistry
 from hungerloop.services.budget_allocator import BudgetAllocator
 from hungerloop.services.budget_guard import BudgetGuard
-from hungerloop.services.check_proposal_gate import CheckProposalGate
+from hungerloop.services.check_proposal_gate import CheckProposalGate, SandboxDryRunner
 from hungerloop.services.commit_manager import CommitManager
 from hungerloop.services.context_builder import ContextBuilder
 from hungerloop.services.cost_guard import CostGuard
@@ -76,7 +76,9 @@ def build_orchestrator(
     )
     handoff_processor = HandoffProcessor(
         repo,
-        check_proposal_gate=CheckProposalGate(),
+        check_proposal_gate=CheckProposalGate(
+            dry_runner=SandboxDryRunner(sandbox),
+        ),
         refinement_compiler=RefinementCompiler(repo),
     )
     validation_gate = ValidationGate(

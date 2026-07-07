@@ -799,13 +799,16 @@ def _maybe_run_plan_time_synthesis(
     if client is None:
         return
 
-    from hungerloop.services.check_proposal_gate import CheckProposalGate
+    from hungerloop.services.check_proposal_gate import CheckProposalGate, SandboxDryRunner
     from hungerloop.services.cost_guard import CostGuard
     from hungerloop.services.refinement_compiler import RefinementCompiler
+    from hungerloop.services.sandbox_runner import SandboxRunner
     from hungerloop.services.spec_check_synthesizer import run_plan_time_synthesis
 
     cost_guard = CostGuard(ctx.repo)
-    gate = CheckProposalGate()
+    gate = CheckProposalGate(
+        dry_runner=SandboxDryRunner(SandboxRunner(ctx.repo)),
+    )
     compiler = RefinementCompiler(ctx.repo)
 
     try:
