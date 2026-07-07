@@ -795,7 +795,7 @@ def _maybe_run_plan_time_synthesis(
         feature_descriptions.append(f"{feature.feature_id}: {desc}")
 
     # Build the completion client from env credentials
-    client = _build_synthesis_completion_client(ctx)
+    client = _build_synthesis_completion_client(ctx, model_name="glm-5.2")
     if client is None:
         return
 
@@ -845,11 +845,17 @@ def _maybe_run_plan_time_synthesis(
 
 def _build_synthesis_completion_client(
     ctx: CliContext,
+    *,
+    model_name: str = "glm-5.2",
 ) -> Any | None:
     """Build a real completion client from ``.env`` credentials.
 
     Returns ``None`` if credentials are not available. Never prints
     secret values.
+
+    The ``model_name`` parameter controls which model is requested; it
+    defaults to ``glm-5.2`` (the mission smoke model) but callers should
+    pass the configured model name rather than relying on the default.
     """
     api_key = os.environ.get("HUNGERLOOP_API_KEY")
     base_url = os.environ.get("HUNGERLOOP_BASE_URL")
@@ -862,9 +868,10 @@ def _build_synthesis_completion_client(
     class _RealCompletionClient:
         """Real completion client using httpx against an OpenAI-compatible API."""
 
-        def __init__(self, api_key: str, base_url: str) -> None:
+        def __init__(self, api_key: str, base_url: str, model_name: str) -> None:
             self._api_key = api_key
             self._base_url = base_url
+            self._model_name = model_name
 
         async def complete(
             self,
@@ -882,7 +889,7 @@ def _build_synthesis_completion_client(
                         "Content-Type": "application/json",
                     },
                     json={
-                        "model": "glm-5.2",
+                        "model": self._model_name,
                         "messages": messages,
                         "max_tokens": max_tokens,
                     },
@@ -891,14 +898,19 @@ def _build_synthesis_completion_client(
                 data = response.json()
                 content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
                 usage_raw = data.get("usage", {})
+                # Record usage/cost when available from the response;
+                # otherwise record deterministic non-secret fallback
+                # metadata (zeros) so downstream accounting stays stable.
+                prompt_tokens = usage_raw.get("prompt_tokens", 0) if usage_raw else 0
+                completion_tokens = usage_raw.get("completion_tokens", 0) if usage_raw else 0
                 usage = ModelUsage(
-                    input_tokens=usage_raw.get("prompt_tokens", 0),
-                    output_tokens=usage_raw.get("completion_tokens", 0),
+                    input_tokens=prompt_tokens,
+                    output_tokens=completion_tokens,
                     cost_usd=0.0,
                 )
                 return ModelResponse(content=content, usage=usage)
 
-    return _RealCompletionClient(api_key, base_url)
+    return _RealCompletionClient(api_key, base_url, model_name)
 
 
 def _create_legacy_task(

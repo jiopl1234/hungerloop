@@ -14,8 +14,10 @@ from hungerloop.cli.orchestrator_factory import build_orchestrator
 from hungerloop.cli.preflight import PreflightError, check_resume_preflight
 from hungerloop.models.enums import CompletionMode, DecayType
 from hungerloop.models.events import EventType
+from hungerloop.repository.protocol import RepositoryProtocol
 from hungerloop.services.budget_allocator import BudgetAllocator
 from hungerloop.services.cost_guard import CostGuard
+from hungerloop.services.loop_orchestrator import _SpecSynthesizerProtocol
 from hungerloop.services.model_client import DummyModelClient, ModelAuthError, ModelClient
 from hungerloop.services.model_config import (
     ModelConfigLoader,
@@ -291,12 +293,16 @@ def run(
     # outcome ∈ {acquired, reentrant, stolen} — proceed.
 
     try:
+        spec_synthesizer = _build_spec_check_synthesizer(
+            repo=ctx.repo, task_id=task_id
+        )
         orchestrator = build_orchestrator(
             repo=ctx.repo,
             workspace_root=ctx.workspace_root,
             model_client=model_client,
             budget_allocator=budget_allocator,
             max_loops_safety_cap=max_loops,
+            spec_check_synthesizer=spec_synthesizer,
         )
         orchestrator.workspace_manager.ensure_task_workspace(task_id)
 
@@ -460,6 +466,64 @@ def _validate_budgeted_refinement_flags(
         raise click.UsageError("--max-refinement-tier must be >= 0.")
     if budget_loops is not None and max_loops < budget_loops:
         raise click.UsageError("--max-loops must be >= --budget-loops.")
+
+
+def _build_spec_check_synthesizer(
+    *,
+    repo: RepositoryProtocol,
+    task_id: str,
+) -> _SpecSynthesizerProtocol | None:
+    """Build a :class:`SpecCheckSynthesizer` for the production run path.
+
+    When ``synthesis_enabled`` is ``False`` (the default), returns
+    ``None`` without constructing a model client, reading credentials,
+    or performing any synthesis mutation.
+
+    When ``synthesis_enabled`` is ``True``, constructs a real completion
+    client from ``.env`` credentials, builds the synthesizer with the
+    configured ``model_name``, and returns it so
+    :func:`build_orchestrator` can wire it into the orchestrator for
+    post-commit synthesis.
+    """
+    from hungerloop.models.hunger import HungerPolicy
+
+    policy = repo.get_hunger_policy(task_id)
+    if not isinstance(policy, HungerPolicy):
+        return None
+    if not policy.synthesis_enabled:
+        return None
+    if policy.synthesis_max_total_items <= 0:
+        return None
+
+    # Build the completion client from env credentials.
+    # _build_synthesis_completion_client expects a CliContext but only
+    # accesses .repo; we pass a minimal stub since we already have repo.
+    api_key = os.environ.get("HUNGERLOOP_API_KEY")
+    base_url = os.environ.get("HUNGERLOOP_BASE_URL")
+    if not api_key or not base_url:
+        return None
+
+    from hungerloop.cli.mission_cmd import _build_synthesis_completion_client
+
+    ctx_stub = type("_CtxStub", (), {"repo": repo})()
+    completion_client = _build_synthesis_completion_client(
+        ctx_stub,
+        model_name="glm-5.2",
+    )
+    if completion_client is None:
+        return None
+
+    from hungerloop.services.check_proposal_gate import CheckProposalGate
+    from hungerloop.services.cost_guard import CostGuard
+    from hungerloop.services.spec_check_synthesizer import SpecCheckSynthesizer
+
+    return SpecCheckSynthesizer(
+        repo=repo,
+        cost_guard=CostGuard(repo),
+        completion_client=completion_client,
+        gate=CheckProposalGate(),
+        model_name="glm-5.2",
+    )
 
 
 def _resolve_model_client(

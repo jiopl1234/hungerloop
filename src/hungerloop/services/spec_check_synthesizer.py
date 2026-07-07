@@ -410,6 +410,13 @@ class SpecCheckSynthesizer:
         except (ModelCallError, SafetyStopError):
             raise
         except Exception as exc:
+            # CostGuard AFTER the call (I-8) — must run even on exception
+            # paths where a request was attempted, so that cost ceilings
+            # are enforced consistently.
+            try:
+                self.cost_guard.assert_within_budget(task_id)
+            except SafetyStopError:
+                raise
             # Fail closed: no accepted proposals, emit rejection event
             self._emit_rejection(
                 task_id=task_id,

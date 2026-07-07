@@ -25,8 +25,7 @@ from hungerloop.models.hunger import (
 )
 from hungerloop.models.synthesis import (
     CheckProposal,
-    _normalize_executable,
-    _normalize_path,
+    compute_dedup_key,
 )
 from hungerloop.repository.protocol import RepositoryProtocol
 
@@ -307,27 +306,18 @@ def _check_dedup_key(check: AcceptanceCheck) -> str | None:
 
     Returns ``None`` for check types that are not eligible for proposal
     deduplication (i.e. types that ``CheckProposal`` would never produce).
-    The key format matches :meth:`CheckProposal.dedup_key`.
+    The key format matches :meth:`CheckProposal.dedup_key` via the shared
+    :func:`hungerloop.models.synthesis.compute_dedup_key` function.
     """
-    if check.check_type == AcceptanceCheckType.SHELL_EXIT_ZERO:
-        argv = check.params.get("argv")
-        if not isinstance(argv, list) or len(argv) == 0:
-            return None
-        normalized: list[str] = []
-        for i, elem in enumerate(argv):
-            if not isinstance(elem, str) or not elem.strip():
-                return None
-            if i == 0:
-                normalized.append(_normalize_executable(elem))
-            else:
-                normalized.append(elem.strip())
-        return f"shell_exit_zero:|{'|'.join(normalized)}"
-    elif check.check_type == AcceptanceCheckType.FILE_EXISTS:
-        path = check.params.get("path")
-        if not isinstance(path, str):
-            return None
-        return f"file_exists:{_normalize_path(path)}"
-    return None
+    if check.check_type not in (
+        AcceptanceCheckType.SHELL_EXIT_ZERO,
+        AcceptanceCheckType.FILE_EXISTS,
+    ):
+        return None
+    return compute_dedup_key(
+        check_type=check.check_type,
+        params=check.params,
+    )
 
 
 def _collect_existing_dedup_keys(ledger: HungerLedger) -> set[str]:

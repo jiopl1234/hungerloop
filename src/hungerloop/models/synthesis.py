@@ -162,23 +162,52 @@ class CheckProposal(BaseModel):
         Semantic argument values remain case-sensitive:
         ``-q`` and ``-Q`` produce different keys.
         """
-        if self.check_type == AcceptanceCheckType.SHELL_EXIT_ZERO:
-            argv = self.params.get("argv", [])
-            if not isinstance(argv, list) or len(argv) == 0:
+        return compute_dedup_key(
+            check_type=self.check_type,
+            params=self.params,
+        )
+
+
+def compute_dedup_key(
+    *,
+    check_type: AcceptanceCheckType,
+    params: dict[str, Any],
+) -> str:
+    """Compute a stable, behavior-based deduplication key.
+
+    This is the **single source of truth** for dedup key construction,
+    shared by :meth:`CheckProposal.dedup_key` and the compiler's
+    :func:`refinement_compiler._check_dedup_key`.  Both call sites must
+    route through this function to avoid normalization divergence.
+
+    Equivalent proposals that differ only by:
+    - Platform-normalized executable (python3 -> python, python.exe -> python)
+    - Argv whitespace (leading/trailing spaces stripped)
+    - Path normalization (backslashes, ./, double slashes)
+    - Description text
+
+    produce the same key.
+
+    Semantic argument values remain case-sensitive:
+    ``-q`` and ``-Q`` produce different keys.
+    """
+    if check_type == AcceptanceCheckType.SHELL_EXIT_ZERO:
+        argv = params.get("argv", [])
+        if not isinstance(argv, list) or len(argv) == 0:
+            return "shell_exit_zero:invalid_argv"
+        normalized: list[str] = []
+        for i, elem in enumerate(argv):
+            if not isinstance(elem, str) or not elem.strip():
                 return "shell_exit_zero:invalid_argv"
-            normalized: list[str] = []
-            for i, elem in enumerate(argv):
-                if not isinstance(elem, str) or not elem.strip():
-                    return "shell_exit_zero:invalid_argv"
-                if i == 0:
-                    normalized.append(_normalize_executable(elem))
-                else:
-                    normalized.append(elem.strip())
-            return f"shell_exit_zero:|{'|'.join(normalized)}"
-        elif self.check_type == AcceptanceCheckType.FILE_EXISTS:
-            path = self.params.get("path", "")
-            if not isinstance(path, str):
-                return "file_exists:invalid_path"
-            return f"file_exists:{_normalize_path(path)}"
-        # Should never reach here due to model validation, but satisfy mypy
-        return f"{self.check_type.value}:{self.params!r}"
+            if i == 0:
+                normalized.append(_normalize_executable(elem))
+            else:
+                normalized.append(elem.strip())
+        return f"shell_exit_zero:|{'|'.join(normalized)}"
+    elif check_type == AcceptanceCheckType.FILE_EXISTS:
+        path = params.get("path", "")
+        if not isinstance(path, str):
+            return "file_exists:invalid_path"
+        return f"file_exists:{_normalize_path(path)}"
+    # Should never reach here due to model validation, but satisfy mypy
+    return f"{check_type.value}:{params!r}"
