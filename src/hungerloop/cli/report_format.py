@@ -99,6 +99,10 @@ def build_report_dict(
         "accepted_check_keys": list(best.accepted_check_keys) if best else [],
         "last_loop": last_loop_block,
     }
+    # v0.7: expose persisted discovery credit summary (VAL-DISC-014).
+    stop_report = repo.get_last_stop_report(task_id)
+    if stop_report is not None and stop_report.discovery_credits:
+        report["discovery_credits"] = dict(stop_report.discovery_credits)
     mission = repo.get_mission(task_id)
     if mission is not None:
         cockpit = build_mission_cockpit(repo, mission)
@@ -189,6 +193,13 @@ def format_markdown(report: dict[str, Any]) -> str:
         lines.append("## Accepted check keys")
         for key in accepted:
             lines.append(f"- `{key}`")
+        lines.append("")
+
+    discovery_credits = report.get("discovery_credits")
+    if discovery_credits:
+        lines.append("## Discovery credits")
+        for proposer, count in discovery_credits.items():
+            lines.append(f"- {proposer}: {count}")
         lines.append("")
 
     mission_cockpit_text = report.get("mission_cockpit_text")

@@ -156,3 +156,6 @@ class EventType(str, Enum):
     SYNTH_CHECK_REJECTED = "synth_check_rejected"
     SYNTHESIS_ATTEMPTED = "synthesis_attempted"
     SYNTHESIS_SKIPPED = "synthesis_skipped"
+
+    # ----- Discovery credit (v0.7) --------------------------------------
+    DISCOVERY_CREDIT = "discovery_credit"

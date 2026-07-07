@@ -179,3 +179,7 @@ class StopReport(BaseModel):
 
     recommendation: str = ""
     summary: str = ""
+
+    # v0.7: proposer-to-count discovery credit summary aggregated from
+    # DISCOVERY_CREDIT events at stop report build time.
+    discovery_credits: dict[str, int] = Field(default_factory=dict)

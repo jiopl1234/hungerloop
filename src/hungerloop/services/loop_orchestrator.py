@@ -424,13 +424,17 @@ class LoopOrchestrator:
             worker_handoffs=scheduler_result.handoffs,
             mission=mission,
         )
-        await self.handoff_processor.process_handoffs(
+        handoff_result = await self.handoff_processor.process_handoffs(
             task_id,
             loop_id,
             worker_handoffs,
             mission=mission,
             budget=budget,
         )
+        # v0.7: reset no-progress streak once per loop when accepted worker
+        # proposals were injected (VAL-DISC-011 / VAL-DISC-012).
+        if handoff_result.accepted_proposal_count > 0:
+            self.repo.reset_no_progress_streak(task_id)
         self.repo.append_event(
             EventType.WORKER_HANDOFF_RECEIVED,
             self._handoff_received_payload(

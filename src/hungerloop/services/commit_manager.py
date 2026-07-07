@@ -94,6 +94,14 @@ class CommitManager:
                 workspace_ref="best",
             )
 
+            # Capture already-accepted keys before this commit so we can
+            # avoid emitting duplicate DISCOVERY_CREDIT events for replayed
+            # or re-mentioned keys (VAL-DISC-008).
+            pre_accepted = {
+                str(row["check_key"])
+                for row in self.repo.iter_accepted_checks(candidate.task_id)
+            }
+
             regeneration_error: Exception | None = None
             try:
                 with self.repo.transaction():
@@ -117,6 +125,16 @@ class CommitManager:
                             validation_id=report.id,
                             evidence_id=evidence_by_key.get(check_key),
                         )
+                    # v0.7: emit DISCOVERY_CREDIT for worker-generated checks
+                    # that newly pass.  Credit is transactionally tied to the
+                    # successful commit so rollback/late-failure paths emit
+                    # nothing (VAL-DISC-008 / VAL-DISC-009).
+                    self._emit_discovery_credits(
+                        task_id=candidate.task_id,
+                        loop_id=candidate.loop_id,
+                        newly_passed=report.newly_passed_check_keys,
+                        pre_accepted=pre_accepted,
+                    )
                     for feature_id in dict.fromkeys(completed_feature_ids or []):
                         self.repo.update_feature_status(feature_id, "done")
                     if self.repo.get_mission(candidate.task_id) is not None:
@@ -215,3 +233,51 @@ class CommitManager:
         if report.missing_evidence:
             return "missing_evidence"
         return "unknown"
+
+    def _emit_discovery_credits(
+        self,
+        *,
+        task_id: str,
+        loop_id: int,
+        newly_passed: list[str],
+        pre_accepted: set[str],
+    ) -> None:
+        """Emit DISCOVERY_CREDIT events for worker-generated checks.
+
+        For each unique first-time newly-passed check key owned by a hunger
+        item with ``generated_by`` starting ``worker:``, emit exactly one
+        ``DISCOVERY_CREDIT`` event.  Keys already accepted before this
+        commit (replays) and non-worker items are silently skipped.
+
+        This method is called inside the commit transaction so credit
+        events are atomically tied to the successful commit (VAL-DISC-008,
+        VAL-DISC-009).
+        """
+        ledger = self.repo.get_hunger_ledger(task_id)
+        items_by_id: dict[str, object] = {item.id: item for item in ledger.items}
+        seen: set[str] = set()
+        for check_key in newly_passed:
+            if check_key in seen:
+                continue
+            seen.add(check_key)
+            # Skip keys that were already accepted before this commit.
+            if check_key in pre_accepted:
+                continue
+            item_id = check_key.split(":", 1)[0]
+            item = items_by_id.get(item_id)
+            if item is None:
+                continue
+            generated_by = getattr(item, "generated_by", None)
+            if not isinstance(generated_by, str) or not generated_by.startswith("worker:"):
+                continue
+            proposer = generated_by[len("worker:"):]
+            self.repo.append_event(
+                EventType.DISCOVERY_CREDIT,
+                {
+                    "proposer": proposer,
+                    "check_key": check_key,
+                    "loop_id": loop_id,
+                },
+                task_id=task_id,
+                loop_id=loop_id,
+            )

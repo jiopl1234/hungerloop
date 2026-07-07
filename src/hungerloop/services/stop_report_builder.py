@@ -21,6 +21,7 @@ code calls :func:`build_stop_report` and never constructs a
 from __future__ import annotations
 
 from hungerloop.models.enums import StopReason
+from hungerloop.models.events import EventType
 from hungerloop.models.tracing import GoalStatus, StopReport
 from hungerloop.repository.protocol import RepositoryProtocol
 
@@ -81,6 +82,10 @@ def build_stop_report(
     clock = repo.get_hunger_clock(task_id)
     usage = repo.get_usage_snapshot(task_id)
 
+    # v0.7: aggregate DISCOVERY_CREDIT events into a proposer-to-count
+    # mapping (VAL-DISC-013).
+    discovery_credits = _aggregate_discovery_credits(repo, task_id)
+
     return StopReport(
         task_id=task_id,
         stop_reason=stop_reason,
@@ -99,4 +104,23 @@ def build_stop_report(
         blocked_hunger_items=blocked,
         recommendation=recommendation,
         summary=summary,
+        discovery_credits=discovery_credits,
     )
+
+
+def _aggregate_discovery_credits(
+    repo: RepositoryProtocol, task_id: str
+) -> dict[str, int]:
+    """Aggregate DISCOVERY_CREDIT events into a proposer-to-count mapping."""
+    events = repo.list_events(
+        task_id, event_types=[EventType.DISCOVERY_CREDIT.value]
+    )
+    credits: dict[str, int] = {}
+    for event in events:
+        payload = event.get("payload", {})
+        if not isinstance(payload, dict):
+            continue
+        proposer = payload.get("proposer")
+        if isinstance(proposer, str):
+            credits[proposer] = credits.get(proposer, 0) + 1
+    return credits
