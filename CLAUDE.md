@@ -41,13 +41,14 @@ src/hungerloop/
 tests/unit/     # v0.6 baseline: ≥761 unit tests
 tests/integration/ # v0.6 baseline: ≥19 integration tests collected
 docs/architecture/v0.6/adr/ # ADR-007/008/009 accepted decisions
+docs/architecture/v0.7/adr/ # ADR-010 refactor transactions
 ```
 
 ## Invariants — DO NOT VIOLATE
 
 These are encoded in code and tests. Breaking one is a regression, not a refactor.
 
-- **I-3 Check-level commits.** Promotion to `best/` requires `newly_passed_check_keys` ≠ ∅, no regressions, evidence present. Score-based commits are forbidden — `BestState.score` exists for schema only and stays at 0.0.
+- **I-3 Check-level commits.** Promotion to `best/` requires `newly_passed_check_keys` ≠ ∅, no regressions, evidence present. Score-based commits are forbidden — `BestState.score` exists for schema only and stays at 0.0. **ADR-010 exception:** when a matching open refactor transaction is active (policy-gated, `refactor_transactions_enabled=True`), `CommitManager` tolerates regressions only for check keys declared in the transaction `declared_regression_keys`, bounded by a deadline and rolled back on failure. See `docs/architecture/v0.7/adr/ADR-010-refactor-transactions.md`. Closed, rolled-back, wrong-task, or stale transactions do not relax I-3. This is the only approved I-3 amendment.
 - **I-4 Workspace isolation.** Workers/agents read `best/`, write to `candidates/loop_NNN/`. Only `CommitManager` promotes. Never modify `best/` directly.
 - **I-5 Targeted validation.** `ValidationGate` runs target items + previously-passed checks (regression detection). Untested checks stay passed; never re-run all checks blindly.
 - **I-6 Stagnation: attempted-only.** `StagnationDetector` only counts items in `attempted_hunger_item_ids`.

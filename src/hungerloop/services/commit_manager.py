@@ -1,4 +1,4 @@
-"""Commit decision logic for HungerLoop v0.4.1.
+"""Commit decision logic for HungerLoop v0.4.1+.
 
 :class:`CommitManager` enforces invariant I-3: candidates are promoted to
 ``best/`` only when they demonstrate check-level progress (``newly_passed_check_keys``
@@ -6,6 +6,13 @@ non-empty) with no regressions. Score-based commits are explicitly rejected.
 
 The manager delegates workspace promotion/rejection to :class:`WorkspaceManager`
 and persists state transitions via the repository protocol (Task 14).
+
+v0.7 (ADR-010): When a matching open refactor transaction is supplied,
+``CommitManager`` tolerates regressions only for check keys declared in
+the transaction's ``declared_regression_keys``. All other regressions
+still reject the candidate. When no transaction is supplied, or the
+transaction is closed, rolled-back, or for a different task, strict I-3
+behavior is preserved exactly as in v0.6.
 """
 
 from __future__ import annotations
@@ -16,6 +23,7 @@ from typing import Protocol, TypedDict
 from hungerloop.models.blackboard import BestState, CandidateState
 from hungerloop.models.enums import ValidationVerdict
 from hungerloop.models.events import EventType
+from hungerloop.models.refactor import RefactorTransaction, RefactorTransactionStatus
 from hungerloop.models.validation import ValidationReport
 from hungerloop.repository.protocol import RepositoryProtocol
 from hungerloop.services.mission_state_updater import MissionStateUpdater
@@ -61,6 +69,7 @@ class CommitManager:
         validation: ValidationReport | ValidationPipelineResult,
         *,
         completed_feature_ids: list[str] | None = None,
+        open_transaction: RefactorTransaction | None = None,
     ) -> CommitDecision:
         """Apply validation: promote if I-3 conditions hold, else reject.
 
@@ -69,6 +78,12 @@ class CommitManager:
             validation: Either the legacy deterministic validation report or the
                 v0.6 validation pipeline result. Pipeline commits are still gated
                 only by the deterministic report to preserve I-3.
+            completed_feature_ids: Optional list of feature IDs to mark done.
+            open_transaction: Optional refactor transaction. When the
+                transaction is ``open`` and its ``task_id`` matches the
+                candidate's task, declared regression keys are tolerated
+                (ADR-010). Closed, rolled-back, wrong-task, or ``None``
+                transactions preserve strict I-3 behavior.
 
         Returns:
             A decision with ``committed: bool`` and ``reason: str``.
@@ -80,7 +95,7 @@ class CommitManager:
             regeneration rolls back SQLite commit state.
         """
         report = self._deterministic_report(validation)
-        if self._can_commit(report):
+        if self._can_commit(report, candidate, open_transaction):
             best = BestState(
                 task_id=candidate.task_id,
                 state_id=candidate.id,
@@ -190,7 +205,7 @@ class CommitManager:
 
         return {
             "committed": False,
-            "reason": self._reject_reason(report),
+            "reason": self._reject_reason(report, candidate, open_transaction),
             "verdict": report.verdict,
         }
 
@@ -210,26 +225,79 @@ class CommitManager:
             for r in report.check_results
         }
 
-    def _can_commit(self, report: ValidationReport) -> bool:
-        """Check if a report satisfies I-3 commit conditions."""
+    @staticmethod
+    def _is_active_matching_transaction(
+        txn: RefactorTransaction | None,
+        task_id: str,
+    ) -> bool:
+        """Check if a transaction is open and matches the given task.
+
+        Only ``open`` transactions with a matching ``task_id`` provide
+        tolerance. Closed, rolled-back, wrong-task, or ``None`` transactions
+        do not relax I-3 (VAL-REF-008).
+        """
+        if txn is None:
+            return False
+        if txn.status != RefactorTransactionStatus.OPEN:
+            return False
+        if txn.task_id != task_id:
+            return False
+        return True
+
+    def _can_commit(
+        self,
+        report: ValidationReport,
+        candidate: CandidateState,
+        open_transaction: RefactorTransaction | None = None,
+    ) -> bool:
+        """Check if a report satisfies I-3 commit conditions.
+
+        When an active matching transaction is supplied, regressions
+        declared in the transaction's ``declared_regression_keys`` are
+        tolerated (ADR-010). All other conditions remain strict.
+        """
         if report.verdict not in {ValidationVerdict.PASS, ValidationVerdict.PARTIAL}:
             return False
         if not report.newly_passed_check_keys:
             return False
-        if report.regressed_check_keys:
-            return False
         if report.missing_evidence:
             return False
+        if report.regressed_check_keys:
+            if not self._is_active_matching_transaction(
+                open_transaction, candidate.task_id
+            ):
+                return False
+            declared = set(open_transaction.declared_regression_keys)  # type: ignore[union-attr]
+            undeclared = set(report.regressed_check_keys) - declared
+            if undeclared:
+                return False
         return True
 
-    def _reject_reason(self, report: ValidationReport) -> str:
-        """Determine the rejection reason from a report."""
+    def _reject_reason(
+        self,
+        report: ValidationReport,
+        candidate: CandidateState,
+        open_transaction: RefactorTransaction | None = None,
+    ) -> str:
+        """Determine the rejection reason from a report.
+
+        When a matching open transaction tolerates all declared regressions,
+        the reason skips ``regressed_checks_detected`` and falls through to
+        the next applicable reason.
+        """
         if report.verdict == ValidationVerdict.FAIL:
             return "verdict_fail"
         if not report.newly_passed_check_keys:
             return "no_new_check_progress"
         if report.regressed_check_keys:
-            return "regressed_checks_detected"
+            if not self._is_active_matching_transaction(
+                open_transaction, candidate.task_id
+            ):
+                return "regressed_checks_detected"
+            declared = set(open_transaction.declared_regression_keys)  # type: ignore[union-attr]
+            undeclared = set(report.regressed_check_keys) - declared
+            if undeclared:
+                return "regressed_checks_detected"
         if report.missing_evidence:
             return "missing_evidence"
         return "unknown"
