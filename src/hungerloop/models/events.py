@@ -159,3 +159,10 @@ class EventType(str, Enum):
 
     # ----- Discovery credit (v0.7) --------------------------------------
     DISCOVERY_CREDIT = "discovery_credit"
+
+    # ----- Refactor transactions (v0.7) ---------------------------------
+    REFACTOR_TXN_OPENED = "refactor_txn_opened"
+    REFACTOR_TXN_OPEN_REJECTED = "refactor_txn_open_rejected"
+    REFACTOR_TXN_CLOSED_SUCCESS = "refactor_txn_closed_success"
+    REFACTOR_TXN_ROLLED_BACK = "refactor_txn_rolled_back"
+    REFACTOR_TXN_SETTLE_FAILED = "refactor_txn_settle_failed"

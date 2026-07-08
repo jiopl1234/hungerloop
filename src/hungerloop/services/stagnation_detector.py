@@ -6,12 +6,19 @@ streak exceeds the threshold, the orchestrator should emit StopReason.BLOCKED.
 
 Only items in ``attempted_hunger_item_ids`` are counted; unattempted items are
 ignored (invariant I-6: attempted-only tracking).
+
+v0.7 (ADR-010): When a matching open refactor transaction is active and
+policy is enabled, stagnation exempts only declared regression check keys.
+If the implementation works at item granularity, an attempted item is
+exempted only when every attempted failing check on that item is a
+declared regression key. Undeclared failing checks still count.
 """
 from __future__ import annotations
 
 from typing import TypedDict
 
 from hungerloop.models.enums import HungerItemStatus
+from hungerloop.models.refactor import RefactorTransaction, RefactorTransactionStatus
 from hungerloop.models.validation import ValidationReport
 from hungerloop.repository.protocol import RepositoryProtocol
 
@@ -51,6 +58,7 @@ class StagnationDetector:
         *,
         attempted_hunger_item_ids: list[str] | None = None,
         respect_stagnation: bool = True,
+        open_transaction: RefactorTransaction | None = None,
     ) -> StagnationResult:
         """Update stagnation counters based on validation report.
 
@@ -61,6 +69,10 @@ class StagnationDetector:
                 newly_passed_check_keys, and has_real_progress.
             attempted_hunger_item_ids: Optional M3 override containing the union
                 of hunger items attempted by completed, non-skipped assignments.
+            open_transaction: Optional refactor transaction. When the
+                transaction is ``open``, matches ``task_id``, and policy is
+                enabled, declared regression check keys are exempted from
+                stagnation (ADR-010 / VAL-REF-016).
 
         Returns:
             StagnationResult with blocked_items and global_blocked.
@@ -76,6 +88,15 @@ class StagnationDetector:
             item_id = check_key.split(":", 1)[0]
             newly_progressed.add(item_id)
 
+        # Determine which check keys are exempted due to an open transaction.
+        exempted_check_keys = self._exempted_check_keys(task_id, open_transaction)
+
+        # Determine which items are fully exempted (all failing checks declared)
+        # vs partially exempted (some undeclared failing checks remain).
+        exempted_items = self._exempted_items(
+            validation_report, exempted_check_keys, attempted
+        )
+
         blocked_items: list[str] = []
         ledger = self.repo.get_hunger_ledger(task_id)
         items_by_id = {item.id: item for item in ledger.items}
@@ -89,6 +110,10 @@ class StagnationDetector:
             if iid in newly_progressed:
                 item.consecutive_failure_count = 0
                 item.last_progress_loop_id = loop_id
+            elif iid in exempted_items:
+                # Item is fully exempted: all failing checks are declared
+                # regression keys. Don't increment failure count.
+                pass
             else:
                 item.consecutive_failure_count += 1
 
@@ -117,3 +142,78 @@ class StagnationDetector:
             "blocked_items": blocked_items,
             "global_blocked": global_blocked,
         }
+
+    def _exempted_check_keys(
+        self,
+        task_id: str,
+        open_transaction: RefactorTransaction | None,
+    ) -> set[str]:
+        """Return the set of check keys exempted by an active transaction.
+
+        Returns an empty set when policy is disabled, the transaction is
+        not open, or the task_id doesn't match (VAL-REF-016, VAL-REF-022).
+        """
+        if open_transaction is None:
+            return set()
+        if open_transaction.status != RefactorTransactionStatus.OPEN:
+            return set()
+        if open_transaction.task_id != task_id:
+            return set()
+
+        # Check policy is enabled
+        policy = self.repo.get_hunger_policy(task_id)
+        if not policy.refactor_transactions_enabled:
+            return set()
+
+        return set(open_transaction.declared_regression_keys)
+
+    @staticmethod
+    def _exempted_items(
+        validation_report: ValidationReport,
+        exempted_check_keys: set[str],
+        attempted_item_ids: set[str],
+    ) -> set[str]:
+        """Determine which attempted items are fully exempted.
+
+        An item is fully exempted only when every attempted failing check
+        on that item is a declared regression key. If any undeclared check
+        is failing, the item is not exempted (item-level optimization
+        per VAL-REF-016).
+
+        Note: since the stagnation detector doesn't have per-check failure
+        data beyond what's in the validation report, we use a conservative
+        approach: an item is exempted if it has no newly passed checks
+        (no progress) AND all of its regressed check keys are in the
+        exempted set.
+        """
+        if not exempted_check_keys:
+            return set()
+
+        # Collect regressed check keys by item id
+        regressed_by_item: dict[str, set[str]] = {}
+        for check_key in validation_report.regressed_check_keys:
+            item_id = check_key.split(":", 1)[0]
+            regressed_by_item.setdefault(item_id, set()).add(check_key)
+
+        # Also check attempted_check_keys for failing checks
+        attempted_checks_by_item: dict[str, set[str]] = {}
+        for check_key in validation_report.attempted_check_keys:
+            item_id = check_key.split(":", 1)[0]
+            attempted_checks_by_item.setdefault(item_id, set()).add(check_key)
+
+        exempted: set[str] = set()
+        for item_id in attempted_item_ids:
+            # Item has newly passed checks -> not exempted (has progress)
+            # This is already handled by the caller.
+
+            # Check regressed keys for this item
+            item_regressed = regressed_by_item.get(item_id, set())
+            if not item_regressed:
+                # No regressed keys for this item -> not exempted
+                continue
+
+            # All regressed keys must be in the exempted set
+            if item_regressed.issubset(exempted_check_keys):
+                exempted.add(item_id)
+
+        return exempted

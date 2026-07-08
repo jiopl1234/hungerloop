@@ -14,6 +14,7 @@ from typing import Literal
 
 from pydantic import BaseModel, Field, field_validator
 
+from hungerloop.models.refactor import RefactorProposalPayload
 from hungerloop.models.synthesis import CheckProposal
 
 AgentKind = Literal["execution", "learning", "research", "planner"]
@@ -23,6 +24,7 @@ HandoffItemType = Literal[
     "discovered_issue",
     "incomplete_work",
     "critical_context",
+    "refactor_proposal",
 ]
 
 
@@ -76,6 +78,11 @@ class HandoffItem(BaseModel):
     # Defaults to an empty list; valid CheckProposal payloads are accepted,
     # malformed or disallowed proposals are rejected at model-construction time.
     proposed_checks: list[CheckProposal] = Field(default_factory=list)
+
+    # v0.7: refactor proposal payload for ``refactor_proposal`` items.
+    # Carries the action (open/close), declared regression keys, and rationale.
+    # Workers cannot supply deadlines through this payload (VAL-REF-026).
+    refactor_proposal_payload: RefactorProposalPayload | None = None
 
     @field_validator("summary")
     @classmethod

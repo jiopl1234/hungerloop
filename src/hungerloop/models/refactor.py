@@ -14,6 +14,7 @@ This model is a data container only. Business behavior lives in services.
 from __future__ import annotations
 
 from enum import Enum
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -26,6 +27,29 @@ class RefactorTransactionStatus(str, Enum):
     OPEN = "open"
     CLOSED_SUCCESS = "closed_success"
     ROLLED_BACK = "rolled_back"
+
+
+RefactorProposalActionType = Literal["open", "close"]
+
+
+class RefactorProposalPayload(BaseModel):
+    """Structured payload carried by ``refactor_proposal`` handoff items.
+
+    Workers use this to request opening or closing a refactor transaction.
+    The ``deadline_loop`` is intentionally absent: workers cannot supply
+    or extend deadlines (VAL-REF-026).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    action: RefactorProposalActionType
+    declared_regression_keys: list[str] = Field(default_factory=list)
+    rationale: str = ""
+
+    @field_validator("rationale")
+    @classmethod
+    def _validate_rationale(cls, v: str) -> str:
+        return v[:500]
 
 
 def _is_safe_relative_path(path: str) -> bool:

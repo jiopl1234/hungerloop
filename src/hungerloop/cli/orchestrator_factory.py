@@ -30,6 +30,7 @@ from hungerloop.services.integrator import Integrator
 from hungerloop.services.loop_orchestrator import LoopOrchestrator, _SpecSynthesizerProtocol
 from hungerloop.services.memory_manager import MemoryManager
 from hungerloop.services.model_client import DummyModelClient, ModelClient
+from hungerloop.services.refactor_transaction_manager import RefactorTransactionManager
 from hungerloop.services.refinement_compiler import RefinementCompiler
 from hungerloop.services.rule_based_planner import RuleBasedPlanner
 from hungerloop.services.sandbox_runner import SandboxRunner
@@ -67,6 +68,10 @@ def build_orchestrator(
     cost_guard = CostGuard(repo)
     budget_guard = BudgetGuard()
 
+    refactor_transaction_manager = RefactorTransactionManager(
+        repo=repo, workspace_manager=workspace_manager
+    )
+
     client: ModelClient = model_client if model_client is not None else DummyModelClient()
     harness = ToolHarness(repo, default_tool_registry(sandbox), budget_guard)
     worker = ExecutionWorker(client, harness, repo, budget_guard=budget_guard)
@@ -80,6 +85,7 @@ def build_orchestrator(
             dry_runner=SandboxDryRunner(sandbox),
         ),
         refinement_compiler=RefinementCompiler(repo),
+        refactor_transaction_manager=refactor_transaction_manager,
     )
     validation_gate = ValidationGate(
         repo, AcceptanceCheckRunner(repo, workspace_manager, sandbox)
@@ -123,4 +129,5 @@ def build_orchestrator(
         memory_manager=MemoryManager(repo),
         max_loops_safety_cap=max_loops_safety_cap,
         spec_check_synthesizer=spec_check_synthesizer,
+        refactor_transaction_manager=refactor_transaction_manager,
     )

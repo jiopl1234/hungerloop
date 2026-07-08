@@ -225,22 +225,28 @@ class CommitManager:
             for r in report.check_results
         }
 
-    @staticmethod
     def _is_active_matching_transaction(
+        self,
         txn: RefactorTransaction | None,
         task_id: str,
     ) -> bool:
-        """Check if a transaction is open and matches the given task.
+        """Check if a transaction is open, matches the given task, and policy is enabled.
 
-        Only ``open`` transactions with a matching ``task_id`` provide
-        tolerance. Closed, rolled-back, wrong-task, or ``None`` transactions
-        do not relax I-3 (VAL-REF-008).
+        Only ``open`` transactions with a matching ``task_id`` and
+        ``refactor_transactions_enabled=True`` provide tolerance.
+        Closed, rolled-back, wrong-task, stale, disabled-policy, or
+        ``None`` transactions do not relax I-3 (VAL-REF-008, VAL-REF-022).
         """
         if txn is None:
             return False
         if txn.status != RefactorTransactionStatus.OPEN:
             return False
         if txn.task_id != task_id:
+            return False
+        # Check policy is enabled (VAL-REF-022: disabled policy ignores
+        # stale transaction state)
+        policy = self.repo.get_hunger_policy(task_id)
+        if not policy.refactor_transactions_enabled:
             return False
         return True
 

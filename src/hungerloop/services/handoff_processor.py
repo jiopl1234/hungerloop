@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 from pydantic import ValidationError
 
@@ -15,6 +15,11 @@ from hungerloop.repository.protocol import RepositoryProtocol
 from hungerloop.services.check_proposal_gate import CheckProposalGate
 from hungerloop.services.refinement_compiler import RefinementCompiler
 from hungerloop.services.requirement_compiler import RequirementCompiler
+
+if TYPE_CHECKING:
+    from hungerloop.services.refactor_transaction_manager import (
+        RefactorTransactionManager,
+    )
 
 
 class HandoffProcessor:
@@ -36,11 +41,13 @@ class HandoffProcessor:
         requirement_compiler: RequirementCompiler | None = None,
         check_proposal_gate: CheckProposalGate | None = None,
         refinement_compiler: RefinementCompiler | None = None,
+        refactor_transaction_manager: RefactorTransactionManager | None = None,
     ) -> None:
         self.repo = repo
         self.requirement_compiler = requirement_compiler or RequirementCompiler(repo)
         self.check_proposal_gate = check_proposal_gate
         self.refinement_compiler = refinement_compiler
+        self.refactor_transaction_manager = refactor_transaction_manager
 
     async def process_handoffs(
         self,
@@ -140,6 +147,15 @@ class HandoffProcessor:
                             loop_id=loop_id,
                         )
                         summary_lines.append(f"Follow-up: {self._handoff_text(item)}")
+                    continue
+
+                if item.item_type == "refactor_proposal":
+                    self._process_refactor_proposal(
+                        task_id=task_id,
+                        loop_id=loop_id,
+                        item=item,
+                        agent_id=handoff.agent_id,
+                    )
                     continue
 
                 if item.item_type == "follow_up":
@@ -341,6 +357,52 @@ class HandoffProcessor:
                     keys.add(dedup_key)
 
         return keys
+
+    def _process_refactor_proposal(
+        self,
+        *,
+        task_id: str,
+        loop_id: int,
+        item: HandoffItem,
+        agent_id: str,
+    ) -> None:
+        """Route a ``refactor_proposal`` handoff item to the transaction manager.
+
+        This method affects only transaction state. It never writes hunger
+        ledger items or mission artifacts (VAL-REF-015). When the transaction
+        manager is not configured, the proposal is silently ignored.
+        """
+        if self.refactor_transaction_manager is None:
+            return
+
+        payload = item.refactor_proposal_payload
+        if payload is None:
+            self.repo.append_event(
+                EventType.REFACTOR_TXN_OPEN_REJECTED,
+                {
+                    "task_id": task_id,
+                    "loop_id": loop_id,
+                    "agent_id": agent_id,
+                    "reason": "missing_refactor_payload",
+                },
+                task_id=task_id,
+                loop_id=loop_id,
+            )
+            return
+
+        if payload.action == "open":
+            self.refactor_transaction_manager.open(
+                task_id=task_id,
+                loop_id=loop_id,
+                declared_regression_keys=payload.declared_regression_keys,
+                rationale=payload.rationale,
+            )
+        elif payload.action == "close":
+            self.refactor_transaction_manager.close(
+                task_id=task_id,
+                loop_id=loop_id,
+                force=True,
+            )
 
     @staticmethod
     def _scope_payload(

@@ -39,6 +39,7 @@ from hungerloop.models.mission import (
     MissionPhase,
 )
 from hungerloop.models.planning import Assignment, BudgetAllocation, LoopPlan
+from hungerloop.models.refactor import RefactorTransaction
 from hungerloop.models.tracing import LoopTrace, StopReport
 from hungerloop.models.validation import ValidationReport
 from hungerloop.models.worker import WorkerHandoff, WorkerResult
@@ -53,6 +54,7 @@ from hungerloop.services.hunger_engine import HungerEngine
 from hungerloop.services.hunger_update import HungerUpdateService
 from hungerloop.services.integrator import Integrator
 from hungerloop.services.mission_planner import MissionPlanner, PlannerCycleError
+from hungerloop.services.refactor_transaction_manager import RefactorTransactionManager
 from hungerloop.services.refinement_compiler import RefinementCompiler
 from hungerloop.services.rule_based_planner import RuleBasedPlanner
 from hungerloop.services.stagnation_detector import StagnationDetector
@@ -173,6 +175,7 @@ class LoopOrchestrator:
         memory_manager: _ProposesMemory | None = None,
         max_loops_safety_cap: int = 1000,
         spec_check_synthesizer: _SpecSynthesizerProtocol | None = None,
+        refactor_transaction_manager: RefactorTransactionManager | None = None,
     ) -> None:
         self.repo = repo
         self.hunger_engine = hunger_engine
@@ -207,6 +210,7 @@ class LoopOrchestrator:
         self.refinement_compiler = refinement_compiler
         self.memory_manager = memory_manager
         self.spec_check_synthesizer = spec_check_synthesizer
+        self.refactor_transaction_manager = refactor_transaction_manager
         self.max_loops_safety_cap = max_loops_safety_cap
         # Set inside ``_step_inner`` immediately after ``next_loop_id`` is
         # allocated so ``_emit_error_stop`` can persist the ERROR LoopTrace
@@ -529,10 +533,13 @@ class LoopOrchestrator:
             plan=plan,
             validation=validation,
         )
+        # v0.7: Retrieve active refactor transaction for commit tolerance
+        open_transaction = self._get_active_transaction(task_id)
         commit_decision = self.commit_manager.apply(
             candidate,
             pipeline_result,
             completed_feature_ids=completed_feature_ids,
+            open_transaction=open_transaction,
         )
         commit_verdict = commit_decision["verdict"]
         effective_validation = validation
@@ -587,7 +594,11 @@ class LoopOrchestrator:
             effective_validation,
             attempted_hunger_item_ids=attempted_hunger_item_ids,
             respect_stagnation=policy.respect_stagnation,
+            open_transaction=open_transaction,
         )
+
+        # v0.7: Settle due refactor transactions after commit and stagnation
+        self._settle_due_transaction(task_id=task_id, loop_id=loop_id)
 
         # Post-commit synthesis: runs once after a successful commit and
         # before the next planning decision, when synthesis_enabled is True.
@@ -1674,6 +1685,50 @@ class LoopOrchestrator:
                 EventType.ERROR,
                 {
                     "error_type": "post_commit_synthesis_error",
+                    "error_message": type(exc).__name__,
+                },
+                task_id=task_id,
+                loop_id=loop_id,
+            )
+
+    def _get_active_transaction(
+        self,
+        task_id: str,
+    ) -> RefactorTransaction | None:
+        """Retrieve the active open refactor transaction for a task.
+
+        Returns ``None`` when the transaction manager is not configured,
+        policy is disabled, or no open transaction exists (VAL-REF-017,
+        VAL-REF-022).
+        """
+        if self.refactor_transaction_manager is None:
+            return None
+        return self.refactor_transaction_manager.get_active_transaction(task_id)
+
+    def _settle_due_transaction(
+        self,
+        *,
+        task_id: str,
+        loop_id: int,
+    ) -> None:
+        """Settle a refactor transaction if its deadline is due.
+
+        Invoked once per loop after commit and stagnation handling.
+        When no transaction manager is configured, this is a no-op
+        (VAL-REF-018).
+        """
+        if self.refactor_transaction_manager is None:
+            return
+        try:
+            self.refactor_transaction_manager.settle_if_due(
+                task_id=task_id,
+                current_loop=loop_id,
+            )
+        except Exception as exc:
+            self.repo.append_event(
+                EventType.ERROR,
+                {
+                    "error_type": "refactor_txn_settle_error",
                     "error_message": type(exc).__name__,
                 },
                 task_id=task_id,

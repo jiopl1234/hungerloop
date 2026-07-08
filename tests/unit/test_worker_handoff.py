@@ -55,6 +55,7 @@ def test_worker_handoff_models_are_exported_and_documented() -> None:
         "discovered_issue",
         "incomplete_work",
         "critical_context",
+        "refactor_proposal",
     )
     assert "REQ-M2-002" in (HandoffItem.__doc__ or "")
     assert "REQ-M2-003" in (WorkerHandoff.__doc__ or "")
