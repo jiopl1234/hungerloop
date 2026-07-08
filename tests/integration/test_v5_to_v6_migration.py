@@ -50,7 +50,7 @@ def test_legacy_loop_works_post_migration(tmp_path: Path) -> None:
 
     assert result.exit_code == 0, result.output
     with sqlite3.connect(str(db_path)) as conn:
-        assert _read_pragma(conn, "user_version") == 6
+        assert _read_pragma(conn, "user_version") == 7
         for table in LEGACY_TABLES:
             assert _table_count(conn, table) >= legacy_counts[table]
         mission_event_count = conn.execute(
@@ -67,4 +67,5 @@ def test_legacy_loop_works_post_migration(tmp_path: Path) -> None:
     repo.close()
 
     assert mission_event_count == 0
-    assert migration_count == 1
+    # 5 events from seeding (v0->v1..v4->v5) + 2 from open (v5->v6, v6->v7).
+    assert migration_count == 7

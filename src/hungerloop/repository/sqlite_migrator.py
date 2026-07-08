@@ -179,28 +179,26 @@ class SQLiteMigrator:
                 try:
                     self._apply_one(version, sql_file)
                 except MigrationFailedError as exc:
-                    if version == 6:
-                        self._append_migration_event(
-                            EventType.MIGRATION_FAILED,
-                            {
-                                "from_version": version - 1,
-                                "to_version": version,
-                                "error": str(exc.cause),
-                                "statement": exc.statement,
-                            },
-                        )
-                    raise
-                if version == 6:
                     self._append_migration_event(
-                        EventType.MIGRATION_APPLIED,
+                        EventType.MIGRATION_FAILED,
                         {
                             "from_version": version - 1,
                             "to_version": version,
-                            "duration_ms": round(
-                                (perf_counter() - started_at) * 1000, 3
-                            ),
+                            "error": str(exc.cause),
+                            "statement": exc.statement,
                         },
                     )
+                    raise
+                self._append_migration_event(
+                    EventType.MIGRATION_APPLIED,
+                    {
+                        "from_version": version - 1,
+                        "to_version": version,
+                        "duration_ms": round(
+                            (perf_counter() - started_at) * 1000, 3
+                        ),
+                    },
+                )
         finally:
             self._prune_backups()
         # Backup retained on success too — ops will prune it on the next

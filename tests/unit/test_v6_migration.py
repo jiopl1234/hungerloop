@@ -234,7 +234,7 @@ def test_forward_migration_from_v5(tmp_path: Path) -> None:
     repo.close()
 
     with sqlite3.connect(str(db)) as conn:
-        assert _read_pragma(conn, "user_version") == 6
+        assert _read_pragma(conn, "user_version") == 7
         assert _read_pragma(conn, "application_id") == application_id
         assert V6_TABLES <= _table_names(conn)
         assert V6_INDICES <= _index_names(conn)
@@ -244,10 +244,15 @@ def test_forward_migration_from_v5(tmp_path: Path) -> None:
             assert _table_count(conn, table) == count
         payloads = _event_payloads(conn, EventType.MIGRATION_APPLIED)
 
-    assert len(payloads) == 1
-    assert payloads[0]["from_version"] == 5
-    assert payloads[0]["to_version"] == 6
-    assert float(payloads[0]["duration_ms"]) >= 0
+    # _seed_v5_db runs v0->v1..v4->v5 (5 events); open runs v5->v6, v6->v7.
+    assert len(payloads) == 7
+    # Verify v5->v6 and v6->v7 transitions are present.
+    v5_to_v6 = [p for p in payloads if p["from_version"] == 5 and p["to_version"] == 6]
+    v6_to_v7 = [p for p in payloads if p["from_version"] == 6 and p["to_version"] == 7]
+    assert len(v5_to_v6) == 1
+    assert len(v6_to_v7) == 1
+    assert float(v5_to_v6[0]["duration_ms"]) >= 0
+    assert float(v6_to_v7[0]["duration_ms"]) >= 0
 
 
 def test_migration_idempotent_rerun_does_not_duplicate_event(
@@ -264,10 +269,11 @@ def test_migration_idempotent_rerun_does_not_duplicate_event(
     reopened = SQLiteRepository.open(db)
     reopened.close()
     with sqlite3.connect(str(db)) as conn:
-        assert _read_pragma(conn, "user_version") == 6
+        assert _read_pragma(conn, "user_version") == 7
         second_count = len(_event_payloads(conn, EventType.MIGRATION_APPLIED))
 
-    assert first_count == 1
+    # 5 events from seeding (v0->v1..v4->v5) + 2 from open (v5->v6, v6->v7).
+    assert first_count == 7
     assert second_count == first_count
 
 
