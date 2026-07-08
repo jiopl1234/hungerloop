@@ -308,7 +308,14 @@ def run(
 
         report = asyncio.run(orchestrator.run(task_id))
         skill_card = SkillManager(ctx.repo).maybe_create_skill_card(task_id, report)
+        # Persist the DONE stop report BEFORE auto-promotion so candidates
+        # depending on non_volatile can promote during the same completed
+        # run (VAL-MEM-007).
         ctx.repo.save_stop_report(report)
+        if report.stop_reason.value == "done":
+            from hungerloop.services.memory_manager import MemoryManager
+
+            MemoryManager(ctx.repo).auto_promote(task_id)
     finally:
         # Release in finally so a crashed orchestrator doesn't leave the
         # lock held. SQLiteRepository will move this into the same

@@ -4,7 +4,8 @@ from __future__ import annotations
 import pytest
 
 from hungerloop.models.blackboard import BestState
-from hungerloop.models.enums import ValidationVerdict
+from hungerloop.models.enums import AcceptanceCheckType, ValidationVerdict
+from hungerloop.models.hunger import AcceptanceCheck, HungerItem, HungerLedger
 from hungerloop.models.memory import MemoryCandidate
 from hungerloop.models.validation import ValidationReport
 from hungerloop.repository.in_memory_repo import InMemoryRepository
@@ -15,6 +16,32 @@ from hungerloop.services.memory_manager import (
     reusable,
     traceable,
 )
+
+
+def _setup_ledger(repo: InMemoryRepository, *, task_id: str = "t1") -> None:
+    """Create a hunger ledger with items H-001 (2 checks) for test resolution."""
+    ledger = HungerLedger(
+        task_id=task_id,
+        items=[
+            HungerItem(
+                id="H-001",
+                title="Test item",
+                acceptance_checks=[
+                    AcceptanceCheck(
+                        check_type=AcceptanceCheckType.SHELL_EXIT_ZERO,
+                        params={"argv": ["python", "-m", "pytest"]},
+                        description="Tests pass",
+                    ),
+                    AcceptanceCheck(
+                        check_type=AcceptanceCheckType.FILE_EXISTS,
+                        params={"path": "src/main.py"},
+                        description="Main module exists",
+                    ),
+                ],
+            ),
+        ],
+    )
+    repo.save_hunger_ledger(task_id, ledger)
 
 
 def _validation(
@@ -171,6 +198,7 @@ def test_propose_emits_one_candidate_per_check(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     repo = InMemoryRepository()
+    _setup_ledger(repo)
     repo.save_best_state(
         BestState(
             task_id="t1",
@@ -207,6 +235,7 @@ def test_propose_emits_one_candidate_per_check(
 
 def test_propose_handles_missing_best_state() -> None:
     repo = InMemoryRepository()
+    _setup_ledger(repo)
     mgr = MemoryManager(repo)
     candidates = mgr.propose_from_loop(
         "t1", 1, _validation(newly_passed=["H-001:0"], evidence_ids=["ev-1"])
@@ -223,6 +252,7 @@ def test_propose_handles_missing_best_state() -> None:
 def test_emitted_candidate_has_state_proposed() -> None:
     """v0.5c only ever writes ``state="proposed"``; promotion lands later."""
     repo = InMemoryRepository()
+    _setup_ledger(repo)
     mgr = MemoryManager(repo)
     candidates = mgr.propose_from_loop(
         "t1", 1, _validation(newly_passed=["H-001:0"])
@@ -236,6 +266,7 @@ def test_emitted_candidate_has_expires_at_90_days_out() -> None:
     from datetime import datetime, timedelta, timezone
 
     repo = InMemoryRepository()
+    _setup_ledger(repo)
     mgr = MemoryManager(repo)
     pinned = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
     candidates = mgr.propose_from_loop(
@@ -248,6 +279,7 @@ def test_decision_fields_default_null() -> None:
     """``decision_*`` columns are reserved for v0.6 promotion; v0.5c
     leaves them at their default ``None`` / ``""``."""
     repo = InMemoryRepository()
+    _setup_ledger(repo)
     mgr = MemoryManager(repo)
     [cand] = mgr.propose_from_loop(
         "t1", 1, _validation(newly_passed=["H-001:0"])

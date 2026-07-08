@@ -1365,6 +1365,15 @@ class SQLiteRepository:
 
     def save_promoted_memory(self, memory: PromotedMemory) -> None:
         self._ensure_task(memory.task_id)
+        # Enforce source-candidate uniqueness: skip if a promoted memory
+        # already exists for the same source_candidate_id (VAL-MEM-005 /
+        # VAL-MEM-006).
+        existing = self.conn.execute(
+            "SELECT memory_id FROM promoted_memories WHERE source_candidate_id = ?",
+            (memory.source_candidate_id,),
+        ).fetchone()
+        if existing is not None and existing["memory_id"] != memory.memory_id:
+            return
         self.conn.execute(
             """
             INSERT INTO promoted_memories(

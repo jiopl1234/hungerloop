@@ -838,6 +838,12 @@ class InMemoryRepository:
         return self._committed_refs.get(candidate_id, 0)
 
     def save_promoted_memory(self, memory: PromotedMemory) -> None:
+        # Enforce source-candidate uniqueness: if a promoted memory already
+        # exists for the same source_candidate_id, do not create a duplicate
+        # (VAL-MEM-005 / VAL-MEM-006).
+        for existing in self._promoted_memories.values():
+            if existing.source_candidate_id == memory.source_candidate_id:
+                return
         self._promoted_memories[memory.memory_id] = memory
 
     def list_promoted_memories(
