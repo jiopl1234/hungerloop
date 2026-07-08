@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
+from datetime import datetime, timezone
 
 from hungerloop.models.context import ContextPack, TruncationInfo
 from hungerloop.models.enums import CompletionMode, EvidenceType
@@ -39,6 +40,9 @@ READ_ONLY_REJECTED_HINT = (
     "two recent rejected loops only read files; next attempt must patch/write "
     "or declare a blocker"
 )
+# v0.7 memory recall caps (VAL-MEM-011)
+MAX_RECALLED_MEMORIES = 5
+MAX_RECALLED_MEMORIES_CHARS = 1200
 
 
 def _format_check(check: AcceptanceCheck) -> str:
@@ -197,6 +201,8 @@ class ContextBuilder:
         passed_check_keys = [k for k in assignment_check_keys if k in already_accepted]
         failing_check_keys = [k for k in assignment_check_keys if k not in already_accepted]
 
+        recalled_memories = self._recall_memories(task_id)
+
         return ContextPack(
             task_id=task_id,
             loop_id=loop_id,
@@ -219,9 +225,57 @@ class ContextBuilder:
             best_workspace_files=best_files,
             truncation_info=truncation_info,
             allowed_tools=allowed_tools,
+            recalled_memories=recalled_memories,
             budget=budget,
             required_output_schema=output_schema_name,
         )
+
+    def _recall_memories(self, task_id: str) -> list[str]:
+        """Recall cross-task promoted memories for the current task.
+
+        When ``memory_recall_enabled`` is True on the task policy, this
+        reads all promoted memories, excludes the current task's rows,
+        sorts by ``created_at`` descending with a stable tie-break on
+        ``memory_id`` ascending, caps at ``MAX_RECALLED_MEMORIES`` entries,
+        and truncates the total rendered characters to
+        ``MAX_RECALLED_MEMORIES_CHARS`` by dropping whole entries from
+        the end (oldest first among the selected set). If a single entry
+        exceeds the character budget, it is truncated at a string boundary
+        to fit within the cap.
+
+        When disabled, returns an empty list without listing promoted
+        memories or changing any other context field (VAL-MEM-012).
+        """
+        policy = self.repo.get_hunger_policy(task_id)
+        if not policy.memory_recall_enabled:
+            return []
+        all_promoted = self.repo.list_promoted_memories()
+        # Exclude current-task rows before sorting and capping.
+        cross_task = [m for m in all_promoted if m.task_id != task_id]
+        # Sort newest first; tie-break by memory_id ascending for determinism.
+        cross_task.sort(key=lambda m: (-_timestamp_key(m.created_at), m.memory_id))
+        # Cap at MAX_RECALLED_MEMORIES entries.
+        selected = cross_task[:MAX_RECALLED_MEMORIES]
+        # Truncate total rendered characters to MAX_RECALLED_MEMORIES_CHARS
+        # by dropping whole entries from the end (oldest among selected).
+        # If the first entry alone exceeds the cap, truncate it at a string
+        # boundary to fit.
+        result: list[str] = []
+        total = 0
+        for m in selected:
+            content = m.content
+            if total + len(content) > MAX_RECALLED_MEMORIES_CHARS:
+                if not result:
+                    # First entry exceeds cap: truncate at string boundary.
+                    content = content[:MAX_RECALLED_MEMORIES_CHARS]
+                    result.append(content)
+                    total = len(content)
+                    break
+                # Subsequent entry would exceed cap: stop adding.
+                break
+            result.append(content)
+            total += len(content)
+        return result
 
     def _loop_history(
         self,
@@ -397,6 +451,17 @@ def _coerce_loop_id(value: object) -> int | None:
     if isinstance(value, str) and value.isdigit():
         return int(value)
     return None
+
+
+def _timestamp_key(dt: datetime) -> float:
+    """Convert a datetime to a sortable float for deterministic ordering.
+
+    Timezone-naive datetimes are treated as UTC. This is used for the
+    recall sort key where we negate the value to get descending order.
+    """
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.timestamp()
 
 
 def _is_prompt_safe_rejected_evidence(payload: dict[str, object]) -> bool:

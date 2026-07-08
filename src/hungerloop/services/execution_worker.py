@@ -336,12 +336,14 @@ class ExecutionWorker:
             "   you must patch them — not just inspect them."
         )
         prior_context = ExecutionWorker._prior_loop_context(context)
+        recall_block = ExecutionWorker._recalled_memories_block(context)
         user = (
             f"Mission:\n{context.mission}\n\n"
             f"Acceptance criteria:\n{acceptance_lines}\n\n"
             f"{progress_block}"
             f"Allowed tools and args schema:\n{tool_schema_lines}\n\n"
             f"{prior_context}"
+            f"{recall_block}"
             "Required JSON shape example:\n"
             '{"summary":"created hello.txt","actions":[{"tool_name":'
             '"write_file","args":{"path":"hello.txt","content":"hello"}}]}\n\n'
@@ -430,6 +432,25 @@ class ExecutionWorker:
             failure_patterns_to_avoid=context.failure_patterns_to_avoid,
             relevant_evidence_summaries=context.relevant_evidence_summaries,
         )
+
+    @staticmethod
+    def _recalled_memories_block(context: ContextPack) -> str:
+        """Render a labeled prior-mission insights section.
+
+        When ``context.recalled_memories`` is non-empty, render a clearly
+        labeled section containing the recalled strings as bullet points.
+        When empty, return an empty string so existing prompt sections
+        retain their previous content and ordering (VAL-MEM-013).
+        """
+        if not context.recalled_memories:
+            return ""
+        lines = [
+            "Prior-mission insights (reusable cross-task memory):",
+        ]
+        for insight in context.recalled_memories:
+            lines.append(f"  - {insight}")
+        lines.append("")
+        return "\n".join(lines) + "\n"
 
     @staticmethod
     def _extract_actions(

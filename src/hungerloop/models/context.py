@@ -74,5 +74,12 @@ class ContextPack(BaseModel):
     allowed_tools: list[str] = Field(default_factory=list)
     forbidden_tools: list[str] = Field(default_factory=list)
 
+    # v0.7: cross-task promoted memory recall. Populated by ContextBuilder
+    # when ``memory_recall_enabled`` is True. Each entry is a prompt-safe
+    # reusable insight string from a promoted memory originating in a
+    # different task. Default empty so direct construction without recall
+    # remains valid (VAL-MEM-009).
+    recalled_memories: list[str] = Field(default_factory=list)
+
     budget: BudgetAllocation
     required_output_schema: str = ""
