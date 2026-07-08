@@ -48,7 +48,7 @@ docs/architecture/v0.7/adr/ # ADR-010 refactor transactions
 
 These are encoded in code and tests. Breaking one is a regression, not a refactor.
 
-- **I-3 Check-level commits.** Promotion to `best/` requires `newly_passed_check_keys` ≠ ∅, no regressions, evidence present. Score-based commits are forbidden — `BestState.score` exists for schema only and stays at 0.0. **ADR-010 exception:** when a matching open refactor transaction is active (policy-gated, `refactor_transactions_enabled=True`), `CommitManager` tolerates regressions only for check keys declared in the transaction `declared_regression_keys`, bounded by a deadline and rolled back on failure. See `docs/architecture/v0.7/adr/ADR-010-refactor-transactions.md`. Closed, rolled-back, wrong-task, or stale transactions do not relax I-3. This is the only approved I-3 amendment.
+- **I-3 Check-level commits.** Promotion to `best/` requires `newly_passed_check_keys` ≠ ∅, no regressions, evidence present. Commits using score as a decision factor are forbidden — `BestState.score` exists for schema only and stays at 0.0. **ADR-010 exception:** when a matching open refactor transaction is active (policy-gated, `refactor_transactions_enabled=True`), `CommitManager` tolerates regressions only for check keys declared in the transaction `declared_regression_keys`, bounded by a deadline and rolled back on failure. See `docs/architecture/v0.7/adr/ADR-010-refactor-transactions.md`. Closed, rolled-back, wrong-task, or stale transactions do not relax I-3. This is the only approved I-3 amendment.
 - **I-4 Workspace isolation.** Workers/agents read `best/`, write to `candidates/loop_NNN/`. Only `CommitManager` promotes. Never modify `best/` directly.
 - **I-5 Targeted validation.** `ValidationGate` runs target items + previously-passed checks (regression detection). Untested checks stay passed; never re-run all checks blindly.
 - **I-6 Stagnation: attempted-only.** `StagnationDetector` only counts items in `attempted_hunger_item_ids`.
@@ -84,7 +84,7 @@ hungerloop mission --help           # v0.6 mission CLI surface
 ## Conventions
 
 - **Commit style:** `feat:`, `fix:`, `docs:`, `refactor:`, `test:` (see `git log`).
-- **No score-based logic in commits, hunger updates, or validation.** If you find yourself reaching for `score`, you are doing the wrong thing — re-read I-3.
+- **No logic using score in commits, hunger updates, or validation.** If you find yourself reaching for `score`, you are doing the wrong thing — re-read I-3.
 - **Models are data containers.** Behavior lives in services. Don't add `def apply()` to a `BaseModel`.
 - **Evidence is mandatory.** A candidate with no evidence_ids cannot commit (I-3). Sandbox runs auto-emit evidence; LLM/tool wrappers must do the same.
 - **Mission artifacts are mirrors.** SQLite is the single source of truth; `MissionStateUpdater` regenerates `best/mission.md`, `best/features.yaml`, `best/validation-contract.yaml`, and `best/services.yaml` after successful commits. Manual changes go through `hungerloop mission edit/import`.
@@ -92,4 +92,4 @@ hungerloop mission --help           # v0.6 mission CLI surface
 ## Things in flight / known gaps
 
 - `HUNGERLOOP_MISSION_RUNTIME=0` remains as a deprecated v0.6 rollback valve and should be removed in v0.7.0.
-- True concurrent fan-out/join, LLMPlanner, richer `services.yaml`, cross-task memory recall, and Web UI are v0.7+ placeholders.
+- True concurrent fan-out/join, full LLMPlanner, richer `services.yaml`, and Web UI remain v0.7+ placeholders. Cross-task memory recall, spec synthesis, and refactor transactions are delivered in v0.7 (see `specs/v0.7_implementation/2026-07-07-loop-objective-evolution-design.md`).

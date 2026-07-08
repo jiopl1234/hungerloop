@@ -28,8 +28,9 @@ undermine the invariant for all tasks and all loops.
 
 ### Constraints
 
-- I-3 must remain strict by default. No score-based commits, no global
-  regression tolerance, no weakening of evidence requirements.
+- I-3 must remain strict by default. Commits must never use score as a
+  decision factor, no global regression tolerance, no weakening of evidence
+  requirements. This is the only approved I-3 amendment.
 - The exception must be opt-in via policy (`refactor_transactions_enabled`).
 - The exception must be bounded: only declared regression keys are tolerated,
   only while a matching transaction is open, and only until a deadline.

@@ -1,7 +1,7 @@
 # v0.7 Loop-Objective Evolution — Design
 
 Date: 2026-07-07
-Status: Approved design (brainstorm complete; implementation plan to follow)
+Status: Delivered (all phases implemented and validated)
 Replaces placeholders: `specs/v0.7_placeholders/llm_planner.md` (partially),
 `specs/v0.7_placeholders/concurrent_fan_out_and_join.md` (commit-selection
 interface only), `specs/v0.7_placeholders/cross_task_memory_recall.md`.
@@ -225,3 +225,95 @@ on `HungerPolicy`.
    concurrent scheduling yet (option B).
 3. Layer-3 memory: auto-promote + recall wired (option A).
 4. Delivery: one combined design, three independently shippable phases.
+
+## 8. Delivered scope
+
+All three phases have been implemented, tested, and validated:
+
+- **Phase 1 (SpecCheckSynthesizer)**: `CheckProposal` model,
+  `CheckProposalGate` with deterministic dry-run validation,
+  `RefinementCompiler.compile_spec_coverage` compiler-owned injection,
+  `SpecCheckSynthesizer` with cost-guarded LLM calls, plan-time and
+  post-commit synthesis wiring behind `synthesis_enabled` (default off).
+  Real `glm-5.2` smoke validated safely with secret-scan evidence.
+
+- **Phase 2 (Refactor transactions)**: `RefactorTransaction` model,
+  repository persistence with SQLite v7 migration,
+  `select_commit_candidate` deterministic score-free selection,
+  `RefactorTransactionManager` with open/settle/rollback lifecycle,
+  `CommitManager` transaction-aware I-3 amendment (ADR-010),
+  stagnation exemptions for declared regression keys, orchestrator
+  wiring. Default off via `refactor_transactions_enabled=False`.
+
+- **Phase 3a (Discovery credit)**: `HandoffItem.proposed_checks`,
+  `HandoffProcessor` proposal routing with `CheckProposalGate`,
+  `DISCOVERY_CREDIT` events, stop-report summaries, no-progress-streak
+  reset at most once per loop, per-loop cap enforcement.
+
+- **Phase 3b (Memory promote and recall)**: `MemoryManager.auto_promote`
+  with predicate gating, upgraded memory candidate content with
+  prompt-safe evidence digests, `ContextPack.recalled_memories`,
+  `ContextBuilder` cross-task recall (top 5, 1200 chars),
+  `ExecutionWorker` prior-mission insights rendering.
+
+### Policy defaults (v0.6 compatibility)
+
+| Flag | Default | Effect |
+|------|---------|--------|
+| `synthesis_enabled` | `False` | No synthesis calls, no credential reads |
+| `synthesis_plan_time_tier` | `0` | Co-equal with operator checks when enabled |
+| `synthesis_max_total_items` | `20` | Lifetime cap on synthesized items |
+| `refactor_transactions_enabled` | `False` | Strict I-3 preserved, stale rows ignored |
+| `max_declared_regressions` | `5` | Maximum declared regression keys per transaction |
+| `refactor_deadline_loops` | `3` | Deadline window in loops |
+| `memory_auto_promote_enabled` | `True` | Additive auto-promotion after DONE |
+| `memory_recall_enabled` | `True` | Additive cross-task recall into context |
+
+### Approved baseline deselection set
+
+The final pytest gate uses exactly this approved baseline deselection
+set and no additional skips, xfails, ignores, or `-k` workarounds:
+
+- `tests/unit/test_loop_orchestrator.py::test_orchestrator_uses_validation_pipeline_and_commit_receives_result`
+- `tests/integration/test_loop_memory_dummy.py::test_loop_memory_dummy_propagates_failure_to_next_prompt`
+- `tests/integration/test_mission_resume.py::test_mission_run_resume_after_sigterm_mid_validating`
+- `tests/unit/test_cli_workspace_checks.py::test_workspace_best_lists_files_with_sizes`
+- `tests/unit/test_mission_cmd_edit.py::test_edit_allows_when_task_record_status_human_paused`
+- `tests/unit/test_mission_cmd_edit.py::test_edit_invokes_import_and_records_applied_event`
+- `tests/unit/test_mission_cmd_edit.py::test_edit_editor_nonzero_cancels_without_mission_writes`
+- `tests/unit/test_mission_cmd_edit.py::test_edit_editor_nonzero_preserves_sqlite_mission_tables`
+- `tests/unit/test_mission_cmd_edit.py::test_edit_empty_buffer_cancels_without_mission_writes`
+- `tests/unit/test_path_safety.py::test_absolute_path_rejected`
+- `tests/unit/test_path_safety.py::test_symlink_escape_rejected`
+- `tests/unit/test_sandbox_runner.py::test_argv_execution_success`
+- `tests/unit/test_sandbox_runner.py::test_argv_execution_failure`
+- `tests/unit/test_sandbox_runner.py::test_timeout_returns_timed_out`
+- `tests/unit/test_sandbox_runner.py::test_timeout_kills_process_group`
+- `tests/unit/test_sandbox_runner.py::test_evidence_saved`
+- `tests/unit/test_sandbox_runner.py::test_stderr_captured`
+- `tests/unit/test_sandbox_runner.py::test_nonzero_exit_keeps_stdout`
+- `tests/unit/test_tool_harness.py::test_run_shell_attaches_sandbox_evidence`
+- `tests/unit/test_tools.py::test_run_shell_argv_only`
+
+### Final validation gates
+
+- **pytest**: `.venv\Scripts\python.exe -m pytest tests -q -p no:cacheprovider`
+  with exactly one `--deselect` per approved baseline test above.
+- **mypy**: `.venv\Scripts\python.exe -m mypy --strict --no-incremental src`
+- **ruff**: `.venv\Scripts\python.exe -m ruff check src tests --no-cache`
+- **CLI smoke**: `hungerloop --version` and `hungerloop mission --help`
+- **Real LLM smoke**: model `glm-5.2`, minimal request, secret-scan evidence.
+- **No ports or persistent services** remain after validation.
+
+### Placeholder spec references
+
+- `specs/v0.7_placeholders/llm_planner.md` - partially delivered
+  (synthesis component only; full LLM mission planner remains future work).
+- `specs/v0.7_placeholders/concurrent_fan_out_and_join.md` -
+  commit-selection interface delivered; concurrent scheduling remains
+  future work.
+- `specs/v0.7_placeholders/cross_task_memory_recall.md` - delivered
+  and linked to this spec.
+- `specs/v0.7_placeholders/services_yaml_rich_semantics.md` - not
+  delivered (future work).
+- `specs/v0.7_placeholders/web_ui.md` - not delivered (v0.8+ future work).
