@@ -26,6 +26,7 @@ from hungerloop.models.hunger import (
 from hungerloop.models.memory import MemoryCandidate, PromotedMemory
 from hungerloop.models.mission import Mission, MissionFeature, MissionPhase
 from hungerloop.models.planning import LoopPlan
+from hungerloop.models.refactor import RefactorTransaction, RefactorTransactionStatus
 from hungerloop.models.skill import ActiveSkillCard, SkillCard, SkillCardCandidate
 from hungerloop.models.task import TaskRecord
 from hungerloop.models.tracing import LoopTrace, StopReport
@@ -2002,6 +2003,135 @@ class SQLiteRepository:
             str(row["locked_at"]).replace("Z", "+00:00")
         )
         return {"owner": str(row["owner"]), "locked_at": locked_at}
+
+    # =====================================================================
+    # Section 10 — Refactor transactions (v0.7)
+    # =====================================================================
+    def save_refactor_transaction(self, txn: RefactorTransaction) -> None:
+        self._ensure_task(txn.task_id)
+        # Single-open enforcement: check for existing open transaction
+        # for the same task before inserting/updating.
+        if txn.status == RefactorTransactionStatus.OPEN:
+            existing = self.conn.execute(
+                """
+                SELECT transaction_id FROM refactor_transactions
+                WHERE task_id = ? AND status = 'open'
+                  AND transaction_id != ?
+                """,
+                (txn.task_id, txn.transaction_id),
+            ).fetchone()
+            if existing is not None:
+                raise ValueError(
+                    f"An open refactor transaction already exists for task "
+                    f"{txn.task_id}: {str(existing['transaction_id'])}"
+                )
+        self.conn.execute(
+            """
+            INSERT INTO refactor_transactions(
+                transaction_id, task_id, status, opening_loop, deadline_loop,
+                payload_json
+            )
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(transaction_id) DO UPDATE SET
+                task_id=excluded.task_id,
+                status=excluded.status,
+                opening_loop=excluded.opening_loop,
+                deadline_loop=excluded.deadline_loop,
+                payload_json=excluded.payload_json
+            """,
+            (
+                txn.transaction_id,
+                txn.task_id,
+                txn.status.value,
+                txn.opening_loop,
+                txn.deadline_loop,
+                _model_json(txn),
+            ),
+        )
+
+    def get_refactor_transaction(
+        self, transaction_id: str
+    ) -> RefactorTransaction | None:
+        row = self.conn.execute(
+            "SELECT payload_json FROM refactor_transactions WHERE transaction_id = ?",
+            (transaction_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        return RefactorTransaction.model_validate(_loads(str(row["payload_json"])))
+
+    def get_open_refactor_transaction(
+        self, task_id: str
+    ) -> RefactorTransaction | None:
+        row = self.conn.execute(
+            """
+            SELECT payload_json FROM refactor_transactions
+            WHERE task_id = ? AND status = 'open'
+            ORDER BY rowid ASC
+            LIMIT 1
+            """,
+            (task_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        return RefactorTransaction.model_validate(_loads(str(row["payload_json"])))
+
+    def list_refactor_transactions(
+        self, task_id: str
+    ) -> list[RefactorTransaction]:
+        rows = self.conn.execute(
+            """
+            SELECT payload_json FROM refactor_transactions
+            WHERE task_id = ?
+            ORDER BY opening_loop ASC, rowid ASC
+            """,
+            (task_id,),
+        ).fetchall()
+        return [
+            RefactorTransaction.model_validate(_loads(str(row["payload_json"])))
+            for row in rows
+        ]
+
+    def update_refactor_transaction_status(
+        self,
+        *,
+        transaction_id: str,
+        status: RefactorTransactionStatus,
+        closed_loop: int | None = None,
+        close_reason: str | None = None,
+    ) -> RefactorTransaction | None:
+        # Validate status: accept RefactorTransactionStatus enum or a valid
+        # string value, reject unknown strings.
+        if isinstance(status, str) and not isinstance(status, RefactorTransactionStatus):
+            try:
+                status = RefactorTransactionStatus(status)
+            except ValueError:
+                raise ValueError(f"Invalid refactor transaction status: {status}")
+        row = self.conn.execute(
+            "SELECT payload_json FROM refactor_transactions WHERE transaction_id = ?",
+            (transaction_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        txn = RefactorTransaction.model_validate(_loads(str(row["payload_json"])))
+        updated = txn.model_copy(
+            update={
+                "status": status,
+                "closed_loop": closed_loop,
+                "close_reason": close_reason,
+            }
+        )
+        # Update both the indexed status column and the payload JSON
+        # to keep them synchronized.
+        self.conn.execute(
+            """
+            UPDATE refactor_transactions
+            SET status = ?, payload_json = ?
+            WHERE transaction_id = ?
+            """,
+            (updated.status.value, _model_json(updated), transaction_id),
+        )
+        return updated
 
     @contextmanager
     def transaction(self) -> Iterator[None]:

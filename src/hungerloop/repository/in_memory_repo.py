@@ -27,6 +27,7 @@ from hungerloop.models.hunger import (
 from hungerloop.models.memory import MemoryCandidate, PromotedMemory
 from hungerloop.models.mission import Mission, MissionFeature, MissionPhase
 from hungerloop.models.planning import LoopPlan
+from hungerloop.models.refactor import RefactorTransaction, RefactorTransactionStatus
 from hungerloop.models.skill import ActiveSkillCard, SkillCard, SkillCardCandidate
 from hungerloop.models.task import TaskRecord
 from hungerloop.models.tracing import LoopTrace, StopReport
@@ -105,6 +106,9 @@ class InMemoryRepository:
         self._events: list[dict[str, object]] = []
         # Task locks: task_id -> {"owner": str, "locked_at": datetime}
         self._task_locks: dict[str, dict[str, Any]] = {}
+
+        # Refactor transactions (v0.7)
+        self._refactor_transactions: dict[str, RefactorTransaction] = {}
 
     # =====================================================================
     # Section 0 — Task metadata
@@ -1216,6 +1220,82 @@ class InMemoryRepository:
             return None
         # Return a shallow copy so callers can't mutate stored state.
         return dict(info)
+
+    # =====================================================================
+    # Section 10 — Refactor transactions (v0.7)
+    # =====================================================================
+    def save_refactor_transaction(self, txn: RefactorTransaction) -> None:
+        # Single-open enforcement: reject saving a second open transaction
+        # for the same task.
+        if txn.status == RefactorTransactionStatus.OPEN:
+            for existing in self._refactor_transactions.values():
+                if (
+                    existing.task_id == txn.task_id
+                    and existing.status == RefactorTransactionStatus.OPEN
+                    and existing.transaction_id != txn.transaction_id
+                ):
+                    raise ValueError(
+                        f"An open refactor transaction already exists for task "
+                        f"{txn.task_id}: {existing.transaction_id}"
+                    )
+        self._refactor_transactions[txn.transaction_id] = txn.model_copy(deep=True)
+
+    def get_refactor_transaction(
+        self, transaction_id: str
+    ) -> RefactorTransaction | None:
+        txn = self._refactor_transactions.get(transaction_id)
+        return txn.model_copy(deep=True) if txn is not None else None
+
+    def get_open_refactor_transaction(
+        self, task_id: str
+    ) -> RefactorTransaction | None:
+        for txn in self._refactor_transactions.values():
+            if (
+                txn.task_id == task_id
+                and txn.status == RefactorTransactionStatus.OPEN
+            ):
+                return txn.model_copy(deep=True)
+        return None
+
+    def list_refactor_transactions(
+        self, task_id: str
+    ) -> list[RefactorTransaction]:
+        return sorted(
+            (
+                txn.model_copy(deep=True)
+                for txn in self._refactor_transactions.values()
+                if txn.task_id == task_id
+            ),
+            key=lambda t: t.opening_loop,
+        )
+
+    def update_refactor_transaction_status(
+        self,
+        *,
+        transaction_id: str,
+        status: RefactorTransactionStatus,
+        closed_loop: int | None = None,
+        close_reason: str | None = None,
+    ) -> RefactorTransaction | None:
+        # Validate status: accept RefactorTransactionStatus enum or a valid
+        # string value, reject unknown strings.
+        if isinstance(status, str) and not isinstance(status, RefactorTransactionStatus):
+            try:
+                status = RefactorTransactionStatus(status)
+            except ValueError:
+                raise ValueError(f"Invalid refactor transaction status: {status}")
+        txn = self._refactor_transactions.get(transaction_id)
+        if txn is None:
+            return None
+        updated = txn.model_copy(
+            update={
+                "status": status,
+                "closed_loop": closed_loop,
+                "close_reason": close_reason,
+            }
+        )
+        self._refactor_transactions[transaction_id] = updated
+        return updated.model_copy(deep=True)
 
     @contextmanager
     def transaction(self) -> Iterator[None]:

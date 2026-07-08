@@ -41,8 +41,9 @@ from hungerloop.repository.migration_errors import (
 # tables/constraints needed by SQLiteRepository; v4 adds source links for
 # MemoryCandidate predicates; v5 adds the v0.5e.0 memory lifecycle
 # extensions (predicate columns, reviewer audit, promoted_memories);
-# v6 adds mission-runtime tables for the v0.6 data layer.
-LATEST_VERSION: int = 6
+# v6 adds mission-runtime tables for the v0.6 data layer;
+# v7 adds refactor-transactions storage for v0.7 ADR-010.
+LATEST_VERSION: int = 7
 
 # Migration files: ``v{N}__{slug}.sql`` where N is a positive int and
 # slug is ``[a-z0-9_]+``. Anything else is rejected at startup.

@@ -34,6 +34,7 @@ from hungerloop.models.mission import (
     MissionPhaseStatus,
 )
 from hungerloop.models.planning import LoopPlan
+from hungerloop.models.refactor import RefactorTransaction, RefactorTransactionStatus
 from hungerloop.models.skill import ActiveSkillCard, SkillCard, SkillCardCandidate
 from hungerloop.models.task import TaskRecord
 from hungerloop.models.tracing import LoopTrace, StopReport
@@ -574,3 +575,42 @@ class RepositoryProtocol(Protocol):
     """Cross-cutting writes (CommitManager) execute inside ``with
     repo.transaction(): ...``. InMemoryRepository returns a no-op context;
     SQLiteRepository returns ``BEGIN IMMEDIATE``/``COMMIT`` (ADR-001)."""
+
+    # =====================================================================
+    # Section 10 — Refactor transactions (v0.7)
+    # =====================================================================
+    def save_refactor_transaction(self, txn: RefactorTransaction) -> None: ...
+    """Insert or update a refactor transaction. Rejects saving a second
+    ``open`` transaction for the same task. The indexed ``status`` column
+    and the ``payload_json`` status must remain synchronized."""
+
+    def get_refactor_transaction(
+        self, transaction_id: str
+    ) -> RefactorTransaction | None: ...
+    """Fetch a single refactor transaction by id. Returns ``None`` when
+    the id is unknown."""
+
+    def get_open_refactor_transaction(
+        self, task_id: str
+    ) -> RefactorTransaction | None: ...
+    """Return the single ``open`` transaction for ``task_id``, or ``None``
+    when no open transaction exists."""
+
+    def list_refactor_transactions(
+        self, task_id: str
+    ) -> list[RefactorTransaction]: ...
+    """List all refactor transactions for ``task_id`` in opening-loop
+    order (ascending)."""
+
+    def update_refactor_transaction_status(
+        self,
+        *,
+        transaction_id: str,
+        status: RefactorTransactionStatus,
+        closed_loop: int | None = None,
+        close_reason: str | None = None,
+    ) -> RefactorTransaction | None: ...
+    """Update the lifecycle status and close metadata of an existing
+    transaction. Returns the updated transaction, or ``None`` when the
+    transaction id is unknown (safe no-op). The indexed ``status`` column
+    and the ``payload_json`` status must remain synchronized after update."""
