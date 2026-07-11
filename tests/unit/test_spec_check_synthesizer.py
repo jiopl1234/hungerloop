@@ -88,6 +88,7 @@ class _SpyCostGuard:
         self.after_calls: list[str] = []
         self._fail_on_after = fail_on_after
         self._call_count = 0
+        self.recorded_usage: list[ModelUsage] = []
 
     def assert_within_budget(self, task_id: str) -> None:
         self._call_count += 1
@@ -97,6 +98,9 @@ class _SpyCostGuard:
             self.after_calls.append(task_id)
             if self._fail_on_after:
                 raise SafetyStopError("budget exceeded after call")
+
+    def record_llm_usage(self, task_id: str, usage: ModelUsage) -> None:
+        self.recorded_usage.append(usage)
 
 
 class _FailingCompletionClient:
@@ -943,6 +947,20 @@ class TestCoveredCheckDigest:
         assert "file_exists" in digest
         assert "main file" in digest
 
+    def test_preloaded_rejected_keys_avoid_event_rescan(self) -> None:
+        repo = _setup_repo()
+        repo.list_events = lambda *args, **kwargs: (_ for _ in ()).throw(  # type: ignore[method-assign]
+            AssertionError("event history should not be rescanned")
+        )
+
+        digest = build_covered_check_digest(
+            repo=repo,
+            task_id="t1",
+            rejected_dedup_keys={"file_exists:rejected.txt"},
+        )
+
+        assert "rejected proposal: file_exists:rejected.txt" in digest
+
 
 # ---------------------------------------------------------------------------
 # VAL-SYN-012: Synthesized checks extend task completion semantics
@@ -1129,6 +1147,14 @@ async def test_explicit_semantic_audit_rejection_is_filtered() -> None:
     assert repo.list_events(
         "t1",
         event_types=[EventType.SYNTH_CHECK_AUDIT_REJECTED.value],
+    )
+    evidence = repo.list_evidence("t1", evidence_type="model_call")
+    assert [row["agent_id"] for row in evidence] == [
+        "spec_check_synthesizer",
+        "spec_entailment_auditor",
+    ]
+    assert "assertion exceeds the quoted spec" in str(
+        evidence[1]["response_preview"]
     )
 
 

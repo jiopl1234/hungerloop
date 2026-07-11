@@ -7,9 +7,12 @@ import pytest
 
 from hungerloop.models.enums import AcceptanceCheckType
 from hungerloop.models.synthesis import CheckProposal
+from hungerloop.repository.in_memory_repo import InMemoryRepository
 from hungerloop.services.check_proposal_gate import (
     CheckProposalGate,
+    SandboxDryRunner,
 )
+from hungerloop.services.sandbox_runner import SandboxRunner
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -303,6 +306,36 @@ async def test_shell_dry_run_uses_candidate_workspace_cwd(tmp_path: Path) -> Non
         (["python", "-m", "pytest", "-q"], candidate_root),
         (["python", "-m", "pytest", "-q"], candidate_root),
     ]
+
+
+@pytest.mark.asyncio
+async def test_sandbox_dry_runner_never_mutates_candidate_workspace(
+    tmp_path: Path,
+) -> None:
+    """Production dry-runs execute in a disposable copy of candidate files."""
+    candidate_root = tmp_path / "candidate" / "files"
+    candidate_root.mkdir(parents=True)
+    original = candidate_root / "state.txt"
+    original.write_text("original", encoding="utf-8")
+    adapter = SandboxDryRunner(SandboxRunner(InMemoryRepository()))
+
+    passed = await adapter.dry_run(
+        [
+            "python",
+            "-c",
+            (
+                "from pathlib import Path; "
+                "Path('state.txt').write_text('mutated', encoding='utf-8'); "
+                "Path('created.txt').write_text('created', encoding='utf-8')"
+            ),
+        ],
+        cwd=candidate_root,
+    )
+
+    assert passed is True
+    assert original.read_text(encoding="utf-8") == "original"
+    assert not (candidate_root / "created.txt").exists()
+    assert not list(candidate_root.parent.glob(".hungerloop-dry-run-*"))
 
 
 @pytest.mark.asyncio

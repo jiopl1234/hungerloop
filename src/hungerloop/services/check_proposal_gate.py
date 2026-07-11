@@ -84,25 +84,23 @@ class SandboxDryRunner(DryRunner):
     async def dry_run(self, argv: list[str], cwd: Path | None = None) -> bool:
         """Run *argv* once and return ``True`` iff exit code is 0."""
         run_cwd = cwd if cwd is not None else self._cwd
-        backup_root: Path | None = None
-        snapshot_ready = False
+        isolated_root: Path | None = None
         try:
-            if cwd is not None:
-                if not run_cwd.is_dir():
-                    return False
-                backup_root = Path(
-                    tempfile.mkdtemp(
-                        prefix=".hungerloop-dry-run-",
-                        dir=run_cwd.parent,
-                    )
+            if not run_cwd.is_dir():
+                return False
+            isolated_root = Path(
+                tempfile.mkdtemp(
+                    prefix=".hungerloop-dry-run-",
+                    dir=run_cwd.parent,
                 )
-                shutil.copytree(run_cwd, backup_root / "files")
-                snapshot_ready = True
+            )
+            isolated_cwd = isolated_root / "files"
+            shutil.copytree(run_cwd, isolated_cwd)
             result = await self._sandbox.run_argv(
                 task_id="__dry_run__",
                 loop_id=0,
                 argv=list(argv),
-                cwd=run_cwd,
+                cwd=isolated_cwd,
                 timeout=self._timeout,
                 evidence_label="check_proposal_dry_run",
             )
@@ -110,13 +108,8 @@ class SandboxDryRunner(DryRunner):
         except (ValueError, FileNotFoundError, PermissionError, OSError):
             return False
         finally:
-            if backup_root is not None and snapshot_ready:
-                snapshot = backup_root / "files"
-                if run_cwd.exists():
-                    shutil.rmtree(run_cwd)
-                shutil.copytree(snapshot, run_cwd)
-            if backup_root is not None:
-                shutil.rmtree(backup_root, ignore_errors=True)
+            if isolated_root is not None:
+                shutil.rmtree(isolated_root, ignore_errors=True)
 
 
 class RejectedProposal(BaseModel):

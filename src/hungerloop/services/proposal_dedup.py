@@ -10,11 +10,14 @@ _DEDUP_KEY_PREFIXES = ("shell_exit_zero:", "file_exists:")
 def collect_rejected_proposal_dedup_keys(
     repo: RepositoryProtocol,
     task_id: str,
+    *,
+    since_loop: int | None = None,
 ) -> set[str]:
     """Return behavior keys rejected in any prior synthesis batch."""
     keys: set[str] = set()
     events = repo.list_events(
         task_id,
+        since_loop=since_loop,
         event_types=[EventType.SYNTH_CHECK_REJECTED.value],
     )
     for event in events:

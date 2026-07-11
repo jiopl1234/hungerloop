@@ -32,8 +32,9 @@ class _CpuBoundRunner:
         task_id: str,
         loop_id: int,
         candidate: CandidateState,
+        workspace_root: Path | None = None,
     ) -> tuple[bool, str, str]:
-        del check, task_id, loop_id, candidate
+        del check, task_id, loop_id, candidate, workspace_root
         accumulator = 0
         for index in range(self.work_iterations):
             accumulator += index * index

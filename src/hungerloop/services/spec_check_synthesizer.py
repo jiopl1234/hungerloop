@@ -27,10 +27,8 @@ Key invariants:
 """
 from __future__ import annotations
 
-import json
-import re
 from pathlib import Path
-from typing import Any, Protocol, runtime_checkable
+from typing import Any
 
 from pydantic import BaseModel, Field
 
@@ -39,8 +37,13 @@ from hungerloop.models.events import EventType
 from hungerloop.models.synthesis import CheckProposal
 from hungerloop.repository.protocol import RepositoryProtocol
 from hungerloop.services.check_proposal_gate import CheckProposalGate, GateResult
+from hungerloop.services.completion_support import (
+    CompletionClient,
+    persist_completion_evidence,
+)
 from hungerloop.services.cost_guard import CostGuard, SafetyStopError
-from hungerloop.services.model_client import ModelCallError, ModelResponse
+from hungerloop.services.llm_json import parse_json_response
+from hungerloop.services.model_client import ModelCallError
 from hungerloop.services.proposal_dedup import collect_rejected_proposal_dedup_keys
 from hungerloop.services.refinement_compiler import (
     RefinementCompiler,
@@ -49,29 +52,6 @@ from hungerloop.services.refinement_compiler import (
 from hungerloop.services.spec_entailment_auditor import SpecEntailmentAuditor
 
 SYNTHESIS_MAX_TOKENS = 65000
-
-# ---------------------------------------------------------------------------
-# Completion client protocol
-# ---------------------------------------------------------------------------
-
-
-@runtime_checkable
-class CompletionClient(Protocol):
-    """Minimal completion-client boundary used by the synthesizer.
-
-    This is intentionally narrower than :class:`ModelClient` so the
-    synthesizer can be tested with a lightweight fake without pulling in
-    the full worker-runtime stack. Production wiring uses
-    :class:`OpenAIModelClient` (or a configured real client).
-    """
-
-    async def complete(
-        self,
-        *,
-        messages: list[dict[str, str]],
-        max_tokens: int,
-    ) -> ModelResponse: ...
-
 
 # ---------------------------------------------------------------------------
 # Result models
@@ -87,6 +67,7 @@ class SynthesisResult(BaseModel):
     skip_reason: str = ""
     completion_called: bool = False
     model_name: str = ""
+    completion_evidence_id: str | None = None
 
     @property
     def accepted_count(self) -> int:
@@ -163,22 +144,6 @@ def build_synthesis_prompt(
 # ---------------------------------------------------------------------------
 
 
-def _strip_fenced_json(text: str) -> str:
-    """Extract JSON from fenced code blocks (```json ... ```).
-
-    If the text is not fenced, return it as-is.
-    """
-    # Match ```json ... ``` or ``` ... ```
-    fence_match = re.search(
-        r"```(?:json)?\s*\n?(.*?)```",
-        text,
-        re.DOTALL,
-    )
-    if fence_match:
-        return fence_match.group(1).strip()
-    return text.strip()
-
-
 def _parse_proposals(raw_text: str) -> list[dict[str, Any]]:
     """Parse raw model output into a list of proposal dicts.
 
@@ -191,13 +156,8 @@ def _parse_proposals(raw_text: str) -> list[dict[str, Any]]:
 
     Never raises; returns an empty list on any parse failure.
     """
-    stripped = _strip_fenced_json(raw_text)
-    if not stripped:
-        return []
-
-    try:
-        parsed = json.loads(stripped)
-    except json.JSONDecodeError:
+    parsed = parse_json_response(raw_text)
+    if parsed is None:
         return []
 
     if isinstance(parsed, list):
@@ -447,8 +407,11 @@ class SpecCheckSynthesizer:
 
         ledger = self.repo.get_hunger_ledger(task_id)
         known_keys = _collect_existing_dedup_keys(ledger)
-        known_keys.update(collect_rejected_proposal_dedup_keys(self.repo, task_id))
-        if existing_dedup_keys is not None:
+        if existing_dedup_keys is None:
+            known_keys.update(
+                collect_rejected_proposal_dedup_keys(self.repo, task_id)
+            )
+        else:
             known_keys.update(existing_dedup_keys)
 
         # Build prompt
@@ -477,12 +440,22 @@ class SpecCheckSynthesizer:
         self.cost_guard.assert_within_budget(task_id)
 
         raw_response = ""
+        completion_evidence_id: str | None = None
         try:
             response = await self.completion_client.complete(
                 messages=messages,
                 max_tokens=SYNTHESIS_MAX_TOKENS,
             )
             raw_response = response.content
+            completion_evidence_id = persist_completion_evidence(
+                repo=self.repo,
+                cost_guard=self.cost_guard,
+                task_id=task_id,
+                loop_id=loop_id,
+                agent_id="spec_check_synthesizer",
+                model_name=self.model_name,
+                response=response,
+            )
         except (ModelCallError, SafetyStopError):
             raise
         except Exception as exc:
@@ -501,11 +474,13 @@ class SpecCheckSynthesizer:
                 dedup_keys=[],
                 details=[],
                 raw_response=raw_response,
+                evidence_id=completion_evidence_id,
             )
             return SynthesisResult(
                 rejected_count=1,
                 completion_called=True,
                 model_name=self.model_name,
+                completion_evidence_id=completion_evidence_id,
             )
 
         # CostGuard AFTER the call (I-8)
@@ -526,11 +501,13 @@ class SpecCheckSynthesizer:
                 dedup_keys=[],
                 details=[],
                 raw_response=raw_response,
+                evidence_id=completion_evidence_id,
             )
             return SynthesisResult(
                 rejected_count=1,
                 completion_called=True,
                 model_name=self.model_name,
+                completion_evidence_id=completion_evidence_id,
             )
 
         # Build CheckProposal objects, validating and anchoring source quotes
@@ -579,11 +556,13 @@ class SpecCheckSynthesizer:
                 dedup_keys=rejected_keys,
                 details=rejection_details,
                 raw_response=raw_response,
+                evidence_id=completion_evidence_id,
             )
             return SynthesisResult(
                 rejected_count=len(rejected_keys),
                 completion_called=True,
                 model_name=self.model_name,
+                completion_evidence_id=completion_evidence_id,
             )
 
         # Gate the proposals
@@ -613,6 +592,7 @@ class SpecCheckSynthesizer:
                     for r in gate_result.rejected
                 ],
                 raw_response=raw_response,
+                evidence_id=completion_evidence_id,
             )
 
         audited_proposals = gate_result.accepted
@@ -646,6 +626,7 @@ class SpecCheckSynthesizer:
                         }
                         for entry in audit_result.rejected
                     ],
+                    evidence_id=completion_evidence_id,
                 )
 
         # Cap accepted proposals at remaining capacity
@@ -663,6 +644,7 @@ class SpecCheckSynthesizer:
             ),
             completion_called=True,
             model_name=self.model_name,
+            completion_evidence_id=completion_evidence_id,
         )
 
     def _emit_rejection(
@@ -674,6 +656,7 @@ class SpecCheckSynthesizer:
         dedup_keys: list[str],
         details: list[dict[str, object]] | None = None,
         raw_response: str | None = None,
+        evidence_id: str | None = None,
     ) -> None:
         """Emit a ``SYNTH_CHECK_REJECTED`` event with diagnostic payload."""
         payload: dict[str, object] = {
@@ -687,6 +670,8 @@ class SpecCheckSynthesizer:
             payload["rejected_proposals"] = details
         if raw_response is not None:
             payload["raw_response_excerpt"] = raw_response[:4000]
+        if evidence_id is not None:
+            payload["evidence_id"] = evidence_id
         self.repo.append_event(
             EventType.SYNTH_CHECK_REJECTED,
             payload,
@@ -726,6 +711,7 @@ class SpecCheckSynthesizer:
         synthesis_batch_size: int | None = None,
         synthesis_audit_enabled: bool = False,
         dry_run_cwd: Path | None = None,
+        existing_dedup_keys: set[str] | None = None,
     ) -> list[str]:
         """Run post-commit synthesis and inject through the compiler.
 
@@ -744,6 +730,7 @@ class SpecCheckSynthesizer:
             synthesis_max_active_items=synthesis_max_active_items,
             synthesis_batch_size=synthesis_batch_size,
             covered_check_digest=covered_check_digest,
+            existing_dedup_keys=existing_dedup_keys,
             dry_run_cwd=dry_run_cwd,
             require_fixture=True,
             synthesis_audit_enabled=synthesis_audit_enabled,
@@ -908,6 +895,7 @@ def build_covered_check_digest(
     *,
     repo: RepositoryProtocol,
     task_id: str,
+    rejected_dedup_keys: set[str] | None = None,
 ) -> str:
     """Build a digest of already-covered operator and synthesized checks.
 
@@ -923,6 +911,11 @@ def build_covered_check_digest(
                 f"- {item.id}: {check.check_type.value} "
                 f"({check.description or 'no description'})"
             )
-    for dedup_key in sorted(collect_rejected_proposal_dedup_keys(repo, task_id)):
+    rejected_keys = (
+        collect_rejected_proposal_dedup_keys(repo, task_id)
+        if rejected_dedup_keys is None
+        else rejected_dedup_keys
+    )
+    for dedup_key in sorted(rejected_keys):
         lines.append(f"- rejected proposal: {dedup_key} (do not propose again)")
     return "\n".join(lines) if lines else "(no existing checks)"

@@ -10,7 +10,7 @@ from pathlib import Path
 from hungerloop.models.blackboard import CandidateState
 from hungerloop.models.enums import AcceptanceCheckType, HungerItemStatus, ValidationVerdict
 from hungerloop.models.events import EventType
-from hungerloop.models.hunger import AcceptanceCheck, HungerItem
+from hungerloop.models.hunger import AcceptanceCheck, HungerItem, HungerLedger
 from hungerloop.models.validation import ValidationReport
 from hungerloop.repository.protocol import RepositoryProtocol
 from hungerloop.services.hunger_update import HungerUpdateService
@@ -55,6 +55,11 @@ class SynthesizedCheckLifecycle:
         self.workspace_manager = workspace_manager
         self.hunger_update = hunger_update
         self.refinement_compiler = refinement_compiler
+
+    @classmethod
+    def has_pending_baseline(cls, ledger: HungerLedger) -> bool:
+        """Return whether *ledger* contains actionable pending synthesized checks."""
+        return bool(cls._pending_items_from_ledger(ledger))
 
     async def validate_pending_baseline(
         self,
@@ -239,14 +244,34 @@ class SynthesizedCheckLifecycle:
             if result.hunger_item_id in attempted:
                 passed_by_item.setdefault(result.hunger_item_id, []).append(result.passed)
 
+        passing_synthesized_ids = [
+            item_id
+            for item_id in sorted(attempted)
+            if (item := item_by_id.get(item_id)) is not None
+            and self._is_synthesized(item)
+            and (item_results := passed_by_item.get(item_id, []))
+            and all(item_results)
+        ]
+        if len(attempted) != 1:
+            for item_id in passing_synthesized_ids:
+                self.repo.append_event(
+                    EventType.SYNTH_CHECK_CONFLICT_DETECTED,
+                    {
+                        "item_id": item_id,
+                        "attribution_status": "ambiguous_multiple_attempted_items",
+                        "attempted_hunger_item_ids": sorted(attempted),
+                        "signature": None,
+                        "occurrence_count": 0,
+                        "conflicting_check_keys": regressed,
+                        "quarantined": False,
+                    },
+                    task_id=task_id,
+                    loop_id=loop_id,
+                )
+            return []
+
         outcomes: list[ConflictResolutionResult] = []
-        for item_id in sorted(attempted):
-            item = item_by_id.get(item_id)
-            if item is None or not self._is_synthesized(item):
-                continue
-            item_results = passed_by_item.get(item_id, [])
-            if not item_results or not all(item_results):
-                continue
+        for item_id in passing_synthesized_ids:
             signature = self._conflict_signature(item_id, regressed)
             count, quarantined = self.refinement_compiler.record_synthesis_conflict(
                 task_id=task_id,
@@ -286,11 +311,16 @@ class SynthesizedCheckLifecycle:
         return outcomes
 
     def _pending_items(self, task_id: str) -> list[HungerItem]:
-        ledger = self.repo.get_hunger_ledger(task_id)
+        return self._pending_items_from_ledger(
+            self.repo.get_hunger_ledger(task_id)
+        )
+
+    @classmethod
+    def _pending_items_from_ledger(cls, ledger: HungerLedger) -> list[HungerItem]:
         return [
             item
             for item in ledger.items
-            if self._is_synthesized(item)
+            if cls._is_synthesized(item)
             and item.synthesis_baseline_pending
             and item.status in {HungerItemStatus.OPEN, HungerItemStatus.WORKING}
             and item.gap_score > 0

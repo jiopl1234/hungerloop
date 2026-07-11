@@ -1,4 +1,5 @@
 """Unit tests for AcceptanceCheckRunner and ValidationGate."""
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
 from hungerloop.models.blackboard import BestState, CandidateState
@@ -126,7 +127,9 @@ async def test_regression_detected() -> None:
         task_id: str,
         loop_id: int,
         candidate: CandidateState,
+        workspace_root: Path | None = None,
     ) -> tuple[bool, str, str | None]:
+        del task_id, loop_id, candidate, workspace_root
         nonlocal call_count
         call_count += 1
         if check.params.get("path") == "report.md":

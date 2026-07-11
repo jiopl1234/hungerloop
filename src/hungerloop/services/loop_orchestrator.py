@@ -96,6 +96,7 @@ class _SpecSynthesizerProtocol(Protocol):
         synthesis_audit_enabled: bool,
         covered_check_digest: str | None,
         dry_run_cwd: Path | None = None,
+        existing_dedup_keys: set[str] | None = None,
     ) -> list[str]: ...
 
 
@@ -265,12 +266,22 @@ class LoopOrchestrator:
     async def _step_inner(self, task_id: str) -> LoopTrace | StopReport:
         policy = self.repo.get_hunger_policy(task_id)
         clock = self.repo.get_hunger_clock(task_id)
-        if self.repo.get_best_state(task_id) is not None:
+        ledger = self.repo.get_hunger_ledger(task_id)
+        pending_baseline_before_loop = (
+            self.synthesized_check_lifecycle.has_pending_baseline(ledger)
+        )
+        if (
+            pending_baseline_before_loop
+            and self.repo.get_best_state(task_id) is not None
+        ):
             await self.synthesized_check_lifecycle.validate_pending_baseline(
                 task_id=task_id,
                 loop_id=max(1, clock.loop_count),
             )
-        ledger = self.repo.get_hunger_ledger(task_id)
+            ledger = self.repo.get_hunger_ledger(task_id)
+            pending_baseline_before_loop = (
+                self.synthesized_check_lifecycle.has_pending_baseline(ledger)
+            )
         previous_phase = self.repo.get_last_phase(task_id)
 
         snapshot = self.hunger_engine.tick(
@@ -640,14 +651,15 @@ class LoopOrchestrator:
         # Post-commit synthesis: runs once after a successful commit and
         # before the next planning decision, when synthesis_enabled is True.
         if commit_decision["committed"]:
-            await self.synthesized_check_lifecycle.validate_pending_baseline(
-                task_id=task_id,
-                loop_id=loop_id,
-                workspace_root=self.workspace_manager.candidate_files_dir(
-                    task_id,
-                    loop_id,
-                ),
-            )
+            if pending_baseline_before_loop:
+                await self.synthesized_check_lifecycle.validate_pending_baseline(
+                    task_id=task_id,
+                    loop_id=loop_id,
+                    workspace_root=self.workspace_manager.candidate_files_dir(
+                        task_id,
+                        loop_id,
+                    ),
+                )
             if (
                 policy.synthesis_enabled
                 and self.spec_check_synthesizer is not None
@@ -1710,6 +1722,9 @@ class LoopOrchestrator:
                 feature_descriptions.append(f"{feature.feature_id}: {desc}")
 
         try:
+            from hungerloop.services.proposal_dedup import (
+                collect_rejected_proposal_dedup_keys,
+            )
             from hungerloop.services.spec_check_synthesizer import (
                 build_covered_check_digest,
             )
@@ -1723,9 +1738,15 @@ class LoopOrchestrator:
                 )
                 // policy.synthesis_batch_size,
             )
+            rejected_dedup_keys = collect_rejected_proposal_dedup_keys(
+                self.repo,
+                task_id,
+            )
             for _ in range(max_rounds):
                 covered_digest = build_covered_check_digest(
-                    repo=self.repo, task_id=task_id
+                    repo=self.repo,
+                    task_id=task_id,
+                    rejected_dedup_keys=rejected_dedup_keys,
                 )
                 injected_ids = await self.spec_check_synthesizer.synthesize_post_commit(
                     task_id=task_id,
@@ -1737,10 +1758,18 @@ class LoopOrchestrator:
                     synthesis_batch_size=policy.synthesis_batch_size,
                     synthesis_audit_enabled=policy.synthesis_audit_enabled,
                     covered_check_digest=covered_digest,
+                    existing_dedup_keys=rejected_dedup_keys,
                     dry_run_cwd=self.workspace_manager.candidate_files_dir(
                         task_id,
                         loop_id,
                     ),
+                )
+                rejected_dedup_keys.update(
+                    collect_rejected_proposal_dedup_keys(
+                        self.repo,
+                        task_id,
+                        since_loop=loop_id,
+                    )
                 )
                 if not injected_ids:
                     break

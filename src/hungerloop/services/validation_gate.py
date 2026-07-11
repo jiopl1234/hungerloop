@@ -90,21 +90,13 @@ class ValidationGate:
                 if not is_target and not is_regression_check:
                     continue
 
-                if workspace_root is None:
-                    passed, detail, ev_id = await self.runner.run(
-                        check=check,
-                        task_id=task_id,
-                        loop_id=loop_id,
-                        candidate=candidate,
-                    )
-                else:
-                    passed, detail, ev_id = await self.runner.run(
-                        check=check,
-                        task_id=task_id,
-                        loop_id=loop_id,
-                        candidate=candidate,
-                        workspace_root=workspace_root,
-                    )
+                passed, detail, ev_id = await self.runner.run(
+                    check=check,
+                    task_id=task_id,
+                    loop_id=loop_id,
+                    candidate=candidate,
+                    workspace_root=workspace_root,
+                )
 
                 previously = check_key in previously_passed
                 newly = passed and not previously

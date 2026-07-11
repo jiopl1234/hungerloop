@@ -118,6 +118,7 @@ def _item(
     status: HungerItemStatus = HungerItemStatus.OPEN,
     generated_by: str | None = None,
     acceptance_checks: list[AcceptanceCheck] | None = None,
+    synthesis_prerequisite_check_keys: list[str] | None = None,
 ) -> HungerItem:
     return HungerItem(
         id=item_id,
@@ -128,6 +129,9 @@ def _item(
         status=status,
         generated_by=generated_by,
         acceptance_checks=acceptance_checks or [],
+        synthesis_prerequisite_check_keys=(
+            synthesis_prerequisite_check_keys or []
+        ),
     )
 
 
@@ -666,6 +670,93 @@ def test_synthesized_ledger_item_waits_for_remaining_feature_slots(
     assert plan.selected_hunger_item_ids == ["H-active"]
     assert plan.assignments[0].target_feature_ids == ["F-active"]
     assert "skipped H-SYN-001: not_selected_budget_cap" in plan.rationale
+
+
+def test_cap_one_alternates_to_synthesized_lane_without_starvation(
+    repo: InMemoryRepository,
+) -> None:
+    feature = _feature("F-active", "H-active")
+    syn_item = _item(
+        "H-SYN-001",
+        refinement_tier=1,
+        generated_by="synthesizer",
+        acceptance_checks=[_shell_check()],
+        synthesis_prerequisite_check_keys=["H-active:0"],
+    )
+    _save_ledger(repo, [_item("H-active"), syn_item])
+
+    plan = MissionPlanner(repo).plan(
+        "task-1",
+        10,
+        _snapshot(),
+        _budget(max_workers_per_loop=1),
+        mission=_mission([feature], max_parallel_features=1),
+    )
+
+    assert plan.selected_hunger_item_ids == ["H-SYN-001"]
+    assignment = plan.assignments[0]
+    assert assignment.target_feature_ids == []
+    assert "Advisory prerequisite checks (not a guarantee):" in assignment.mission
+    assert "H-active:0" in assignment.mission
+
+
+def test_synthesized_lane_rotates_across_open_items(
+    repo: InMemoryRepository,
+) -> None:
+    items = [
+        _item(
+            f"H-SYN-{index:03d}",
+            generated_by="synthesizer",
+            acceptance_checks=[_shell_check()],
+        )
+        for index in range(1, 4)
+    ]
+    _save_ledger(repo, items)
+    planner = MissionPlanner(repo)
+    mission = _mission([], max_parallel_features=1)
+
+    selected = [
+        planner.plan(
+            "task-1",
+            loop_id,
+            _snapshot(),
+            _budget(max_workers_per_loop=1),
+            mission=mission,
+        ).selected_hunger_item_ids[0]
+        for loop_id in (1, 2, 3)
+    ]
+
+    assert selected == ["H-SYN-001", "H-SYN-002", "H-SYN-003"]
+
+
+def test_cap_one_synthesized_turns_rotate_while_feature_lane_remains_active(
+    repo: InMemoryRepository,
+) -> None:
+    feature = _feature("F-active", "H-active")
+    items = [_item("H-active")] + [
+        _item(
+            f"H-SYN-{index:03d}",
+            generated_by="synthesizer",
+            acceptance_checks=[_shell_check()],
+        )
+        for index in range(1, 4)
+    ]
+    _save_ledger(repo, items)
+    planner = MissionPlanner(repo)
+    mission = _mission([feature], max_parallel_features=1)
+
+    selected = [
+        planner.plan(
+            "task-1",
+            loop_id,
+            _snapshot(),
+            _budget(max_workers_per_loop=1),
+            mission=mission,
+        ).selected_hunger_item_ids[0]
+        for loop_id in (2, 4, 6)
+    ]
+
+    assert selected == ["H-SYN-001", "H-SYN-002", "H-SYN-003"]
 
 
 def test_non_synthesized_ledger_only_item_is_not_planned(

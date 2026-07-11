@@ -2,26 +2,19 @@
 from __future__ import annotations
 
 import json
-import re
 from dataclasses import dataclass
-from typing import Protocol
 
 from hungerloop.models.events import EventType
 from hungerloop.models.synthesis import CheckProposal
 from hungerloop.repository.protocol import RepositoryProtocol
+from hungerloop.services.completion_support import (
+    CompletionClient,
+    persist_completion_evidence,
+)
 from hungerloop.services.cost_guard import CostGuard, SafetyStopError
-from hungerloop.services.model_client import ModelResponse
+from hungerloop.services.llm_json import parse_json_response
 
 AUDIT_MAX_TOKENS = 65000
-
-
-class AuditCompletionClient(Protocol):
-    async def complete(
-        self,
-        *,
-        messages: list[dict[str, str]],
-        max_tokens: int,
-    ) -> ModelResponse: ...
 
 
 @dataclass(frozen=True)
@@ -45,7 +38,7 @@ class SpecEntailmentAuditor:
         *,
         repo: RepositoryProtocol,
         cost_guard: CostGuard,
-        completion_client: AuditCompletionClient,
+        completion_client: CompletionClient,
         model_name: str = "",
     ) -> None:
         self.repo = repo
@@ -72,12 +65,22 @@ class SpecEntailmentAuditor:
         )
         self.cost_guard.assert_within_budget(task_id)
         raw_response = ""
+        evidence_id: str | None = None
         try:
             response = await self.completion_client.complete(
                 messages=messages,
                 max_tokens=AUDIT_MAX_TOKENS,
             )
             raw_response = response.content
+            evidence_id = persist_completion_evidence(
+                repo=self.repo,
+                cost_guard=self.cost_guard,
+                task_id=task_id,
+                loop_id=loop_id,
+                agent_id="spec_entailment_auditor",
+                model_name=self.model_name,
+                response=response,
+            )
         except SafetyStopError:
             raise
         except Exception as exc:
@@ -98,6 +101,7 @@ class SpecEntailmentAuditor:
                 loop_id=loop_id,
                 reason="unparseable_response",
                 raw_response=raw_response,
+                evidence_id=evidence_id,
             )
             return EntailmentAuditResult(list(proposals), [], failed_open=True)
 
@@ -124,6 +128,7 @@ class SpecEntailmentAuditor:
                         for entry in rejected
                     ],
                     "raw_response_excerpt": raw_response[:4000],
+                    "evidence_id": evidence_id,
                 },
                 task_id=task_id,
                 loop_id=loop_id,
@@ -137,6 +142,7 @@ class SpecEntailmentAuditor:
         loop_id: int | None,
         reason: str,
         raw_response: str,
+        evidence_id: str | None = None,
     ) -> None:
         self.repo.append_event(
             EventType.SYNTH_AUDIT_FAILED_OPEN,
@@ -144,6 +150,7 @@ class SpecEntailmentAuditor:
                 "model": self.model_name,
                 "reason": reason,
                 "raw_response_excerpt": raw_response[:4000],
+                "evidence_id": evidence_id,
             },
             task_id=task_id,
             loop_id=loop_id,
@@ -186,14 +193,7 @@ def _build_audit_prompt(
 
 
 def _parse_audit_decisions(raw_response: str) -> dict[str, tuple[bool, str]] | None:
-    text = raw_response.strip()
-    fence = re.search(r"```(?:json)?\s*\n?(.*?)```", text, re.DOTALL)
-    if fence:
-        text = fence.group(1).strip()
-    try:
-        payload = json.loads(text)
-    except json.JSONDecodeError:
-        return None
+    payload = parse_json_response(raw_response)
     if not isinstance(payload, dict) or not isinstance(payload.get("decisions"), list):
         return None
 

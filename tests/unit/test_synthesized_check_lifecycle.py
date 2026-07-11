@@ -313,6 +313,59 @@ def test_declared_regression_exemption_prevents_false_conflict(
     assert repo.get_hunger_ledger("t1").items[0].status == HungerItemStatus.OPEN
 
 
+def test_ambiguous_multi_assignment_conflict_does_not_quarantine_synthesized_item(
+    tmp_path: Path,
+) -> None:
+    lifecycle, repo, _, _ = _lifecycle(tmp_path)
+    repo.save_hunger_ledger(
+        "t1",
+        HungerLedger(
+            task_id="t1",
+            items=[
+                HungerItem(
+                    id="H-SYN-001",
+                    title="innocent synthesized check",
+                    generated_by="synthesizer",
+                    acceptance_checks=[
+                        AcceptanceCheck(
+                            check_type=AcceptanceCheckType.FILE_EXISTS,
+                            params={"path": "ready.txt"},
+                        )
+                    ],
+                ),
+                HungerItem(id="H-impl", title="concurrent feature"),
+            ],
+        ),
+    )
+    report = _conflict_report()
+
+    for loop_id in (2, 3):
+        result = lifecycle.resolve_conflicts(
+            task_id="t1",
+            loop_id=loop_id,
+            validation=report,
+            attempted_hunger_item_ids=["H-SYN-001", "H-impl"],
+            candidate_committed=False,
+            exempted_check_keys=set(),
+            threshold=2,
+        )
+        assert result == []
+
+    item = repo.get_hunger_ledger("t1").items[0]
+    assert item.status == HungerItemStatus.OPEN
+    assert item.synthesis_conflict_signatures == {}
+    events = repo.list_events(
+        "t1",
+        event_types=[EventType.SYNTH_CHECK_CONFLICT_DETECTED.value],
+    )
+    assert len(events) == 2
+    assert all(
+        event["payload"]["attribution_status"]
+        == "ambiguous_multiple_attempted_items"
+        for event in events
+    )
+
+
 def test_synthesis_lifecycle_metadata_round_trips_through_sqlite(
     tmp_path: Path,
 ) -> None:
@@ -351,3 +404,31 @@ def test_synthesis_lifecycle_metadata_round_trips_through_sqlite(
     assert restored.synthesis_prerequisite_check_keys == ["H-001:0"]
     assert restored.synthesis_conflict_signatures == {"signature": 1}
     reopened.close()
+
+
+def test_pending_baseline_gate_ignores_non_pending_and_terminal_items() -> None:
+    ledger = HungerLedger(
+        task_id="t1",
+        items=[
+            HungerItem(id="H-impl", title="normal item"),
+            HungerItem(
+                id="H-SYN-closed",
+                title="closed synthesized item",
+                generated_by="synthesizer",
+                synthesis_baseline_pending=True,
+                status=HungerItemStatus.CLOSED,
+            ),
+        ],
+    )
+
+    assert SynthesizedCheckLifecycle.has_pending_baseline(ledger) is False
+
+    ledger.items.append(
+        HungerItem(
+            id="H-SYN-open",
+            title="pending synthesized item",
+            generated_by="synthesizer",
+            synthesis_baseline_pending=True,
+        )
+    )
+    assert SynthesizedCheckLifecycle.has_pending_baseline(ledger) is True
