@@ -93,6 +93,8 @@ class CheckProposal(BaseModel):
     description: str = ""
     source_quote: str
     proposed_by: str = "unknown"
+    fixture_argv: list[str] | None = None
+    prerequisite_check_keys: list[str] = Field(default_factory=list)
 
     @field_validator("check_type")
     @classmethod
@@ -146,6 +148,22 @@ class CheckProposal(BaseModel):
                 raise ValueError("'path' must be a string")
             if not path.strip():
                 raise ValueError("'path' must not be empty")
+
+        if self.fixture_argv is not None:
+            if self.check_type != AcceptanceCheckType.SHELL_EXIT_ZERO:
+                raise ValueError("fixture_argv is only supported for shell proposals")
+            if not self.fixture_argv:
+                raise ValueError("fixture_argv must not be empty")
+            if any(
+                not isinstance(argument, str) or not argument.strip()
+                for argument in self.fixture_argv
+            ):
+                raise ValueError("fixture_argv must contain non-empty strings")
+        if any(
+            not isinstance(check_key, str) or not check_key.strip()
+            for check_key in self.prerequisite_check_keys
+        ):
+            raise ValueError("prerequisite_check_keys must contain non-empty strings")
         return self
 
     def dedup_key(self) -> str:

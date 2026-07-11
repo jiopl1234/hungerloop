@@ -20,6 +20,7 @@ if TYPE_CHECKING:
     from hungerloop.services.refactor_transaction_manager import (
         RefactorTransactionManager,
     )
+    from hungerloop.services.workspace_manager import WorkspaceManager
 
 
 class HandoffProcessor:
@@ -42,12 +43,14 @@ class HandoffProcessor:
         check_proposal_gate: CheckProposalGate | None = None,
         refinement_compiler: RefinementCompiler | None = None,
         refactor_transaction_manager: RefactorTransactionManager | None = None,
+        workspace_manager: WorkspaceManager | None = None,
     ) -> None:
         self.repo = repo
         self.requirement_compiler = requirement_compiler or RequirementCompiler(repo)
         self.check_proposal_gate = check_proposal_gate
         self.refinement_compiler = refinement_compiler
         self.refactor_transaction_manager = refactor_transaction_manager
+        self.workspace_manager = workspace_manager
 
     async def process_handoffs(
         self,
@@ -226,10 +229,20 @@ class HandoffProcessor:
         proposals = [p for p, _, _ in collected_proposals]
 
         # Await the gate exactly once for the batch.
-        gate_result = await self.check_proposal_gate.filter(
-            proposals,
-            existing_keys=existing_keys,
-        )
+        if self.workspace_manager is None:
+            gate_result = await self.check_proposal_gate.filter(
+                proposals,
+                existing_keys=existing_keys,
+            )
+        else:
+            gate_result = await self.check_proposal_gate.filter(
+                proposals,
+                existing_keys=existing_keys,
+                dry_run_cwd=self.workspace_manager.candidate_files_dir(
+                    task_id,
+                    loop_id,
+                ),
+            )
 
         # Emit rejection events for rejected proposals.
         for rejected in gate_result.rejected:
@@ -339,23 +352,14 @@ class HandoffProcessor:
 
     def _collect_existing_keys(self, task_id: str) -> set[str]:
         """Collect dedup keys from existing ledger checks and rejected proposal history."""
+        from hungerloop.services.proposal_dedup import (
+            collect_rejected_proposal_dedup_keys,
+        )
         from hungerloop.services.refinement_compiler import _collect_existing_dedup_keys
 
         ledger = self.repo.get_hunger_ledger(task_id)
         keys = _collect_existing_dedup_keys(ledger)
-
-        # Also include rejected proposal dedup keys from event history.
-        rejected_events = self.repo.list_events(
-            task_id,
-            event_types=[EventType.SYNTH_CHECK_REJECTED.value],
-        )
-        for event in rejected_events:
-            payload = event.get("payload", {})
-            if isinstance(payload, dict):
-                dedup_key = payload.get("dedup_key")
-                if isinstance(dedup_key, str):
-                    keys.add(dedup_key)
-
+        keys.update(collect_rejected_proposal_dedup_keys(self.repo, task_id))
         return keys
 
     def _process_refactor_proposal(

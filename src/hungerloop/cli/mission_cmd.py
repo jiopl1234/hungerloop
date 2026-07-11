@@ -800,7 +800,7 @@ def _maybe_run_plan_time_synthesis(
         return
 
     from hungerloop.services.check_proposal_gate import CheckProposalGate, SandboxDryRunner
-    from hungerloop.services.cost_guard import CostGuard
+    from hungerloop.services.cost_guard import CostGuard, SafetyStopError
     from hungerloop.services.refinement_compiler import RefinementCompiler
     from hungerloop.services.sandbox_runner import SandboxRunner
     from hungerloop.services.spec_check_synthesizer import run_plan_time_synthesis
@@ -824,9 +824,14 @@ def _maybe_run_plan_time_synthesis(
                 feature_descriptions=feature_descriptions,
                 synthesis_plan_time_tier=policy.synthesis_plan_time_tier,
                 synthesis_max_total_items=policy.synthesis_max_total_items,
+                synthesis_max_active_items=policy.synthesis_max_active_items,
+                synthesis_batch_size=policy.synthesis_batch_size,
+                synthesis_audit_enabled=policy.synthesis_audit_enabled,
                 model_name="glm-5.2",
             )
         )
+    except SafetyStopError:
+        raise
     except Exception as exc:
         ctx.repo.append_event(
             "synthesis_plan_time_failed",
@@ -884,7 +889,7 @@ def _build_synthesis_completion_client(
         ) -> ModelResponse:
             import httpx
 
-            async with httpx.AsyncClient(timeout=60) as client:
+            async with httpx.AsyncClient(timeout=600) as client:
                 response = await client.post(
                     f"{self._base_url}/chat/completions",
                     headers={

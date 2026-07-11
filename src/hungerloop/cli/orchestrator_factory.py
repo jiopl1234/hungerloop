@@ -86,6 +86,7 @@ def build_orchestrator(
         ),
         refinement_compiler=RefinementCompiler(repo),
         refactor_transaction_manager=refactor_transaction_manager,
+        workspace_manager=workspace_manager,
     )
     validation_gate = ValidationGate(
         repo, AcceptanceCheckRunner(repo, workspace_manager, sandbox)

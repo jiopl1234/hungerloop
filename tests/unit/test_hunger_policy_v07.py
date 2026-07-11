@@ -30,6 +30,14 @@ def test_default_synthesis_max_total_items() -> None:
     assert HungerPolicy().synthesis_max_total_items == 20
 
 
+def test_default_synthesis_lifecycle_policy() -> None:
+    policy = HungerPolicy()
+    assert policy.synthesis_max_active_items == 3
+    assert policy.synthesis_batch_size == 3
+    assert policy.synthesis_conflict_threshold == 2
+    assert policy.synthesis_audit_enabled is False
+
+
 def test_default_refactor_transactions_enabled() -> None:
     assert HungerPolicy().refactor_transactions_enabled is False
 
@@ -86,6 +94,10 @@ def test_policy_serialization_preserves_overrides() -> None:
         synthesis_enabled=True,
         synthesis_plan_time_tier=2,
         synthesis_max_total_items=10,
+        synthesis_max_active_items=4,
+        synthesis_batch_size=2,
+        synthesis_conflict_threshold=3,
+        synthesis_audit_enabled=True,
         refactor_transactions_enabled=True,
         max_declared_regressions=3,
         refactor_deadline_loops=5,
@@ -97,6 +109,10 @@ def test_policy_serialization_preserves_overrides() -> None:
     assert restored.synthesis_enabled is True
     assert restored.synthesis_plan_time_tier == 2
     assert restored.synthesis_max_total_items == 10
+    assert restored.synthesis_max_active_items == 4
+    assert restored.synthesis_batch_size == 2
+    assert restored.synthesis_conflict_threshold == 3
+    assert restored.synthesis_audit_enabled is True
     assert restored.refactor_transactions_enabled is True
     assert restored.max_declared_regressions == 3
     assert restored.refactor_deadline_loops == 5
@@ -142,6 +158,19 @@ def test_zero_synthesis_plan_time_tier_valid() -> None:
     """Zero tier is valid (default)."""
     policy = HungerPolicy(synthesis_plan_time_tier=0)
     assert policy.synthesis_plan_time_tier == 0
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "synthesis_max_active_items",
+        "synthesis_batch_size",
+        "synthesis_conflict_threshold",
+    ],
+)
+def test_synthesis_lifecycle_limits_must_be_positive(field: str) -> None:
+    with pytest.raises(ValueError):
+        HungerPolicy(**{field: 0})
 
 
 def test_negative_max_declared_regressions_fails() -> None:
@@ -192,6 +221,10 @@ def test_in_memory_override_policy_round_trip() -> None:
         synthesis_enabled=True,
         synthesis_plan_time_tier=2,
         synthesis_max_total_items=10,
+        synthesis_max_active_items=4,
+        synthesis_batch_size=2,
+        synthesis_conflict_threshold=3,
+        synthesis_audit_enabled=True,
         refactor_transactions_enabled=True,
         max_declared_regressions=3,
         refactor_deadline_loops=5,
@@ -203,6 +236,10 @@ def test_in_memory_override_policy_round_trip() -> None:
     assert restored.synthesis_enabled is True
     assert restored.synthesis_plan_time_tier == 2
     assert restored.synthesis_max_total_items == 10
+    assert restored.synthesis_max_active_items == 4
+    assert restored.synthesis_batch_size == 2
+    assert restored.synthesis_conflict_threshold == 3
+    assert restored.synthesis_audit_enabled is True
     assert restored.refactor_transactions_enabled is True
     assert restored.max_declared_regressions == 3
     assert restored.refactor_deadline_loops == 5
@@ -236,6 +273,10 @@ def test_sqlite_override_policy_round_trip(tmp_path: Path) -> None:
         synthesis_enabled=True,
         synthesis_plan_time_tier=2,
         synthesis_max_total_items=10,
+        synthesis_max_active_items=4,
+        synthesis_batch_size=2,
+        synthesis_conflict_threshold=3,
+        synthesis_audit_enabled=True,
         refactor_transactions_enabled=True,
         max_declared_regressions=3,
         refactor_deadline_loops=5,
@@ -249,6 +290,10 @@ def test_sqlite_override_policy_round_trip(tmp_path: Path) -> None:
     assert restored.synthesis_enabled is True
     assert restored.synthesis_plan_time_tier == 2
     assert restored.synthesis_max_total_items == 10
+    assert restored.synthesis_max_active_items == 4
+    assert restored.synthesis_batch_size == 2
+    assert restored.synthesis_conflict_threshold == 3
+    assert restored.synthesis_audit_enabled is True
     assert restored.refactor_transactions_enabled is True
     assert restored.max_declared_regressions == 3
     assert restored.refactor_deadline_loops == 5

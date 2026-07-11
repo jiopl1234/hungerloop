@@ -29,21 +29,26 @@ from __future__ import annotations
 
 import json
 import re
+from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
 from pydantic import BaseModel, Field
 
-from hungerloop.models.enums import AcceptanceCheckType
+from hungerloop.models.enums import AcceptanceCheckType, HungerItemStatus
 from hungerloop.models.events import EventType
 from hungerloop.models.synthesis import CheckProposal
 from hungerloop.repository.protocol import RepositoryProtocol
 from hungerloop.services.check_proposal_gate import CheckProposalGate, GateResult
 from hungerloop.services.cost_guard import CostGuard, SafetyStopError
 from hungerloop.services.model_client import ModelCallError, ModelResponse
+from hungerloop.services.proposal_dedup import collect_rejected_proposal_dedup_keys
 from hungerloop.services.refinement_compiler import (
     RefinementCompiler,
     _collect_existing_dedup_keys,
 )
+from hungerloop.services.spec_entailment_auditor import SpecEntailmentAuditor
+
+SYNTHESIS_MAX_TOKENS = 65000
 
 # ---------------------------------------------------------------------------
 # Completion client protocol
@@ -116,9 +121,17 @@ def build_synthesis_prompt(
         "Propose deterministic acceptance checks as a JSON array. "
         "Each proposal must be a JSON object with keys: "
         '"check_type" (either "shell_exit_zero" or "file_exists"), '
-        '"params" (dict with "argv" for shell or "path" for file), '
+        '"params" (for shell_exit_zero use {"argv": ["python", "-c", "..."]} '
+        'as a JSON array of strings, never a single command string; '
+        'for file_exists use {"path": "..."}), '
         '"description" (string), '
-        '"source_quote" (exact quote from the spec that anchors this check). '
+        '"source_quote" (exact quote from the spec that anchors this check), '
+        '"fixture_argv" (for shell_exit_zero, a JSON array of strings that '
+        'performs setup only and exits zero on the current compliant workspace), '
+        'and "prerequisite_check_keys" (optional advisory JSON array of existing '
+        'check keys). The fixture must not contain the assertion; params.argv '
+        'must contain only the assertion and may assume fixture_argv just ran '
+        'successfully in the same isolated workspace. '
         "Only use shell_exit_zero or file_exists. "
         "Do not include any markdown formatting. "
         "Return only the JSON array."
@@ -230,12 +243,21 @@ def _build_proposal_from_dict(
         if not isinstance(source_quote, str) or not source_quote.strip():
             return None
 
+        fixture_argv = raw.get("fixture_argv")
+        if fixture_argv is not None and not isinstance(fixture_argv, list):
+            return None
+        prerequisite_check_keys = raw.get("prerequisite_check_keys", [])
+        if not isinstance(prerequisite_check_keys, list):
+            return None
+
         return CheckProposal(
             check_type=check_type,
             params=params,
             description=description,
             source_quote=source_quote,
             proposed_by=proposed_by,
+            fixture_argv=fixture_argv,
+            prerequisite_check_keys=prerequisite_check_keys,
         )
     except Exception:
         return None
@@ -247,16 +269,18 @@ def _is_source_quote_anchored(
     mission_prose: str,
     feature_descriptions: list[str],
 ) -> bool:
-    """Check if a source quote appears verbatim in the supplied spec text.
+    """Check if a source quote appears in the supplied spec text.
 
-    The check is case-sensitive and trims surrounding whitespace from
-    the quote before looking for a substring match.
+    The check is case-sensitive but whitespace-normalized on both sides.
+    This keeps anchoring strict while accepting quotes copied from YAML
+    folded/literal text where newlines and indentation differ from the
+    model's response.
     """
-    trimmed = quote.strip()
+    trimmed = " ".join(quote.split())
     if not trimmed:
         return False
     combined = mission_prose + "\n" + "\n".join(feature_descriptions)
-    return trimmed in combined
+    return trimmed in " ".join(combined.split())
 
 
 # ---------------------------------------------------------------------------
@@ -270,11 +294,31 @@ def _count_synthesized_items(ledger_task_id: str, repo: RepositoryProtocol) -> i
     return sum(1 for item in ledger.items if item.id.startswith("H-SYN-"))
 
 
+def _count_active_synthesized_items(
+    ledger_task_id: str,
+    repo: RepositoryProtocol,
+) -> int:
+    """Count unresolved synthesizer-owned items for backpressure."""
+    ledger = repo.get_hunger_ledger(ledger_task_id)
+    terminal = {
+        HungerItemStatus.CLOSED,
+        HungerItemStatus.VALIDATED_SATISFIED,
+    }
+    return sum(
+        1
+        for item in ledger.items
+        if item.generated_by == "synthesizer"
+        and item.status not in terminal
+        and item.gap_score > 0
+    )
+
+
 def _remaining_synthesis_capacity(
     *,
     task_id: str,
     repo: RepositoryProtocol,
     synthesis_max_total_items: int,
+    synthesis_max_active_items: int | None = None,
 ) -> int:
     """Compute remaining synthesis capacity.
 
@@ -282,7 +326,12 @@ def _remaining_synthesis_capacity(
     Clamped to >= 0.
     """
     existing = _count_synthesized_items(task_id, repo)
-    return max(0, synthesis_max_total_items - existing)
+    total_remaining = max(0, synthesis_max_total_items - existing)
+    if synthesis_max_active_items is None:
+        return total_remaining
+    active = _count_active_synthesized_items(task_id, repo)
+    active_remaining = max(0, synthesis_max_active_items - active)
+    return min(total_remaining, active_remaining)
 
 
 # ---------------------------------------------------------------------------
@@ -314,12 +363,19 @@ class SpecCheckSynthesizer:
         completion_client: CompletionClient,
         gate: CheckProposalGate,
         model_name: str = "",
+        auditor: SpecEntailmentAuditor | None = None,
     ) -> None:
         self.repo = repo
         self.cost_guard = cost_guard
         self.completion_client = completion_client
         self.gate = gate
         self.model_name = model_name
+        self.auditor = auditor or SpecEntailmentAuditor(
+            repo=repo,
+            cost_guard=cost_guard,
+            completion_client=completion_client,
+            model_name=model_name,
+        )
 
     async def synthesize(
         self,
@@ -329,8 +385,14 @@ class SpecCheckSynthesizer:
         mission_prose: str,
         feature_descriptions: list[str],
         synthesis_max_total_items: int,
+        synthesis_max_active_items: int | None = None,
+        synthesis_batch_size: int | None = None,
         covered_check_digest: str | None = None,
         existing_dedup_keys: set[str] | None = None,
+        dry_run_cwd: Path | None = None,
+        require_fixture: bool = False,
+        defer_fixture_precheck: bool = False,
+        synthesis_audit_enabled: bool = False,
     ) -> SynthesisResult:
         """Run one synthesis pass.
 
@@ -345,6 +407,7 @@ class SpecCheckSynthesizer:
             existing_dedup_keys: Optional pre-computed set of existing dedup
                 keys. If not supplied, the synthesizer computes them from
                 the ledger.
+            dry_run_cwd: Optional candidate workspace root for gate dry-runs.
 
         Returns:
             :class:`SynthesisResult` with accepted proposals and metadata.
@@ -362,19 +425,31 @@ class SpecCheckSynthesizer:
             task_id=task_id,
             repo=self.repo,
             synthesis_max_total_items=synthesis_max_total_items,
+            synthesis_max_active_items=synthesis_max_active_items,
         )
         if remaining <= 0:
+            total_remaining = max(
+                0,
+                synthesis_max_total_items
+                - _count_synthesized_items(task_id, self.repo),
+            )
+            reason = (
+                "synthesis_active_item_limit_reached"
+                if total_remaining > 0 and synthesis_max_active_items is not None
+                else "synthesis_capacity_exhausted"
+            )
             self._emit_skipped(
                 task_id=task_id,
                 loop_id=loop_id,
-                reason="synthesis_capacity_exhausted",
+                reason=reason,
             )
-            return SynthesisResult(skipped=True, skip_reason="capacity_exhausted")
+            return SynthesisResult(skipped=True, skip_reason=reason)
 
-        # Compute existing dedup keys if not supplied
-        if existing_dedup_keys is None:
-            ledger = self.repo.get_hunger_ledger(task_id)
-            existing_dedup_keys = _collect_existing_dedup_keys(ledger)
+        ledger = self.repo.get_hunger_ledger(task_id)
+        known_keys = _collect_existing_dedup_keys(ledger)
+        known_keys.update(collect_rejected_proposal_dedup_keys(self.repo, task_id))
+        if existing_dedup_keys is not None:
+            known_keys.update(existing_dedup_keys)
 
         # Build prompt
         messages = build_synthesis_prompt(
@@ -391,6 +466,8 @@ class SpecCheckSynthesizer:
                 "loop_id": loop_id,
                 "model": self.model_name,
                 "remaining_capacity": remaining,
+                "active_item_limit": synthesis_max_active_items,
+                "batch_size": synthesis_batch_size,
             },
             task_id=task_id,
             loop_id=loop_id,
@@ -399,12 +476,11 @@ class SpecCheckSynthesizer:
         # CostGuard BEFORE the call (I-8)
         self.cost_guard.assert_within_budget(task_id)
 
-        # Make the completion call
-        raw_response: str
+        raw_response = ""
         try:
             response = await self.completion_client.complete(
                 messages=messages,
-                max_tokens=1024,
+                max_tokens=SYNTHESIS_MAX_TOKENS,
             )
             raw_response = response.content
         except (ModelCallError, SafetyStopError):
@@ -423,6 +499,8 @@ class SpecCheckSynthesizer:
                 loop_id=loop_id,
                 reason=f"completion_error:{type(exc).__name__}",
                 dedup_keys=[],
+                details=[],
+                raw_response=raw_response,
             )
             return SynthesisResult(
                 rejected_count=1,
@@ -446,6 +524,8 @@ class SpecCheckSynthesizer:
                 loop_id=loop_id,
                 reason="unparseable_response",
                 dedup_keys=[],
+                details=[],
+                raw_response=raw_response,
             )
             return SynthesisResult(
                 rejected_count=1,
@@ -456,10 +536,18 @@ class SpecCheckSynthesizer:
         # Build CheckProposal objects, validating and anchoring source quotes
         valid_proposals: list[CheckProposal] = []
         rejected_keys: list[str] = []
+        rejection_details: list[dict[str, object]] = []
         for raw in raw_proposals:
             proposal = _build_proposal_from_dict(raw, proposed_by="synthesizer")
             if proposal is None:
                 rejected_keys.append("invalid_proposal_shape")
+                rejection_details.append(
+                    {
+                        "reason": "invalid_proposal_shape",
+                        "source_quote": raw.get("source_quote") if isinstance(raw, dict) else None,
+                        "raw": raw,
+                    }
+                )
                 continue
 
             # Check source quote anchoring
@@ -468,7 +556,17 @@ class SpecCheckSynthesizer:
                 mission_prose=mission_prose,
                 feature_descriptions=feature_descriptions,
             ):
-                rejected_keys.append(proposal.dedup_key())
+                key = proposal.dedup_key()
+                rejected_keys.append(key)
+                rejection_details.append(
+                    {
+                        "reason": "source_quote_unanchored",
+                        "dedup_key": key,
+                        "check_type": proposal.check_type.value,
+                        "source_quote": proposal.source_quote,
+                        "description": proposal.description,
+                    }
+                )
                 continue
 
             valid_proposals.append(proposal)
@@ -479,6 +577,8 @@ class SpecCheckSynthesizer:
                 loop_id=loop_id,
                 reason="no_valid_proposals",
                 dedup_keys=rejected_keys,
+                details=rejection_details,
+                raw_response=raw_response,
             )
             return SynthesisResult(
                 rejected_count=len(rejected_keys),
@@ -489,7 +589,10 @@ class SpecCheckSynthesizer:
         # Gate the proposals
         gate_result: GateResult = await self.gate.filter(
             valid_proposals,
-            existing_keys=existing_dedup_keys,
+            existing_keys=known_keys,
+            dry_run_cwd=dry_run_cwd,
+            require_fixture=require_fixture,
+            defer_fixture_precheck=defer_fixture_precheck,
         )
 
         # Emit rejection events for gate-rejected proposals
@@ -499,15 +602,65 @@ class SpecCheckSynthesizer:
                 loop_id=loop_id,
                 reason="gate_rejection",
                 dedup_keys=[r.dedup_key for r in gate_result.rejected],
+                details=[
+                    {
+                        "reason": r.reason,
+                        "dedup_key": r.dedup_key,
+                        "check_type": r.proposal.check_type.value,
+                        "source_quote": r.proposal.source_quote,
+                        "description": r.proposal.description,
+                    }
+                    for r in gate_result.rejected
+                ],
+                raw_response=raw_response,
             )
 
+        audited_proposals = gate_result.accepted
+        audit_rejected_count = 0
+        if synthesis_audit_enabled and audited_proposals:
+            audit_result = await self.auditor.audit(
+                task_id=task_id,
+                loop_id=loop_id,
+                mission_prose=mission_prose,
+                feature_descriptions=feature_descriptions,
+                proposals=audited_proposals,
+            )
+            audited_proposals = audit_result.accepted
+            audit_rejected_count = len(audit_result.rejected)
+            if audit_result.rejected:
+                self._emit_rejection(
+                    task_id=task_id,
+                    loop_id=loop_id,
+                    reason="semantic_audit_rejection",
+                    dedup_keys=[
+                        entry.proposal.dedup_key()
+                        for entry in audit_result.rejected
+                    ],
+                    details=[
+                        {
+                            "reason": entry.reason,
+                            "dedup_key": entry.proposal.dedup_key(),
+                            "check_type": entry.proposal.check_type.value,
+                            "source_quote": entry.proposal.source_quote,
+                            "description": entry.proposal.description,
+                        }
+                        for entry in audit_result.rejected
+                    ],
+                )
+
         # Cap accepted proposals at remaining capacity
-        accepted = gate_result.accepted[:remaining]
+        accepted_limit = remaining
+        if synthesis_batch_size is not None:
+            accepted_limit = min(accepted_limit, max(0, synthesis_batch_size))
+        accepted = audited_proposals[:accepted_limit]
 
         return SynthesisResult(
             accepted_proposals=accepted,
-            rejected_count=len(gate_result.rejected)
-            + (len(valid_proposals) - len(gate_result.accepted)),
+            rejected_count=(
+                len(rejected_keys)
+                + len(gate_result.rejected)
+                + audit_rejected_count
+            ),
             completion_called=True,
             model_name=self.model_name,
         )
@@ -519,17 +672,24 @@ class SpecCheckSynthesizer:
         loop_id: int | None,
         reason: str,
         dedup_keys: list[str],
+        details: list[dict[str, object]] | None = None,
+        raw_response: str | None = None,
     ) -> None:
-        """Emit a ``SYNTH_CHECK_REJECTED`` event with non-secret payload."""
+        """Emit a ``SYNTH_CHECK_REJECTED`` event with diagnostic payload."""
+        payload: dict[str, object] = {
+            "task_id": task_id,
+            "loop_id": loop_id,
+            "reason": reason,
+            "rejected_count": len(dedup_keys),
+            "dedup_keys": list(dedup_keys),
+        }
+        if details is not None:
+            payload["rejected_proposals"] = details
+        if raw_response is not None:
+            payload["raw_response_excerpt"] = raw_response[:4000]
         self.repo.append_event(
             EventType.SYNTH_CHECK_REJECTED,
-            {
-                "task_id": task_id,
-                "loop_id": loop_id,
-                "reason": reason,
-                "rejected_count": len(dedup_keys),
-                "dedup_keys": list(dedup_keys),
-            },
+            payload,
             task_id=task_id,
             loop_id=loop_id,
         )
@@ -562,6 +722,10 @@ class SpecCheckSynthesizer:
         feature_descriptions: list[str],
         synthesis_max_total_items: int,
         covered_check_digest: str | None,
+        synthesis_max_active_items: int | None = None,
+        synthesis_batch_size: int | None = None,
+        synthesis_audit_enabled: bool = False,
+        dry_run_cwd: Path | None = None,
     ) -> list[str]:
         """Run post-commit synthesis and inject through the compiler.
 
@@ -577,7 +741,12 @@ class SpecCheckSynthesizer:
             mission_prose=mission_prose,
             feature_descriptions=feature_descriptions,
             synthesis_max_total_items=synthesis_max_total_items,
+            synthesis_max_active_items=synthesis_max_active_items,
+            synthesis_batch_size=synthesis_batch_size,
             covered_check_digest=covered_check_digest,
+            dry_run_cwd=dry_run_cwd,
+            require_fixture=True,
+            synthesis_audit_enabled=synthesis_audit_enabled,
         )
 
         if not result.accepted_proposals:
@@ -590,6 +759,7 @@ class SpecCheckSynthesizer:
             generated_by="synthesizer",
             tier=1,
             max_new_items=synthesis_max_total_items,
+            baseline_pending=True,
         )
 
 
@@ -610,6 +780,9 @@ async def run_plan_time_synthesis(
     feature_descriptions: list[str],
     synthesis_plan_time_tier: int,
     synthesis_max_total_items: int,
+    synthesis_max_active_items: int = 3,
+    synthesis_batch_size: int = 3,
+    synthesis_audit_enabled: bool = False,
     model_name: str = "",
 ) -> list[str]:
     """Run plan-time synthesis and inject accepted proposals.
@@ -636,6 +809,11 @@ async def run_plan_time_synthesis(
         mission_prose=mission_prose,
         feature_descriptions=feature_descriptions,
         synthesis_max_total_items=synthesis_max_total_items,
+        synthesis_max_active_items=synthesis_max_active_items,
+        synthesis_batch_size=synthesis_batch_size,
+        require_fixture=True,
+        defer_fixture_precheck=True,
+        synthesis_audit_enabled=synthesis_audit_enabled,
     )
 
     if not result.accepted_proposals:
@@ -647,6 +825,7 @@ async def run_plan_time_synthesis(
         generated_by="synthesizer",
         tier=synthesis_plan_time_tier,
         max_new_items=synthesis_max_total_items,
+        baseline_pending=True,
     )
     return injected_ids
 
@@ -668,8 +847,12 @@ async def run_post_commit_synthesis(
     mission_prose: str,
     feature_descriptions: list[str],
     synthesis_max_total_items: int,
+    synthesis_max_active_items: int = 3,
+    synthesis_batch_size: int = 3,
+    synthesis_audit_enabled: bool = False,
     covered_check_digest: str | None = None,
     model_name: str = "",
+    dry_run_cwd: Path | None = None,
 ) -> list[str]:
     """Run post-commit incremental synthesis and inject accepted proposals.
 
@@ -694,7 +877,12 @@ async def run_post_commit_synthesis(
         mission_prose=mission_prose,
         feature_descriptions=feature_descriptions,
         synthesis_max_total_items=synthesis_max_total_items,
+        synthesis_max_active_items=synthesis_max_active_items,
+        synthesis_batch_size=synthesis_batch_size,
         covered_check_digest=covered_check_digest,
+        dry_run_cwd=dry_run_cwd,
+        require_fixture=True,
+        synthesis_audit_enabled=synthesis_audit_enabled,
     )
 
     if not result.accepted_proposals:
@@ -706,6 +894,7 @@ async def run_post_commit_synthesis(
         generated_by="synthesizer",
         tier=1,
         max_new_items=synthesis_max_total_items,
+        baseline_pending=True,
     )
     return injected_ids
 
@@ -734,4 +923,6 @@ def build_covered_check_digest(
                 f"- {item.id}: {check.check_type.value} "
                 f"({check.description or 'no description'})"
             )
+    for dedup_key in sorted(collect_rejected_proposal_dedup_keys(repo, task_id)):
+        lines.append(f"- rejected proposal: {dedup_key} (do not propose again)")
     return "\n".join(lines) if lines else "(no existing checks)"

@@ -20,6 +20,7 @@ Critical logic:
 """
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 from hungerloop.models.enums import ValidationVerdict
@@ -48,6 +49,10 @@ class ValidationGate:
         loop_id: int,
         candidate: Any,
         target_hunger_item_ids: list[str],
+        *,
+        workspace_root: Path | None = None,
+        require_evidence: bool = True,
+        report_id: str | None = None,
     ) -> ValidationReport:
         """Validate a candidate against target items + regression checks.
 
@@ -85,12 +90,21 @@ class ValidationGate:
                 if not is_target and not is_regression_check:
                     continue
 
-                passed, detail, ev_id = await self.runner.run(
-                    check=check,
-                    task_id=task_id,
-                    loop_id=loop_id,
-                    candidate=candidate,
-                )
+                if workspace_root is None:
+                    passed, detail, ev_id = await self.runner.run(
+                        check=check,
+                        task_id=task_id,
+                        loop_id=loop_id,
+                        candidate=candidate,
+                    )
+                else:
+                    passed, detail, ev_id = await self.runner.run(
+                        check=check,
+                        task_id=task_id,
+                        loop_id=loop_id,
+                        candidate=candidate,
+                        workspace_root=workspace_root,
+                    )
 
                 previously = check_key in previously_passed
                 newly = passed and not previously
@@ -128,7 +142,7 @@ class ValidationGate:
         )
 
         missing_evidence: list[str] = []
-        if not all_evidence_ids:
+        if require_evidence and not all_evidence_ids:
             missing_evidence.append("Candidate produced no evidence.")
 
         has_real_progress = len(newly_passed) > 0
@@ -142,7 +156,7 @@ class ValidationGate:
         )
 
         return ValidationReport(
-            id=f"VAL-{task_id}-{loop_id}",
+            id=report_id or f"VAL-{task_id}-{loop_id}",
             task_id=task_id,
             loop_id=loop_id,
             candidate_state_id=candidate.id,

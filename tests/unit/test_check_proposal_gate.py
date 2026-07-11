@@ -16,13 +16,18 @@ from hungerloop.services.check_proposal_gate import (
 # ---------------------------------------------------------------------------
 
 
-def _shell_proposal(argv: list[str], description: str = "desc") -> CheckProposal:
+def _shell_proposal(
+    argv: list[str],
+    description: str = "desc",
+    fixture_argv: list[str] | None = None,
+) -> CheckProposal:
     return CheckProposal(
         check_type=AcceptanceCheckType.SHELL_EXIT_ZERO,
         params={"argv": argv},
         description=description,
         source_quote="Some quote",
         proposed_by="synthesizer",
+        fixture_argv=fixture_argv,
     )
 
 
@@ -77,6 +82,7 @@ async def test_rejects_duplicates() -> None:
     result = await gate.filter([p1, p2])
     assert len(result.accepted) == 1
     assert len(result.rejected) == 1
+    assert result.rejected[0].reason == "duplicate"
     assert result.rejected[0].reason == "duplicate"
 
 
@@ -282,6 +288,24 @@ async def test_shell_dry_run_called_exactly_twice() -> None:
 
 
 @pytest.mark.asyncio
+async def test_shell_dry_run_uses_candidate_workspace_cwd(tmp_path: Path) -> None:
+    """Gate passes the candidate workspace cwd to shell dry-runs."""
+    candidate_root = tmp_path / "workspace" / "tasks" / "t1" / "candidates" / "loop_001" / "files"
+    candidate_root.mkdir(parents=True)
+    dry_runner = FakeDryRunner(default=True)
+    gate = CheckProposalGate(dry_runner=dry_runner)
+    proposal = _shell_proposal(["python", "-m", "pytest", "-q"])
+
+    result = await gate.filter([proposal], dry_run_cwd=candidate_root)
+
+    assert len(result.accepted) == 1
+    assert dry_runner.calls == [
+        (["python", "-m", "pytest", "-q"], candidate_root),
+        (["python", "-m", "pytest", "-q"], candidate_root),
+    ]
+
+
+@pytest.mark.asyncio
 async def test_shell_accepted_when_deterministic_pass() -> None:
     """Both runs pass -> accepted."""
     dry_runner = FakeDryRunner(results=[True, True])
@@ -412,4 +436,65 @@ async def test_accepted_proposals_added_to_dedup_history() -> None:
     result = await gate.filter([p1, p2])
     assert len(result.accepted) == 1
     assert len(result.rejected) == 1
-    assert result.rejected[0].reason == "duplicate"
+
+
+async def test_required_shell_fixture_must_be_present() -> None:
+    runner = FakeDryRunner(default=True)
+    result = await CheckProposalGate(dry_runner=runner).filter(
+        [_shell_proposal(["python", "-c", "print('check')"])],
+        require_fixture=True,
+    )
+
+    assert result.accepted == []
+    assert result.rejected[0].reason == "missing_fixture"
+    assert runner.call_count == 0
+
+
+async def test_fixture_failure_rejects_before_assertion_dry_run() -> None:
+    runner = FakeDryRunner(results=[False, False])
+    proposal = _shell_proposal(
+        ["python", "-c", "print('assertion')"],
+        fixture_argv=["python", "-c", "raise SystemExit(1)"],
+    )
+
+    result = await CheckProposalGate(dry_runner=runner).filter(
+        [proposal],
+        require_fixture=True,
+    )
+
+    assert result.accepted == []
+    assert result.rejected[0].reason == "fixture_setup_failed"
+    assert runner.call_count == 2
+
+
+async def test_failing_assertion_is_accepted_when_fixture_is_valid() -> None:
+    runner = FakeDryRunner(results=[True, True, False, False])
+    proposal = _shell_proposal(
+        ["python", "-c", "raise SystemExit(1)"],
+        fixture_argv=["python", "-c", "print('fixture')"],
+    )
+
+    result = await CheckProposalGate(dry_runner=runner).filter(
+        [proposal],
+        require_fixture=True,
+    )
+
+    assert result.accepted == [proposal]
+    assert runner.call_count == 4
+
+
+async def test_plan_time_defers_all_shell_execution() -> None:
+    runner = FakeDryRunner(default=False)
+    proposal = _shell_proposal(
+        ["python", "-c", "raise SystemExit(1)"],
+        fixture_argv=["python", "-c", "print('fixture')"],
+    )
+
+    result = await CheckProposalGate(dry_runner=runner).filter(
+        [proposal],
+        require_fixture=True,
+        defer_fixture_precheck=True,
+    )
+
+    assert result.accepted == [proposal]
+    assert runner.call_count == 0

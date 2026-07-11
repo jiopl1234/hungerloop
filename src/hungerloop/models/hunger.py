@@ -63,6 +63,15 @@ class HungerItem(BaseModel):
     generated_by: str | None = None
     source_check_keys: list[str] = Field(default_factory=list)
 
+    # v0.7 synthesized-check lifecycle state. These fields are meaningful only
+    # for compiler-owned H-SYN items and persist inside existing ledger JSON.
+    synthesis_baseline_pending: bool = False
+    synthesis_fixture_argv: list[str] | None = None
+    synthesis_prerequisite_check_keys: list[str] = Field(default_factory=list)
+    synthesis_conflict_signatures: dict[str, int] = Field(default_factory=dict)
+    synthesis_resolution_kind: str | None = None
+    synthesis_resolution_reason: str | None = None
+
 
 _INACTIVE_STATUSES: frozenset[HungerItemStatus] = frozenset(
     {
@@ -164,6 +173,10 @@ class HungerPolicy(BaseModel):
     synthesis_enabled: bool = False
     synthesis_plan_time_tier: int = 0
     synthesis_max_total_items: int = 20
+    synthesis_max_active_items: int = 3
+    synthesis_batch_size: int = 3
+    synthesis_conflict_threshold: int = 2
+    synthesis_audit_enabled: bool = False
     refactor_transactions_enabled: bool = False
     max_declared_regressions: int = 5
     refactor_deadline_loops: int = 3
@@ -182,6 +195,17 @@ class HungerPolicy(BaseModel):
     def _validate_synthesis_max_total_items(cls, v: int) -> int:
         if v < 0:
             raise ValueError("synthesis_max_total_items must not be negative")
+        return v
+
+    @field_validator(
+        "synthesis_max_active_items",
+        "synthesis_batch_size",
+        "synthesis_conflict_threshold",
+    )
+    @classmethod
+    def _validate_positive_synthesis_limits(cls, v: int) -> int:
+        if v < 1:
+            raise ValueError("synthesis lifecycle limits must be >= 1")
         return v
 
     @field_validator("max_declared_regressions")

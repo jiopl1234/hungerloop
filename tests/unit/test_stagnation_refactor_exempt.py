@@ -133,6 +133,7 @@ class TestStagnationExemption:
             "task-1",
             10,
             report,
+            candidate_committed=True,
             attempted_hunger_item_ids=["H-001"],
         )
 
@@ -166,6 +167,7 @@ class TestStagnationExemption:
             "task-1",
             10,
             report,
+            candidate_committed=True,
             attempted_hunger_item_ids=["H-001", "H-002"],
         )
 
@@ -199,6 +201,7 @@ class TestStagnationExemption:
             "task-1",
             10,
             report,
+            candidate_committed=True,
             attempted_hunger_item_ids=["H-001"],
         )
 
@@ -231,6 +234,7 @@ class TestStagnationExemption:
             "task-1",
             10,
             report,
+            candidate_committed=True,
             attempted_hunger_item_ids=["H-001"],
         )
 
@@ -264,6 +268,7 @@ class TestStagnationExemption:
             "task-1",
             10,
             report,
+            candidate_committed=True,
             attempted_hunger_item_ids=["H-001"],
         )
 
@@ -297,6 +302,7 @@ class TestStagnationExemption:
             "task-1",
             10,
             report,
+            candidate_committed=True,
             attempted_hunger_item_ids=["H-001"],
         )
 

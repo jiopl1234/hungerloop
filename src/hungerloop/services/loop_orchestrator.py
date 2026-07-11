@@ -59,6 +59,7 @@ from hungerloop.services.refinement_compiler import RefinementCompiler
 from hungerloop.services.rule_based_planner import RuleBasedPlanner
 from hungerloop.services.stagnation_detector import StagnationDetector
 from hungerloop.services.stop_report_builder import build_stop_report
+from hungerloop.services.synthesized_check_lifecycle import SynthesizedCheckLifecycle
 from hungerloop.services.validation_gate import ValidationGate
 from hungerloop.services.validation_pipeline import (
     ValidationPipeline,
@@ -90,7 +91,11 @@ class _SpecSynthesizerProtocol(Protocol):
         mission_prose: str,
         feature_descriptions: list[str],
         synthesis_max_total_items: int,
+        synthesis_max_active_items: int,
+        synthesis_batch_size: int,
+        synthesis_audit_enabled: bool,
         covered_check_digest: str | None,
+        dry_run_cwd: Path | None = None,
     ) -> list[str]: ...
 
 
@@ -176,6 +181,7 @@ class LoopOrchestrator:
         max_loops_safety_cap: int = 1000,
         spec_check_synthesizer: _SpecSynthesizerProtocol | None = None,
         refactor_transaction_manager: RefactorTransactionManager | None = None,
+        synthesized_check_lifecycle: SynthesizedCheckLifecycle | None = None,
     ) -> None:
         self.repo = repo
         self.hunger_engine = hunger_engine
@@ -208,6 +214,16 @@ class LoopOrchestrator:
         self.hunger_update = hunger_update
         self.stagnation_detector = stagnation_detector
         self.refinement_compiler = refinement_compiler
+        self.synthesized_check_lifecycle = (
+            synthesized_check_lifecycle
+            or SynthesizedCheckLifecycle(
+                repo=repo,
+                validation_gate=validation_gate,
+                workspace_manager=workspace_manager,
+                hunger_update=hunger_update,
+                refinement_compiler=refinement_compiler,
+            )
+        )
         self.memory_manager = memory_manager
         self.spec_check_synthesizer = spec_check_synthesizer
         self.refactor_transaction_manager = refactor_transaction_manager
@@ -249,6 +265,11 @@ class LoopOrchestrator:
     async def _step_inner(self, task_id: str) -> LoopTrace | StopReport:
         policy = self.repo.get_hunger_policy(task_id)
         clock = self.repo.get_hunger_clock(task_id)
+        if self.repo.get_best_state(task_id) is not None:
+            await self.synthesized_check_lifecycle.validate_pending_baseline(
+                task_id=task_id,
+                loop_id=max(1, clock.loop_count),
+            )
         ledger = self.repo.get_hunger_ledger(task_id)
         previous_phase = self.repo.get_last_phase(task_id)
 
@@ -544,7 +565,7 @@ class LoopOrchestrator:
         commit_verdict = commit_decision["verdict"]
         effective_validation = validation
         effective_pipeline_result = pipeline_result
-        if commit_verdict != validation.verdict:
+        if not commit_decision["committed"] or commit_verdict != validation.verdict:
             effective_validation = validation.model_copy(
                 update={
                     "verdict": commit_verdict,
@@ -587,33 +608,57 @@ class LoopOrchestrator:
                 task_id=task_id,
                 loop_id=loop_id,
             )
+        conflict_results = self.synthesized_check_lifecycle.resolve_conflicts(
+            task_id=task_id,
+            loop_id=loop_id,
+            validation=validation,
+            attempted_hunger_item_ids=attempted_hunger_item_ids,
+            candidate_committed=bool(commit_decision["committed"]),
+            exempted_check_keys=self.stagnation_detector.exempted_check_keys(
+                task_id,
+                open_transaction,
+            ),
+            threshold=policy.synthesis_conflict_threshold,
+        )
         self.hunger_update.apply_validation(task_id, effective_validation)
         stagnation = self.stagnation_detector.update(
             task_id,
             loop_id,
             effective_validation,
+            candidate_committed=bool(commit_decision["committed"]),
             attempted_hunger_item_ids=attempted_hunger_item_ids,
             respect_stagnation=policy.respect_stagnation,
             open_transaction=open_transaction,
         )
+        if any(result.quarantined for result in conflict_results):
+            self.repo.reset_no_progress_streak(task_id)
+            stagnation["global_blocked"] = False
 
         # v0.7: Settle due refactor transactions after commit and stagnation
         self._settle_due_transaction(task_id=task_id, loop_id=loop_id)
 
         # Post-commit synthesis: runs once after a successful commit and
         # before the next planning decision, when synthesis_enabled is True.
-        if (
-            commit_decision["committed"]
-            and self.spec_check_synthesizer is not None
-            and policy.synthesis_enabled
-            and policy.synthesis_max_total_items > 0
-        ):
-            await self._run_post_commit_synthesis(
+        if commit_decision["committed"]:
+            await self.synthesized_check_lifecycle.validate_pending_baseline(
                 task_id=task_id,
                 loop_id=loop_id,
-                policy=policy,
-                mission=mission,
+                workspace_root=self.workspace_manager.candidate_files_dir(
+                    task_id,
+                    loop_id,
+                ),
             )
+            if (
+                policy.synthesis_enabled
+                and self.spec_check_synthesizer is not None
+                and policy.synthesis_max_total_items > 0
+            ):
+                await self._run_post_commit_synthesis(
+                    task_id=task_id,
+                    loop_id=loop_id,
+                    policy=policy,
+                    mission=mission,
+                )
 
         if self.memory_manager is not None:
             self.memory_manager.propose_from_loop(task_id, loop_id, effective_validation)
@@ -1649,9 +1694,9 @@ class LoopOrchestrator:
     ) -> None:
         """Run post-commit synthesis after a successful commit.
 
-        This runs exactly once after a successful commit and before the
-        next planning decision. Accepted proposals route through the
-        compiler-owned ``RefinementCompiler.compile_spec_coverage`` path.
+        Accepted proposals route through the compiler-owned injection path.
+        Each batch is immediately checked against ``best/files`` so already
+        satisfied or invalid checks consume no worker loop.
         """
         assert self.spec_check_synthesizer is not None
         mission_prose = ""
@@ -1669,17 +1714,46 @@ class LoopOrchestrator:
                 build_covered_check_digest,
             )
 
-            covered_digest = build_covered_check_digest(
-                repo=self.repo, task_id=task_id
+            max_rounds = max(
+                1,
+                (
+                    policy.synthesis_max_total_items
+                    + policy.synthesis_batch_size
+                    - 1
+                )
+                // policy.synthesis_batch_size,
             )
-            await self.spec_check_synthesizer.synthesize_post_commit(
-                task_id=task_id,
-                loop_id=loop_id,
-                mission_prose=mission_prose,
-                feature_descriptions=feature_descriptions,
-                synthesis_max_total_items=policy.synthesis_max_total_items,
-                covered_check_digest=covered_digest,
-            )
+            for _ in range(max_rounds):
+                covered_digest = build_covered_check_digest(
+                    repo=self.repo, task_id=task_id
+                )
+                injected_ids = await self.spec_check_synthesizer.synthesize_post_commit(
+                    task_id=task_id,
+                    loop_id=loop_id,
+                    mission_prose=mission_prose,
+                    feature_descriptions=feature_descriptions,
+                    synthesis_max_total_items=policy.synthesis_max_total_items,
+                    synthesis_max_active_items=policy.synthesis_max_active_items,
+                    synthesis_batch_size=policy.synthesis_batch_size,
+                    synthesis_audit_enabled=policy.synthesis_audit_enabled,
+                    covered_check_digest=covered_digest,
+                    dry_run_cwd=self.workspace_manager.candidate_files_dir(
+                        task_id,
+                        loop_id,
+                    ),
+                )
+                if not injected_ids:
+                    break
+                await self.synthesized_check_lifecycle.validate_pending_baseline(
+                    task_id=task_id,
+                    loop_id=loop_id,
+                    workspace_root=self.workspace_manager.candidate_files_dir(
+                        task_id,
+                        loop_id,
+                    ),
+                )
+        except SafetyStopError:
+            raise
         except Exception as exc:
             self.repo.append_event(
                 EventType.ERROR,

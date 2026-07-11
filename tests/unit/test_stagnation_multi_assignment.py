@@ -47,6 +47,7 @@ def test_attempted_union() -> None:
         "task-1",
         1,
         _report(attempted=[]),
+        candidate_committed=True,
         attempted_hunger_item_ids=["H-001", "H-002"],
     )
 
@@ -64,6 +65,7 @@ def test_skipped_not_attempted() -> None:
         "task-1",
         1,
         _report(attempted=["H-001", "H-002"]),
+        candidate_committed=True,
         attempted_hunger_item_ids=["H-001"],
     )
 

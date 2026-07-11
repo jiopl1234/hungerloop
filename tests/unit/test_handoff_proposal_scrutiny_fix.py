@@ -27,6 +27,7 @@ from hungerloop.services.check_proposal_gate import (
 )
 from hungerloop.services.refinement_compiler import RefinementCompiler
 from hungerloop.services.requirement_compiler import RequirementCompiler
+from hungerloop.services.workspace_manager import WorkspaceManager
 
 RepoUnderTest = InMemoryRepository | SQLiteRepository
 
@@ -183,6 +184,52 @@ class TestProductionDryRunnerWiring:
         )
 
         assert result.accepted_proposal_count == 1
+
+    def test_worker_gate_uses_candidate_workspace_cwd(
+        self,
+        repo: Any,
+        tmp_path: Path,
+    ) -> None:
+        from hungerloop.services.handoff_processor import HandoffProcessor
+
+        observed_cwds: list[Path | None] = []
+
+        class _CapturingDryRunner(DryRunner):
+            async def dry_run(
+                self,
+                argv: list[str],
+                cwd: Path | None = None,
+            ) -> bool:
+                del argv
+                observed_cwds.append(cwd)
+                return True
+
+        workspace_manager = WorkspaceManager(tmp_path)
+        expected = workspace_manager.create_candidate_workspace("task-1", 3)
+        processor = HandoffProcessor(
+            repo,
+            requirement_compiler=RequirementCompiler(repo),
+            check_proposal_gate=CheckProposalGate(
+                dry_runner=_CapturingDryRunner()
+            ),
+            refinement_compiler=RefinementCompiler(repo),
+            workspace_manager=workspace_manager,
+        )
+
+        import asyncio
+
+        result = asyncio.run(
+            processor.process_handoffs(
+                "task-1",
+                3,
+                [_handoff(_test_gap_item(proposed_checks=[_shell_proposal()]))],
+                mission=None,
+                budget=_budget(5),
+            )
+        )
+
+        assert result.accepted_proposal_count == 1
+        assert observed_cwds == [expected, expected]
 
 
 # ---------------------------------------------------------------------------

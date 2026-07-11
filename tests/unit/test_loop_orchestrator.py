@@ -3,10 +3,12 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any, cast
 
 import pytest
 
 from hungerloop.cli.orchestrator_factory import build_orchestrator
+from hungerloop.models.blackboard import BestState
 from hungerloop.models.context import ContextPack
 from hungerloop.models.enums import (
     AcceptanceCheckType,
@@ -507,8 +509,13 @@ async def test_orchestrator_uses_validation_pipeline_and_commit_receives_result(
 
     commit_inputs: list[object] = []
 
-    def apply_spy(candidate: object, report: object) -> dict[str, object]:
+    def apply_spy(
+        candidate: object,
+        report: object,
+        **kwargs: object,
+    ) -> dict[str, object]:
         del candidate
+        del kwargs
         commit_inputs.append(report)
         return {
             "committed": False,
@@ -536,6 +543,131 @@ async def test_orchestrator_uses_validation_pipeline_and_commit_receives_result(
     assert commit_inputs == [pipeline_result]
     assert outcome.validation_report_id == pipeline_result.deterministic_report.id
     assert outcome.verdict == "pass"
+    assert outcome.newly_passed_check_keys == []
+    updated_item = repo.get_hunger_item("H-001")
+    assert updated_item is not None
+    assert updated_item.last_progress_loop_id is None
+    assert updated_item.consecutive_failure_count == 1
+
+
+async def test_orchestrator_targets_synthesized_ledger_item_without_feature(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo = InMemoryRepository()
+    done_item = HungerItem(
+        id="H-001",
+        title="original done",
+        priority=1.0,
+        gap_score=0.0,
+        status=HungerItemStatus.VALIDATED_SATISFIED,
+    )
+    syn_item = HungerItem(
+        id="H-SYN-001",
+        title="synthesized edge",
+        priority=1.0,
+        gap_score=1.0,
+        refinement_tier=1,
+        generated_by="synthesizer",
+        acceptance_checks=[
+            AcceptanceCheck(
+                check_type=AcceptanceCheckType.FILE_EXISTS,
+                params={"path": "edge.txt"},
+                description="edge file exists",
+            ),
+        ],
+    )
+    _seed_task(repo, [done_item, syn_item])
+    _save_mission_graph(repo, _mission_for_item())
+    actions: list[dict[str, object]] = [
+        {
+            "tool_name": "write_file",
+            "args": {"path": "edge.txt", "content": "ok"},
+        }
+    ]
+    orchestrator = _build_full_orchestrator(
+        tmp_path=tmp_path,
+        repo=repo,
+        model_client=DummyModelClient.with_actions(actions),
+    )
+    calls: list[dict[str, Any]] = []
+
+    class _PipelineSpy:
+        async def run(self, *args: object, **kwargs: object) -> ValidationPipelineResult:
+            calls.append({"args": args, "kwargs": kwargs})
+            report = _deterministic_report(
+                report_id="VAL-syn",
+                verdict=ValidationVerdict.PASS,
+            ).model_copy(
+                update={
+                    "attempted_hunger_item_ids": ["H-SYN-001"],
+                    "newly_passed_check_keys": ["H-SYN-001:0"],
+                    "currently_passed_check_keys": ["H-SYN-001:0"],
+                    "satisfied_hunger_item_ids": ["H-SYN-001"],
+                }
+            )
+            return ValidationPipelineResult(
+                deterministic_report=report,
+                scrutiny_report=None,
+                user_testing_report=None,
+                pipeline_verdict="pass",
+                stages_run=["deterministic"],
+            )
+
+    monkeypatch.setattr(orchestrator, "validation_pipeline", _PipelineSpy())
+
+    outcome = await orchestrator.step("t1")
+
+    assert isinstance(outcome, LoopTrace)
+    assert len(calls) == 1
+    kwargs = cast(dict[str, object], calls[0]["kwargs"])
+    assert kwargs["target_hunger_item_ids"] == ["H-SYN-001"]
+    assert outcome.selected_hunger_item_ids == ["H-SYN-001"]
+    assert outcome.assignment_traces
+    assert outcome.assignment_traces[0]["target_feature_ids"] == []
+
+
+async def test_pending_synthesis_baseline_clears_when_policy_is_disabled(
+    tmp_path: Path,
+) -> None:
+    repo = InMemoryRepository()
+    pending = HungerItem(
+        id="H-SYN-001",
+        title="ready file exists",
+        generated_by="synthesizer",
+        synthesis_baseline_pending=True,
+        acceptance_checks=[
+            AcceptanceCheck(
+                check_type=AcceptanceCheckType.FILE_EXISTS,
+                params={"path": "ready.txt"},
+            )
+        ],
+    )
+    _seed_task(repo, [pending])
+    orchestrator = _build_full_orchestrator(
+        tmp_path=tmp_path,
+        repo=repo,
+        model_client=DummyModelClient.with_actions([]),
+    )
+    best_root = orchestrator.workspace_manager.best_files_dir("t1")
+    (best_root / "ready.txt").write_text("ready", encoding="utf-8")
+    repo.save_best_state(
+        BestState(
+            task_id="t1",
+            state_id="BEST-t1-1",
+            summary="best",
+            updated_at_loop=1,
+        )
+    )
+
+    outcome = await orchestrator.step("t1")
+
+    assert isinstance(outcome, StopReport)
+    assert outcome.stop_reason is StopReason.DONE
+    updated = repo.get_hunger_item("H-SYN-001")
+    assert updated is not None
+    assert updated.status is HungerItemStatus.VALIDATED_SATISFIED
+    assert repo.get_hunger_clock("t1").loop_count == 0
 
 
 async def test_budgeted_mode_adds_refinement_work_instead_of_done(

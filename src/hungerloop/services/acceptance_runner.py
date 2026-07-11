@@ -12,6 +12,9 @@ into a :class:`~hungerloop.models.validation.CheckResult`.
 """
 from __future__ import annotations
 
+import shutil
+import tempfile
+from pathlib import Path
 from typing import Any
 
 from hungerloop.models.enums import AcceptanceCheckType
@@ -43,6 +46,8 @@ class AcceptanceCheckRunner:
         task_id: str,
         loop_id: int,
         candidate: Any,
+        *,
+        workspace_root: Path | None = None,
     ) -> tuple[bool, str, str | None]:
         """Run a single acceptance check.
 
@@ -56,7 +61,10 @@ class AcceptanceCheckRunner:
             ValueError: For unknown or malformed checks.
         """
         ct = check.check_type
-        candidate_root = self.workspace_manager.candidate_files_dir(task_id, loop_id)
+        candidate_root = workspace_root or self.workspace_manager.candidate_files_dir(
+            task_id,
+            loop_id,
+        )
 
         if ct == AcceptanceCheckType.FILE_EXISTS:
             raw_pattern = str(check.params["path"])
@@ -87,14 +95,58 @@ class AcceptanceCheckRunner:
             argv = list(check.params["argv"])
             timeout = int(check.params.get("timeout", 60))
 
-            result = await self.sandbox_runner.run_argv(
-                task_id=task_id,
-                loop_id=loop_id,
-                argv=argv,
-                cwd=candidate_root,
-                timeout=timeout,
-                evidence_label=f"acceptance:{candidate.id}",
-            )
+            fixture_argv = check.params.get("fixture_argv")
+            if fixture_argv is not None:
+                if not isinstance(fixture_argv, list) or any(
+                    not isinstance(argument, str) for argument in fixture_argv
+                ):
+                    raise ValueError("SHELL_EXIT_ZERO fixture_argv must be strings.")
+                with tempfile.TemporaryDirectory(
+                    prefix=".hungerloop-acceptance-fixture-",
+                    dir=candidate_root.parent,
+                ) as temp_dir:
+                    execution_root = Path(temp_dir) / "files"
+                    shutil.copytree(candidate_root, execution_root)
+                    fixture_result = await self.sandbox_runner.run_argv(
+                        task_id=task_id,
+                        loop_id=loop_id,
+                        argv=list(fixture_argv),
+                        cwd=execution_root,
+                        timeout=timeout,
+                        evidence_label=f"acceptance_fixture:{candidate.id}",
+                    )
+                    fixture_ok = (
+                        fixture_result.exit_code == 0
+                        and not fixture_result.timed_out
+                    )
+                    if not fixture_ok:
+                        detail = (
+                            f"fixture(argv={fixture_argv}): "
+                            f"exit={fixture_result.exit_code}, "
+                            f"timeout={fixture_result.timed_out}"
+                        )
+                        output_summary = _summarize_shell_output(fixture_result)
+                        if output_summary:
+                            detail = f"{detail}; {output_summary}"
+                        return False, detail, fixture_result.evidence_id
+
+                    result = await self.sandbox_runner.run_argv(
+                        task_id=task_id,
+                        loop_id=loop_id,
+                        argv=argv,
+                        cwd=execution_root,
+                        timeout=timeout,
+                        evidence_label=f"acceptance:{candidate.id}",
+                    )
+            else:
+                result = await self.sandbox_runner.run_argv(
+                    task_id=task_id,
+                    loop_id=loop_id,
+                    argv=argv,
+                    cwd=candidate_root,
+                    timeout=timeout,
+                    evidence_label=f"acceptance:{candidate.id}",
+                )
 
             ok = result.exit_code == 0 and not result.timed_out
             detail = (

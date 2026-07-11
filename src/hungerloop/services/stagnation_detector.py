@@ -56,6 +56,7 @@ class StagnationDetector:
         loop_id: int,
         validation_report: ValidationReport,
         *,
+        candidate_committed: bool,
         attempted_hunger_item_ids: list[str] | None = None,
         respect_stagnation: bool = True,
         open_transaction: RefactorTransaction | None = None,
@@ -67,6 +68,8 @@ class StagnationDetector:
             loop_id: Current loop number.
             validation_report: ValidationReport with attempted_hunger_item_ids,
                 newly_passed_check_keys, and has_real_progress.
+            candidate_committed: Whether CommitManager accepted the candidate.
+                Only committed newly-passed checks count as progress.
             attempted_hunger_item_ids: Optional M3 override containing the union
                 of hunger items attempted by completed, non-skipped assignments.
             open_transaction: Optional refactor transaction. When the
@@ -84,12 +87,13 @@ class StagnationDetector:
         )
         newly_progressed: set[str] = set()
 
-        for check_key in validation_report.newly_passed_check_keys:
-            item_id = check_key.split(":", 1)[0]
-            newly_progressed.add(item_id)
+        if candidate_committed:
+            for check_key in validation_report.newly_passed_check_keys:
+                item_id = check_key.split(":", 1)[0]
+                newly_progressed.add(item_id)
 
         # Determine which check keys are exempted due to an open transaction.
-        exempted_check_keys = self._exempted_check_keys(task_id, open_transaction)
+        exempted_check_keys = self.exempted_check_keys(task_id, open_transaction)
 
         # Determine which items are fully exempted (all failing checks declared)
         # vs partially exempted (some undeclared failing checks remain).
@@ -105,6 +109,11 @@ class StagnationDetector:
         for iid in attempted:
             item = items_by_id.get(iid)
             if item is None:
+                continue
+            if item.status in {
+                HungerItemStatus.CLOSED,
+                HungerItemStatus.VALIDATED_SATISFIED,
+            }:
                 continue
 
             if iid in newly_progressed:
@@ -129,7 +138,7 @@ class StagnationDetector:
         if mutated:
             self.repo.save_hunger_ledger(task_id, ledger)
 
-        if validation_report.has_real_progress:
+        if candidate_committed and validation_report.has_real_progress:
             self.repo.reset_no_progress_streak(task_id)
             global_blocked = False
         else:
@@ -142,6 +151,14 @@ class StagnationDetector:
             "blocked_items": blocked_items,
             "global_blocked": global_blocked,
         }
+
+    def exempted_check_keys(
+        self,
+        task_id: str,
+        open_transaction: RefactorTransaction | None,
+    ) -> set[str]:
+        """Return accepted-check regressions exempted by ADR-010."""
+        return self._exempted_check_keys(task_id, open_transaction)
 
     def _exempted_check_keys(
         self,

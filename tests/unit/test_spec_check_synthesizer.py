@@ -20,6 +20,7 @@ from hungerloop.models.hunger import (
     HungerLedger,
     HungerPolicy,
 )
+from hungerloop.models.synthesis import CheckProposal
 from hungerloop.models.usage import ModelUsage
 from hungerloop.repository.in_memory_repo import InMemoryRepository
 from hungerloop.services.check_proposal_gate import CheckProposalGate
@@ -27,6 +28,7 @@ from hungerloop.services.cost_guard import CostGuard, SafetyStopError
 from hungerloop.services.model_client import ModelResponse
 from hungerloop.services.refinement_compiler import RefinementCompiler
 from hungerloop.services.spec_check_synthesizer import (
+    SYNTHESIS_MAX_TOKENS,
     SpecCheckSynthesizer,
     build_covered_check_digest,
     build_synthesis_prompt,
@@ -55,6 +57,10 @@ class _FakeCompletionClient:
     @property
     def last_messages(self) -> list[dict[str, str]] | None:
         return self._last_messages
+
+    @property
+    def last_max_tokens(self) -> int | None:
+        return self._last_max_tokens
 
     async def complete(
         self,
@@ -112,6 +118,12 @@ class _FailingCompletionClient:
     ) -> ModelResponse:
         self._calls += 1
         raise self._exc
+
+
+class _AlwaysPassDryRunner:
+    async def dry_run(self, argv: list[str], cwd: Any = None) -> bool:
+        del argv, cwd
+        return True
 
 
 # ---------------------------------------------------------------------------
@@ -325,7 +337,8 @@ class TestSynthesisParsesValidatesGates:
             "description": "traversal",
             "source_quote": "The project must have a main.py file",
         }
-        client = _FakeCompletionClient([_make_response(json.dumps([bad_path_proposal]))])
+        raw_response = json.dumps([bad_path_proposal])
+        client = _FakeCompletionClient([_make_response(raw_response)])
         synth = _make_synthesizer(repo=repo, completion_client=client)
 
         result = await synth.synthesize(
@@ -338,6 +351,18 @@ class TestSynthesisParsesValidatesGates:
 
         assert result.accepted_count == 0
         assert result.rejected_count >= 1
+        events = repo.list_events(
+            "t1", event_types=[EventType.SYNTH_CHECK_REJECTED.value]
+        )
+        assert len(events) == 1
+        payload = events[0]["payload"]
+        assert isinstance(payload, dict)
+        assert payload["reason"] == "gate_rejection"
+        assert payload["raw_response_excerpt"] == raw_response
+        rejected = payload["rejected_proposals"]
+        assert isinstance(rejected, list)
+        assert rejected[0]["reason"] == "unsafe_path:traversal"
+        assert rejected[0]["source_quote"] == bad_path_proposal["source_quote"]
 
     @pytest.mark.asyncio
     async def test_unanchored_source_quote_rejected(self) -> None:
@@ -361,6 +386,64 @@ class TestSynthesisParsesValidatesGates:
         )
 
         assert result.accepted_count == 0
+
+
+    @pytest.mark.asyncio
+    async def test_whitespace_normalized_source_quote_is_accepted(self) -> None:
+        repo = _setup_repo()
+        proposal = {
+            "check_type": "file_exists",
+            "params": {"path": "src/main.py"},
+            "description": "main file",
+            "source_quote": "The project must have a\nmain.py file",
+        }
+        client = _FakeCompletionClient([_make_response(json.dumps([proposal]))])
+        synth = _make_synthesizer(repo=repo, completion_client=client)
+
+        result = await synth.synthesize(
+            task_id="t1",
+            loop_id=None,
+            mission_prose=_MISSION_PROSE,
+            feature_descriptions=_FEATURE_DESCS,
+            synthesis_max_total_items=20,
+        )
+
+        assert result.accepted_count == 1
+
+    @pytest.mark.asyncio
+    async def test_rejection_event_includes_per_proposal_details_and_raw_response(self) -> None:
+        repo = _setup_repo()
+        proposal = {
+            "check_type": "file_exists",
+            "params": {"path": "src/main.py"},
+            "description": "main file",
+            "source_quote": "This quote does not appear in the spec text.",
+        }
+        raw_response = json.dumps([proposal])
+        client = _FakeCompletionClient([_make_response(raw_response)])
+        synth = _make_synthesizer(repo=repo, completion_client=client)
+
+        result = await synth.synthesize(
+            task_id="t1",
+            loop_id=7,
+            mission_prose=_MISSION_PROSE,
+            feature_descriptions=_FEATURE_DESCS,
+            synthesis_max_total_items=20,
+        )
+
+        assert result.accepted_count == 0
+        events = repo.list_events(
+            "t1", event_types=[EventType.SYNTH_CHECK_REJECTED.value]
+        )
+        assert len(events) == 1
+        payload = events[0]["payload"]
+        assert isinstance(payload, dict)
+        assert payload["reason"] == "no_valid_proposals"
+        assert payload["raw_response_excerpt"] == raw_response
+        rejected = payload["rejected_proposals"]
+        assert isinstance(rejected, list)
+        assert rejected[0]["reason"] == "source_quote_unanchored"
+        assert rejected[0]["source_quote"] == proposal["source_quote"]
 
 
 # ---------------------------------------------------------------------------
@@ -415,6 +498,7 @@ class TestSynthesisCostGuarded:
         )
 
         assert client.call_count == 1
+        assert client.last_max_tokens == SYNTHESIS_MAX_TOKENS
 
     @pytest.mark.asyncio
     async def test_completion_error_fails_closed(self) -> None:
@@ -530,6 +614,8 @@ class TestSynthesisPromptSources:
         system = messages[0]["content"]
         assert "JSON" in system
         assert "shell_exit_zero" in system or "file_exists" in system
+        assert '"argv": ["python", "-c", "..."]' in system
+        assert "never a single command string" in system
 
     @pytest.mark.asyncio
     async def test_source_quote_must_be_anchored(self) -> None:
@@ -779,6 +865,8 @@ class TestPlanTimeSynthesis:
         # Verify the item is in the ledger
         ledger = repo.get_hunger_ledger("t1")
         assert any(item.id == injected[0] for item in ledger.items)
+        injected_item = next(item for item in ledger.items if item.id == injected[0])
+        assert injected_item.synthesis_baseline_pending is True
 
     @pytest.mark.asyncio
     async def test_plan_time_no_proposals_returns_empty(self) -> None:
@@ -909,3 +997,189 @@ class TestSynthesizedChecksExtendDoneSemantics:
         # After synthesis, ledger.is_done() should be False
         ledger = repo.get_hunger_ledger("t1")
         assert not ledger.is_done()
+
+
+def test_prompt_requires_fixture_assertion_split() -> None:
+    messages = build_synthesis_prompt(
+        mission_prose=_MISSION_PROSE,
+        feature_descriptions=_FEATURE_DESCS,
+    )
+    system = messages[0]["content"]
+    assert "fixture_argv" in system
+    assert "setup only" in system
+    assert "must not contain the assertion" in system
+
+
+async def test_active_item_backpressure_skips_model_call() -> None:
+    active = HungerItem(
+        id="H-SYN-001",
+        title="active synthesized check",
+        generated_by="synthesizer",
+        acceptance_checks=[
+            AcceptanceCheck(
+                check_type=AcceptanceCheckType.FILE_EXISTS,
+                params={"path": "pending.txt"},
+            )
+        ],
+    )
+    repo = _setup_repo(items=[active])
+    client = _FakeCompletionClient([_make_response("[]")])
+    synth = _make_synthesizer(repo=repo, completion_client=client)
+
+    result = await synth.synthesize(
+        task_id="t1",
+        loop_id=1,
+        mission_prose=_MISSION_PROSE,
+        feature_descriptions=_FEATURE_DESCS,
+        synthesis_max_total_items=20,
+        synthesis_max_active_items=1,
+    )
+
+    assert result.skipped is True
+    assert client.call_count == 0
+
+
+async def test_rejected_key_is_sticky_and_does_not_consume_batch_slot() -> None:
+    repo = _setup_repo()
+    rejected = CheckProposal(
+        check_type=AcceptanceCheckType.FILE_EXISTS,
+        params={"path": "src/main.py"},
+        description="previously rejected",
+        source_quote="The project must have a main.py file",
+        proposed_by="synthesizer",
+    )
+    repo.append_event(
+        EventType.SYNTH_CHECK_REJECTED,
+        {"dedup_keys": [rejected.dedup_key()]},
+        task_id="t1",
+    )
+    client = _FakeCompletionClient(
+        [
+            _make_response(
+                json.dumps(
+                    [
+                        _make_file_proposal_json(),
+                        _make_file_proposal_json(
+                            path="fresh.py",
+                            description="fresh file",
+                            source_quote="Feature: main module at src/main.py",
+                        ),
+                    ]
+                )
+            )
+        ]
+    )
+    synth = _make_synthesizer(repo=repo, completion_client=client)
+
+    result = await synth.synthesize(
+        task_id="t1",
+        loop_id=1,
+        mission_prose=_MISSION_PROSE,
+        feature_descriptions=_FEATURE_DESCS,
+        synthesis_max_total_items=20,
+        synthesis_batch_size=1,
+    )
+
+    assert [proposal.params["path"] for proposal in result.accepted_proposals] == [
+        "fresh.py"
+    ]
+
+
+async def test_explicit_semantic_audit_rejection_is_filtered() -> None:
+    repo = _setup_repo()
+    raw = _make_file_proposal_json()
+    proposal = CheckProposal(
+        check_type=AcceptanceCheckType.FILE_EXISTS,
+        params=raw["params"],
+        description=str(raw["description"]),
+        source_quote=str(raw["source_quote"]),
+        proposed_by="synthesizer",
+    )
+    client = _FakeCompletionClient(
+        [
+            _make_response(json.dumps([raw])),
+            _make_response(
+                json.dumps(
+                    {
+                        "decisions": [
+                            {
+                                "dedup_key": proposal.dedup_key(),
+                                "entailed": False,
+                                "reason": "assertion exceeds the quoted spec",
+                            }
+                        ]
+                    }
+                )
+            ),
+        ]
+    )
+    synth = _make_synthesizer(repo=repo, completion_client=client)
+
+    result = await synth.synthesize(
+        task_id="t1",
+        loop_id=1,
+        mission_prose=_MISSION_PROSE,
+        feature_descriptions=_FEATURE_DESCS,
+        synthesis_max_total_items=20,
+        synthesis_audit_enabled=True,
+    )
+
+    assert result.accepted_proposals == []
+    assert client.call_count == 2
+    assert repo.list_events(
+        "t1",
+        event_types=[EventType.SYNTH_CHECK_AUDIT_REJECTED.value],
+    )
+
+
+async def test_unparseable_semantic_audit_fails_open() -> None:
+    repo = _setup_repo()
+    client = _FakeCompletionClient(
+        [
+            _make_response(json.dumps([_make_file_proposal_json()])),
+            _make_response("not-json"),
+        ]
+    )
+    synth = _make_synthesizer(repo=repo, completion_client=client)
+
+    result = await synth.synthesize(
+        task_id="t1",
+        loop_id=1,
+        mission_prose=_MISSION_PROSE,
+        feature_descriptions=_FEATURE_DESCS,
+        synthesis_max_total_items=20,
+        synthesis_audit_enabled=True,
+    )
+
+    assert len(result.accepted_proposals) == 1
+    assert repo.list_events(
+        "t1",
+        event_types=[EventType.SYNTH_AUDIT_FAILED_OPEN.value],
+    )
+
+
+async def test_proposal_v2_metadata_is_parsed() -> None:
+    repo = _setup_repo()
+    raw = _make_shell_proposal_json(
+        argv=["python", "-c", "print('assertion')"],
+    )
+    raw["fixture_argv"] = ["python", "-c", "print('fixture')"]
+    raw["prerequisite_check_keys"] = ["H-001:0"]
+    client = _FakeCompletionClient([_make_response(json.dumps([raw]))])
+    synth = _make_synthesizer(
+        repo=repo,
+        completion_client=client,
+        gate=CheckProposalGate(dry_runner=_AlwaysPassDryRunner()),
+    )
+
+    result = await synth.synthesize(
+        task_id="t1",
+        loop_id=1,
+        mission_prose=_MISSION_PROSE,
+        feature_descriptions=_FEATURE_DESCS,
+        synthesis_max_total_items=20,
+    )
+
+    proposal = result.accepted_proposals[0]
+    assert proposal.fixture_argv == ["python", "-c", "print('fixture')"]
+    assert proposal.prerequisite_check_keys == ["H-001:0"]

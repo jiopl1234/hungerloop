@@ -7,8 +7,13 @@ from unittest.mock import patch
 
 import pytest
 
-from hungerloop.models.enums import HungerItemStatus, LoopPhase
-from hungerloop.models.hunger import HungerItem, HungerLedger, HungerSnapshot
+from hungerloop.models.enums import AcceptanceCheckType, HungerItemStatus, LoopPhase
+from hungerloop.models.hunger import (
+    AcceptanceCheck,
+    HungerItem,
+    HungerLedger,
+    HungerSnapshot,
+)
 from hungerloop.models.mission import Mission, MissionFeature, MissionPhase
 from hungerloop.models.planning import BudgetAllocation, LoopPlan
 from hungerloop.models.worker import HandoffItem, WorkerHandoff
@@ -111,6 +116,8 @@ def _item(
     gap_score: float = 1.0,
     refinement_tier: int = 0,
     status: HungerItemStatus = HungerItemStatus.OPEN,
+    generated_by: str | None = None,
+    acceptance_checks: list[AcceptanceCheck] | None = None,
 ) -> HungerItem:
     return HungerItem(
         id=item_id,
@@ -119,6 +126,16 @@ def _item(
         gap_score=gap_score,
         refinement_tier=refinement_tier,
         status=status,
+        generated_by=generated_by,
+        acceptance_checks=acceptance_checks or [],
+    )
+
+
+def _shell_check(description: str = "runs synthesized check") -> AcceptanceCheck:
+    return AcceptanceCheck(
+        check_type=AcceptanceCheckType.SHELL_EXIT_ZERO,
+        params={"argv": ["python", "-c", "print('ok')"]},
+        description=description,
     )
 
 
@@ -593,3 +610,87 @@ def test_max_workers_per_loop_one_with_mission(repo: InMemoryRepository) -> None
     )
 
     assert len(plan.assignments) == 1
+
+
+def test_plans_synthesized_ledger_item_without_feature(
+    repo: InMemoryRepository,
+) -> None:
+    feature = _feature("F-done", "H-done", status="done")
+    syn_item = _item(
+        "H-SYN-001",
+        refinement_tier=1,
+        generated_by="synthesizer",
+        acceptance_checks=[_shell_check("spec edge is covered")],
+    )
+    _save_ledger(repo, [_item("H-done"), syn_item])
+
+    plan = MissionPlanner(repo).plan(
+        "task-1",
+        8,
+        _snapshot(),
+        _budget(max_workers_per_loop=1),
+        mission=_mission([feature], max_parallel_features=1),
+    )
+
+    assert plan.selected_hunger_item_ids == ["H-SYN-001"]
+    assert len(plan.assignments) == 1
+    assignment = plan.assignments[0]
+    assert assignment.target_hunger_item_ids == ["H-SYN-001"]
+    assert assignment.target_feature_ids == []
+    assert assignment.depends_on == []
+    assert "Spec coverage item H-SYN-001" in assignment.mission
+    assert "spec edge is covered" in assignment.mission
+    assert "selected H-SYN-001: ledger_only" in plan.rationale
+
+
+def test_synthesized_ledger_item_waits_for_remaining_feature_slots(
+    repo: InMemoryRepository,
+) -> None:
+    feature = _feature("F-active", "H-active")
+    syn_item = _item(
+        "H-SYN-001",
+        refinement_tier=1,
+        generated_by="synthesizer",
+        acceptance_checks=[_shell_check()],
+    )
+    _save_ledger(repo, [_item("H-active"), syn_item])
+
+    plan = MissionPlanner(repo).plan(
+        "task-1",
+        9,
+        _snapshot(),
+        _budget(max_workers_per_loop=1),
+        mission=_mission([feature], max_parallel_features=1),
+    )
+
+    assert plan.selected_hunger_item_ids == ["H-active"]
+    assert plan.assignments[0].target_feature_ids == ["F-active"]
+    assert "skipped H-SYN-001: not_selected_budget_cap" in plan.rationale
+
+
+def test_non_synthesized_ledger_only_item_is_not_planned(
+    repo: InMemoryRepository,
+) -> None:
+    feature = _feature("F-done", "H-done", status="done")
+    _save_ledger(
+        repo,
+        [
+            _item("H-done"),
+            _item(
+                "H-DISC-001",
+                generated_by="worker",
+                acceptance_checks=[_shell_check()],
+            ),
+        ],
+    )
+
+    plan = MissionPlanner(repo).plan(
+        "task-1",
+        10,
+        _snapshot(),
+        _budget(max_workers_per_loop=1),
+        mission=_mission([feature], max_parallel_features=1),
+    )
+
+    assert plan.selected_hunger_item_ids == []
+    assert plan.assignments == []

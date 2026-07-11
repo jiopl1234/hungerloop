@@ -154,6 +154,13 @@ class EventType(str, Enum):
     # ----- Spec synthesis (v0.7) ----------------------------------------
     SYNTHESIS_ITEM_INJECTED = "synthesis_item_injected"
     SYNTH_CHECK_REJECTED = "synth_check_rejected"
+    SYNTH_CHECK_FIXTURE_REJECTED = "synth_check_fixture_rejected"
+    SYNTH_CHECK_BASELINE_VALIDATED = "synth_check_baseline_validated"
+    SYNTH_CHECK_AUTO_SATISFIED = "synth_check_auto_satisfied"
+    SYNTH_CHECK_CONFLICT_DETECTED = "synth_check_conflict_detected"
+    SYNTH_CHECK_QUARANTINED = "synth_check_quarantined"
+    SYNTH_CHECK_AUDIT_REJECTED = "synth_check_audit_rejected"
+    SYNTH_AUDIT_FAILED_OPEN = "synth_audit_failed_open"
     SYNTHESIS_ATTEMPTED = "synthesis_attempted"
     SYNTHESIS_SKIPPED = "synthesis_skipped"
 

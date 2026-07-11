@@ -13,6 +13,9 @@ The gate is deterministic and never calls LLMs.
 """
 from __future__ import annotations
 
+import json
+import shutil
+import tempfile
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
@@ -36,6 +39,9 @@ REASON_MISSING_ARGV = "invalid_argv:missing"
 REASON_INVALID_ARGV_ELEMENT = "invalid_argv:non_string_or_empty"
 REASON_NON_ALLOWLISTED = "non_allowlisted_command"
 REASON_NONDETERMINISTIC = "nondeterministic"
+REASON_MISSING_FIXTURE = "missing_fixture"
+REASON_FIXTURE_SETUP_FAILED = "fixture_setup_failed"
+REASON_FIXTURE_NONDETERMINISTIC = "fixture_nondeterministic"
 
 
 @runtime_checkable
@@ -78,7 +84,20 @@ class SandboxDryRunner(DryRunner):
     async def dry_run(self, argv: list[str], cwd: Path | None = None) -> bool:
         """Run *argv* once and return ``True`` iff exit code is 0."""
         run_cwd = cwd if cwd is not None else self._cwd
+        backup_root: Path | None = None
+        snapshot_ready = False
         try:
+            if cwd is not None:
+                if not run_cwd.is_dir():
+                    return False
+                backup_root = Path(
+                    tempfile.mkdtemp(
+                        prefix=".hungerloop-dry-run-",
+                        dir=run_cwd.parent,
+                    )
+                )
+                shutil.copytree(run_cwd, backup_root / "files")
+                snapshot_ready = True
             result = await self._sandbox.run_argv(
                 task_id="__dry_run__",
                 loop_id=0,
@@ -90,6 +109,14 @@ class SandboxDryRunner(DryRunner):
             return result.exit_code == 0
         except (ValueError, FileNotFoundError, PermissionError, OSError):
             return False
+        finally:
+            if backup_root is not None and snapshot_ready:
+                snapshot = backup_root / "files"
+                if run_cwd.exists():
+                    shutil.rmtree(run_cwd)
+                shutil.copytree(snapshot, run_cwd)
+            if backup_root is not None:
+                shutil.rmtree(backup_root, ignore_errors=True)
 
 
 class RejectedProposal(BaseModel):
@@ -191,6 +218,9 @@ class CheckProposalGate:
         proposals: list[CheckProposal],
         *,
         existing_keys: set[str] | None = None,
+        dry_run_cwd: Path | None = None,
+        require_fixture: bool = False,
+        defer_fixture_precheck: bool = False,
     ) -> GateResult:
         """Filter proposals through the gate.
 
@@ -238,8 +268,40 @@ class CheckProposalGate:
                 if reason is not None:
                     _reject(proposal, reason, key)
                     continue
+                if require_fixture and proposal.fixture_argv is None:
+                    _reject(proposal, REASON_MISSING_FIXTURE, key)
+                    continue
+                if proposal.fixture_argv is not None:
+                    fixture_reason = _validate_argv(
+                        proposal.fixture_argv,
+                        self._allowlist,
+                    )
+                    if fixture_reason is not None:
+                        _reject(proposal, fixture_reason, key)
+                        continue
+                if defer_fixture_precheck:
+                    accepted.append(proposal)
+                    known.add(key)
+                    continue
+                if proposal.fixture_argv is not None:
+                    fixture_reason = await self._dry_run_fixture(
+                        proposal.fixture_argv,
+                        cwd=dry_run_cwd,
+                    )
+                    if fixture_reason is not None:
+                        _reject(proposal, fixture_reason, key)
+                        continue
                 # Dry-run twice and require identical outcome
-                dry_run_reason = await self._dry_run_check(proposal)
+                if proposal.fixture_argv is not None:
+                    dry_run_reason = await self._dry_run_composite_check(
+                        fixture_argv=proposal.fixture_argv,
+                        assertion_argv=list(proposal.params["argv"]),
+                        cwd=dry_run_cwd,
+                    )
+                else:
+                    dry_run_reason = await self._dry_run_check(
+                        proposal, cwd=dry_run_cwd
+                    )
                 if dry_run_reason is not None:
                     _reject(proposal, dry_run_reason, key)
                     continue
@@ -267,7 +329,9 @@ class CheckProposalGate:
         argv = proposal.params.get("argv")
         return _validate_argv(argv, self._allowlist)
 
-    async def _dry_run_check(self, proposal: CheckProposal) -> str | None:
+    async def _dry_run_check(
+        self, proposal: CheckProposal, *, cwd: Path | None = None
+    ) -> str | None:
         """Dry-run the proposal twice and check for determinism.
 
         Returns ``None`` if accepted, or a reason code if rejected.
@@ -280,9 +344,56 @@ class CheckProposalGate:
         argv = proposal.params.get("argv", [])
         assert isinstance(argv, list)
 
-        result1 = await self._dry_runner.dry_run(list(argv))
-        result2 = await self._dry_runner.dry_run(list(argv))
+        result1 = await self._dry_runner.dry_run(list(argv), cwd=cwd)
+        result2 = await self._dry_runner.dry_run(list(argv), cwd=cwd)
 
+        if result1 != result2:
+            return REASON_NONDETERMINISTIC
+        return None
+
+    async def _dry_run_fixture(
+        self,
+        argv: list[str],
+        *,
+        cwd: Path | None = None,
+    ) -> str | None:
+        """Require fixture setup to succeed deterministically twice."""
+        if self._dry_runner is None:
+            return "no_dry_runner"
+
+        result1 = await self._dry_runner.dry_run(list(argv), cwd=cwd)
+        result2 = await self._dry_runner.dry_run(list(argv), cwd=cwd)
+        if result1 != result2:
+            return REASON_FIXTURE_NONDETERMINISTIC
+        if not result1:
+            return REASON_FIXTURE_SETUP_FAILED
+        return None
+
+    async def _dry_run_composite_check(
+        self,
+        *,
+        fixture_argv: list[str],
+        assertion_argv: list[str],
+        cwd: Path | None = None,
+    ) -> str | None:
+        """Run fixture then assertion twice from a restored workspace snapshot."""
+        if self._dry_runner is None:
+            return "no_dry_runner"
+        script = (
+            "import json, subprocess, sys\n"
+            "for command in json.loads(sys.argv[1]):\n"
+            "    result = subprocess.run(command)\n"
+            "    if result.returncode:\n"
+            "        raise SystemExit(result.returncode)\n"
+        )
+        composite_argv = [
+            "python",
+            "-c",
+            script,
+            json.dumps([fixture_argv, assertion_argv]),
+        ]
+        result1 = await self._dry_runner.dry_run(composite_argv, cwd=cwd)
+        result2 = await self._dry_runner.dry_run(composite_argv, cwd=cwd)
         if result1 != result2:
             return REASON_NONDETERMINISTIC
         return None

@@ -15,7 +15,12 @@ from dataclasses import dataclass
 from pydantic import BaseModel, Field
 
 from hungerloop.models.blackboard import BestState
-from hungerloop.models.enums import AcceptanceCheckType, CompletionMode, HungerItemType
+from hungerloop.models.enums import (
+    AcceptanceCheckType,
+    CompletionMode,
+    HungerItemStatus,
+    HungerItemType,
+)
 from hungerloop.models.events import EventType
 from hungerloop.models.hunger import (
     AcceptanceCheck,
@@ -96,6 +101,7 @@ class RefinementCompiler:
         generated_by: str,
         tier: int = 1,
         max_new_items: int = _DEFAULT_MAX_NEW_ITEMS,
+        baseline_pending: bool = False,
     ) -> list[str]:
         """Compile accepted proposals into ``H-SYN-NNN`` hunger items.
 
@@ -147,6 +153,7 @@ class RefinementCompiler:
                     proposal=proposal,
                     generated_by=generated_by,
                     tier=tier,
+                    baseline_pending=baseline_pending,
                 )
             )
             matched_proposals.append(proposal)
@@ -175,11 +182,84 @@ class RefinementCompiler:
                     "proposed_by": proposal.proposed_by,
                     "check_type": proposal.check_type.value,
                     "description": proposal.description,
+                    "baseline_pending": baseline_pending,
+                    "fixture_argv": proposal.fixture_argv,
+                    "prerequisite_check_keys": proposal.prerequisite_check_keys,
                 },
                 task_id=task_id,
             )
 
         return [item.id for item in new_items]
+
+
+    def complete_synthesis_baseline(
+        self,
+        *,
+        task_id: str,
+        item_id: str,
+        loop_id: int,
+    ) -> None:
+        """Mark one synthesized item as baseline-checked."""
+        ledger = self.repo.get_hunger_ledger(task_id)
+        item = next((entry for entry in ledger.items if entry.id == item_id), None)
+        if item is None or not item.synthesis_baseline_pending:
+            return
+        item.synthesis_baseline_pending = False
+        item.updated_at_loop = loop_id
+        self.repo.save_hunger_ledger(task_id, ledger)
+
+    def resolve_synthesis_item(
+        self,
+        *,
+        task_id: str,
+        item_id: str,
+        resolution_kind: str,
+        resolution_reason: str,
+        loop_id: int,
+    ) -> None:
+        """Close a synthesized item with an auditable terminal resolution."""
+        ledger = self.repo.get_hunger_ledger(task_id)
+        item = next((entry for entry in ledger.items if entry.id == item_id), None)
+        if item is None:
+            return
+        item.status = HungerItemStatus.CLOSED
+        item.gap_score = 0.0
+        item.synthesis_baseline_pending = False
+        item.synthesis_resolution_kind = resolution_kind
+        item.synthesis_resolution_reason = resolution_reason
+        item.updated_at_loop = loop_id
+        self.repo.save_hunger_ledger(task_id, ledger)
+
+    def record_synthesis_conflict(
+        self,
+        *,
+        task_id: str,
+        item_id: str,
+        signature: str,
+        conflicting_check_keys: list[str],
+        threshold: int,
+        loop_id: int,
+    ) -> tuple[int, bool]:
+        """Persist a conflict occurrence and quarantine at ``threshold``."""
+        ledger = self.repo.get_hunger_ledger(task_id)
+        item = next((entry for entry in ledger.items if entry.id == item_id), None)
+        if item is None:
+            return 0, False
+        count = item.synthesis_conflict_signatures.get(signature, 0) + 1
+        item.synthesis_conflict_signatures[signature] = count
+        item.updated_at_loop = loop_id
+        quarantined = count >= threshold
+        if quarantined:
+            item.status = HungerItemStatus.CLOSED
+            item.gap_score = 0.0
+            item.synthesis_baseline_pending = False
+            item.synthesis_resolution_kind = "invalid_synthesis"
+            item.synthesis_resolution_reason = (
+                "repeated conflict with accepted checks: "
+                + ", ".join(conflicting_check_keys)
+            )
+        self.repo.save_hunger_ledger(task_id, ledger)
+        return count, quarantined
 
     def ensure_next_tier(
         self,
@@ -357,6 +437,7 @@ def _build_spec_coverage_item(
     proposal: CheckProposal,
     generated_by: str,
     tier: int,
+    baseline_pending: bool,
 ) -> HungerItem:
     """Build a ``H-SYN`` hunger item from an accepted proposal.
 
@@ -365,6 +446,9 @@ def _build_spec_coverage_item(
     value, never the nested ``proposed_by`` on the proposal, so worker-
     controlled proposal provenance cannot spoof ledger provenance.
     """
+    check_params = dict(proposal.params)
+    if proposal.fixture_argv is not None:
+        check_params["fixture_argv"] = list(proposal.fixture_argv)
     return HungerItem(
         id=item_id,
         title=proposal.description or f"Spec coverage check ({item_id})",
@@ -374,7 +458,7 @@ def _build_spec_coverage_item(
         acceptance_checks=[
             AcceptanceCheck(
                 check_type=proposal.check_type,
-                params=dict(proposal.params),
+                params=check_params,
                 description=proposal.description,
             )
         ],
@@ -383,4 +467,11 @@ def _build_spec_coverage_item(
         refinement_kind="spec_coverage",
         generated_by=generated_by,
         source_check_keys=[],
+        synthesis_baseline_pending=baseline_pending,
+        synthesis_fixture_argv=(
+            list(proposal.fixture_argv)
+            if proposal.fixture_argv is not None
+            else None
+        ),
+        synthesis_prerequisite_check_keys=list(proposal.prerequisite_check_keys),
     )

@@ -50,6 +50,16 @@ class _CandidateFeature:
         return self.item.priority * self.item.gap_score
 
 
+@dataclass(frozen=True)
+class _CandidateLedgerItem:
+    item: HungerItem
+    base_index: int
+
+    @property
+    def score(self) -> float:
+        return self.item.priority * self.item.gap_score
+
+
 class MissionPlanner:
     """Build deterministic loop plans for legacy and mission-runtime tasks."""
 
@@ -83,6 +93,9 @@ class MissionPlanner:
 
         candidates: list[_CandidateFeature] = []
         skip_reasons: dict[str, str] = {}
+        feature_hunger_item_ids = {
+            feature.hunger_item_id for feature in mission.features
+        }
         for index, feature in enumerate(mission.features):
             candidate = self._candidate_for_feature(
                 feature=feature,
@@ -98,10 +111,20 @@ class MissionPlanner:
                 candidates.append(candidate)
 
         sorted_candidates = sorted(candidates, key=self._candidate_sort_key)
+        ledger_candidates = self._ledger_only_candidates(
+            ledger_items=ledger.items,
+            feature_hunger_item_ids=feature_hunger_item_ids,
+            blocked_hunger_item_ids=blocked_hunger_item_ids,
+            base_index_offset=len(mission.features),
+        )
+        sorted_ledger_candidates = sorted(
+            ledger_candidates,
+            key=self._ledger_candidate_sort_key,
+        )
         max_parallel_features = mission.max_parallel_features or 1
         selected_count = min(
             budget.max_workers_per_loop,
-            len(sorted_candidates),
+            len(sorted_candidates) + len(sorted_ledger_candidates),
             max_parallel_features,
         )
         if selected_count < 1:
@@ -121,6 +144,7 @@ class MissionPlanner:
                 ),
             )
 
+        feature_slot_count = min(selected_count, len(sorted_candidates))
         candidate_by_feature_id = {
             candidate.feature.feature_id: candidate for candidate in sorted_candidates
         }
@@ -135,7 +159,7 @@ class MissionPlanner:
         selected_feature_ids = self._select_feature_ids(
             sorted_candidates,
             dependencies_by_feature,
-            selected_count,
+            feature_slot_count,
         )
         selected_feature_id_set = set(selected_feature_ids)
         for candidate in sorted_candidates:
@@ -150,6 +174,8 @@ class MissionPlanner:
         ordered_candidates = [
             candidate_by_feature_id[feature_id] for feature_id in ordered_feature_ids
         ]
+        remaining_slots = selected_count - len(ordered_candidates)
+        selected_ledger_candidates = sorted_ledger_candidates[:remaining_slots]
         assignment_id_by_feature_id = {
             candidate.feature.feature_id: f"ASGN-{task_id}-{loop_id}-{index}"
             for index, candidate in enumerate(ordered_candidates)
@@ -169,11 +195,25 @@ class MissionPlanner:
             )
             for index, candidate in enumerate(ordered_candidates)
         ]
+        ledger_assignments = [
+            self._assignment_for_ledger_candidate(
+                task_id=task_id,
+                loop_id=loop_id,
+                index=len(assignments) + index,
+                mission=mission,
+                candidate=candidate,
+                budget=budget,
+            )
+            for index, candidate in enumerate(selected_ledger_candidates)
+        ]
+        assignments.extend(ledger_assignments)
         rationale = self._rationale(
             mission=mission,
             selected_feature_ids=selected_feature_id_set,
             skip_reasons=skip_reasons,
             item_by_id=item_by_id,
+            selected_ledger_items=selected_ledger_candidates,
+            skipped_ledger_items=sorted_ledger_candidates[remaining_slots:],
         )
 
         return LoopPlan(
@@ -181,7 +221,8 @@ class MissionPlanner:
             loop_id=loop_id,
             selected_hunger_item_ids=[
                 candidate.feature.hunger_item_id for candidate in ordered_candidates
-            ],
+            ]
+            + [candidate.item.id for candidate in selected_ledger_candidates],
             assignments=assignments,
             phase=budget.phase,
             rationale=rationale,
@@ -193,6 +234,16 @@ class MissionPlanner:
             candidate.item.refinement_tier,
             -candidate.score,
             candidate.feature.feature_id,
+        )
+
+    @staticmethod
+    def _ledger_candidate_sort_key(
+        candidate: _CandidateLedgerItem,
+    ) -> tuple[int, float, str]:
+        return (
+            candidate.item.refinement_tier,
+            -candidate.score,
+            candidate.item.id,
         )
 
     @staticmethod
@@ -247,6 +298,42 @@ class MissionPlanner:
             phase=phase,
             base_index=base_index,
         )
+
+    @staticmethod
+    def _ledger_only_candidates(
+        *,
+        ledger_items: list[HungerItem],
+        feature_hunger_item_ids: set[str],
+        blocked_hunger_item_ids: frozenset[str],
+        base_index_offset: int,
+    ) -> list[_CandidateLedgerItem]:
+        candidates: list[_CandidateLedgerItem] = []
+        for index, item in enumerate(ledger_items):
+            if item.id in feature_hunger_item_ids:
+                continue
+            if item.id in blocked_hunger_item_ids:
+                continue
+            if not MissionPlanner._is_plannable_ledger_only_item(item):
+                continue
+            candidates.append(
+                _CandidateLedgerItem(
+                    item=item,
+                    base_index=base_index_offset + index,
+                )
+            )
+        return candidates
+
+    @staticmethod
+    def _is_plannable_ledger_only_item(item: HungerItem) -> bool:
+        if item.status not in _ACTIVE_HUNGER_STATUSES:
+            return False
+        if item.gap_score <= 0:
+            return False
+        if item.synthesis_baseline_pending:
+            return False
+        if not item.acceptance_checks:
+            return False
+        return item.generated_by == "synthesizer" or item.id.startswith("H-SYN-")
 
     @staticmethod
     def _dependencies_by_feature(
@@ -471,6 +558,28 @@ class MissionPlanner:
         )
 
     @staticmethod
+    def _assignment_for_ledger_candidate(
+        *,
+        task_id: str,
+        loop_id: int,
+        index: int,
+        mission: Mission,
+        candidate: _CandidateLedgerItem,
+        budget: BudgetAllocation,
+    ) -> Assignment:
+        return Assignment(
+            assignment_id=f"ASGN-{task_id}-{loop_id}-{index}",
+            agent_id=EXECUTION_WORKER_V1.agent_id,
+            mission=MissionPlanner._mission_for_ledger_item(candidate, mission),
+            target_hunger_item_ids=[candidate.item.id],
+            target_feature_ids=[],
+            allowed_tools=list(EXECUTION_WORKER_V1.allowed_tools),
+            depends_on=[],
+            role="executor",
+            max_retries=budget.max_assignment_retries,
+        )
+
+    @staticmethod
     def _mission_for(candidate: _CandidateFeature, mission: Mission) -> str:
         feature = candidate.feature
         item = candidate.item
@@ -501,15 +610,48 @@ class MissionPlanner:
         return "\n".join(sections)
 
     @staticmethod
+    def _mission_for_ledger_item(
+        candidate: _CandidateLedgerItem,
+        mission: Mission,
+    ) -> str:
+        item = candidate.item
+        sections = [
+            f"Mission {mission.mission_id}: {mission.title}",
+            mission.description,
+            "",
+            f"Spec coverage item {item.id}: {item.title}",
+        ]
+        if item.generated_by:
+            sections.append(f"Generated by: {item.generated_by}")
+        if item.refinement_kind:
+            sections.append(f"Refinement kind: {item.refinement_kind}")
+        if item.acceptance_checks:
+            sections.append("Verification steps:")
+            sections.extend(
+                f"- {check.description or check.check_type.value}"
+                for check in item.acceptance_checks
+            )
+        sections.append(
+            f"Hunger item: {item.id} "
+            f"(priority={item.priority} gap_score={item.gap_score} "
+            f"refinement_tier={item.refinement_tier})"
+        )
+        return "\n".join(sections)
+
+    @staticmethod
     def _rationale(
         *,
         mission: Mission,
         selected_feature_ids: set[str],
         skip_reasons: dict[str, str],
         item_by_id: dict[str, HungerItem],
+        selected_ledger_items: list[_CandidateLedgerItem] | None = None,
+        skipped_ledger_items: list[_CandidateLedgerItem] | None = None,
     ) -> str:
         lines: list[str] = []
-        if not selected_feature_ids:
+        selected_ledger_items = selected_ledger_items or []
+        skipped_ledger_items = skipped_ledger_items or []
+        if not selected_feature_ids and not selected_ledger_items:
             lines.append(_NO_CANDIDATES_RATIONALE)
 
         for feature in mission.features:
@@ -520,6 +662,16 @@ class MissionPlanner:
             else:
                 reason = skip_reasons.get(feature.feature_id, "not_selected")
                 lines.append(f"skipped {feature.feature_id}: {reason}; {metrics}")
+        for candidate in selected_ledger_items:
+            lines.append(
+                f"selected {candidate.item.id}: ledger_only; "
+                f"{MissionPlanner._metrics_for(candidate.item)}"
+            )
+        for candidate in skipped_ledger_items:
+            lines.append(
+                f"skipped {candidate.item.id}: not_selected_budget_cap; "
+                f"{MissionPlanner._metrics_for(candidate.item)}"
+            )
         return "\n".join(lines)
 
     @staticmethod
