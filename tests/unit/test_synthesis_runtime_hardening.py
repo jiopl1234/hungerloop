@@ -359,6 +359,21 @@ class TestRealCompletionClientModelName:
             assert client._model_name != "glm-5.2" or client._model_name == "glm-5.2"
             # The key is it's configurable, not hardcoded in the class
 
+    def test_synthesis_model_name_uses_environment_override(self) -> None:
+        from hungerloop.cli.mission_cmd import _synthesis_model_name
+
+        with patch.dict(
+            "os.environ",
+            {"HUNGERLOOP_SYNTHESIS_MODEL": "kimi-k2.6"},
+        ):
+            assert _synthesis_model_name() == "kimi-k2.6"
+
+    def test_synthesis_model_name_keeps_glm_default(self) -> None:
+        from hungerloop.cli.mission_cmd import _synthesis_model_name
+
+        with patch.dict("os.environ", {}, clear=True):
+            assert _synthesis_model_name() == "glm-5.2"
+
 
 # ---------------------------------------------------------------------------
 # Real completion ModelResponse records usage/cost
@@ -533,6 +548,23 @@ class TestRunCmdSynthesisWiring:
             assert result is not None
             # It should be an object with synthesize_post_commit method
             assert hasattr(result, "synthesize_post_commit")
+
+    def test_build_spec_check_synthesizer_uses_environment_model(self) -> None:
+        from hungerloop.cli.run_cmd import _build_spec_check_synthesizer
+
+        repo = _setup_repo(policy=HungerPolicy(synthesis_enabled=True))
+        with patch.dict(
+            "os.environ",
+            {
+                "HUNGERLOOP_API_KEY": "test-key",
+                "HUNGERLOOP_BASE_URL": "http://test",
+                "HUNGERLOOP_SYNTHESIS_MODEL": "kimi-k2.6",
+            },
+        ):
+            result = _build_spec_check_synthesizer(repo=repo, task_id="t1")
+
+        assert result is not None
+        assert result.model_name == "kimi-k2.6"
 
     def test_disabled_synthesis_no_credential_read(self) -> None:
         """When synthesis_enabled=False, no credentials should be read

@@ -97,6 +97,7 @@ def test_v0_5d_additions_present() -> None:
         "candidate_created",
         "candidate_committed",
         "candidate_rejected",
+        "candidate_continuation_seeded",
         # Stop
         "stop_report_created",
         "error",
@@ -213,6 +214,17 @@ def test_v0_6_m5_mission_state_regeneration_additions_present() -> None:
         "MISSION_STATE_REGENERATION_FAILED",
     }
     actual = {m.value for m in EventType}
+    assert expected <= actual
+
+
+def test_v0_7_efficiency_diagnostic_additions_present() -> None:
+    expected = {
+        "check_regression_reconfirmed",
+        "synth_baseline_regression_ignored",
+        "synthesis_backfill_stopped",
+        "worker_read_only_streak",
+    }
+    actual = {member.value for member in EventType}
     assert expected <= actual
 
 

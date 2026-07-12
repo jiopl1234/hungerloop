@@ -300,6 +300,94 @@ async def test_step_returns_loop_trace_when_progress_made(tmp_path: Path) -> Non
     assert "loop_committed" in event_types
 
 
+async def test_next_loop_continues_rejected_candidate_in_isolation(
+    tmp_path: Path,
+) -> None:
+    repo = InMemoryRepository()
+    item = HungerItem(
+        id="H-001",
+        title="produce report",
+        priority=1.0,
+        gap_score=1.0,
+        acceptance_checks=[
+            AcceptanceCheck(
+                check_type=AcceptanceCheckType.FILE_EXISTS,
+                params={"path": "report.md"},
+            ),
+        ],
+    )
+    _seed_task(repo, [item])
+
+    class _ContinuationWorker:
+        async def run(
+            self, *, context: ContextPack, workspace_root: Path
+        ) -> WorkerResult:
+            if context.loop_id == 1:
+                (workspace_root / "partial.py").write_text(
+                    "partial = True\n", encoding="utf-8"
+                )
+                evidence_id = repo.save_tool_call_as_evidence(
+                    task_id=context.task_id,
+                    loop_id=context.loop_id,
+                    agent_id=context.agent_id,
+                    tool_name="write_file",
+                    args_summary="path=partial.py",
+                    result_summary="wrote partial implementation",
+                    success=True,
+                    elapsed_ms=1,
+                )
+                return WorkerResult(
+                    agent_id=context.agent_id,
+                    task_id=context.task_id,
+                    loop_id=context.loop_id,
+                    summary="partial implementation",
+                    evidence_ids=[evidence_id],
+                )
+            assert (workspace_root / "partial.py").read_text(
+                encoding="utf-8"
+            ) == "partial = True\n"
+            (workspace_root / "report.md").write_text("done\n", encoding="utf-8")
+            evidence_id = repo.save_tool_call_as_evidence(
+                task_id=context.task_id,
+                loop_id=context.loop_id,
+                agent_id=context.agent_id,
+                tool_name="write_file",
+                args_summary="path=report.md",
+                result_summary="wrote report",
+                success=True,
+                elapsed_ms=1,
+            )
+            return WorkerResult(
+                agent_id=context.agent_id,
+                task_id=context.task_id,
+                loop_id=context.loop_id,
+                summary="repaired prior candidate",
+                evidence_ids=[evidence_id],
+            )
+
+    orchestrator = _build_orchestrator(
+        tmp_path=tmp_path,
+        repo=repo,
+        workers={"execution_worker_v1": _ContinuationWorker()},
+    )
+
+    first = await orchestrator.step("t1")
+    assert isinstance(first, LoopTrace)
+    assert first.committed is False
+    assert not (tmp_path / "tasks" / "t1" / "best" / "files" / "partial.py").exists()
+
+    second = await orchestrator.step("t1")
+    assert isinstance(second, LoopTrace)
+    second_validation = repo.get_validation_report(second.validation_report_id or "")
+    assert second.committed is True, second_validation
+    best = tmp_path / "tasks" / "t1" / "best" / "files"
+    assert (best / "partial.py").read_text(encoding="utf-8") == "partial = True\n"
+    continuation_events = repo.list_events(
+        "t1", event_types=["candidate_continuation_seeded"]
+    )
+    assert continuation_events[0]["payload"]["source_loop_id"] == 1
+
+
 async def test_step_persists_handoff_and_emits_scoped_events(
     tmp_path: Path,
 ) -> None:

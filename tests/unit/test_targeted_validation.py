@@ -8,7 +8,7 @@ from hungerloop.models.enums import (
     HungerItemType,
     ValidationVerdict,
 )
-from hungerloop.models.hunger import AcceptanceCheck, HungerItem
+from hungerloop.models.hunger import AcceptanceCheck, HungerItem, HungerPolicy
 from hungerloop.services.acceptance_runner import AcceptanceCheckRunner
 from hungerloop.services.validation_gate import ValidationGate, make_check_key
 
@@ -150,6 +150,9 @@ async def test_regression_detected() -> None:
     repo.get_best_state.return_value = best
     repo.get_hunger_items.return_value = [h1]
     repo.get_items_for_check_keys.return_value = [h1]
+    repo.get_hunger_policy.return_value = HungerPolicy(
+        regression_confirm_reruns=0
+    )
 
     gate = ValidationGate(repo=repo, acceptance_runner=runner)
     report = await gate.validate(

@@ -177,6 +177,7 @@ class HungerPolicy(BaseModel):
     synthesis_batch_size: int = 3
     synthesis_conflict_threshold: int = 2
     synthesis_audit_enabled: bool = False
+    regression_confirm_reruns: int = 1
     refactor_transactions_enabled: bool = False
     max_declared_regressions: int = 5
     refactor_deadline_loops: int = 3
@@ -206,6 +207,13 @@ class HungerPolicy(BaseModel):
     def _validate_positive_synthesis_limits(cls, v: int) -> int:
         if v < 1:
             raise ValueError("synthesis lifecycle limits must be >= 1")
+        return v
+
+    @field_validator("regression_confirm_reruns")
+    @classmethod
+    def _validate_regression_confirm_reruns(cls, v: int) -> int:
+        if v < 0:
+            raise ValueError("regression_confirm_reruns must not be negative")
         return v
 
     @field_validator("max_declared_regressions")

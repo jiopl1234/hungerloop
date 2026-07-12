@@ -5,11 +5,13 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
 from hungerloop.models.context import ContextPack, TruncationInfo
 from hungerloop.models.enums import CompletionMode, EvidenceType
+from hungerloop.models.events import EventType
 from hungerloop.models.hunger import AcceptanceCheck
 from hungerloop.models.planning import Assignment, BudgetAllocation
 from hungerloop.models.worker import WorkerHandoff
@@ -30,15 +32,17 @@ MAX_FAILED_CHECK_CHARS = 3000
 MAX_BEST_SUMMARY_CHARS = 800
 MAX_LAST_SELF_SUMMARY_CHARS = 200
 MAX_WORKSPACE_FILE_PATH_CHARS = 120
+MAX_RECENT_SUMMARY_CHARS = 2000
 # Keep the non-evictable rendered prior-loop block under MAX_HISTORY_CHARS:
 # last summary + best summary + best-files line + static labels/hints.
 MAX_WORKSPACE_FILES_LINE_CHARS = 700
 # The cap relies on the non-evictable section caps above; _apply_history_cap
 # asserts if those caps drift past the rendered prior-loop block budget.
-MAX_HISTORY_CHARS = 2000
+MAX_HISTORY_CHARS = 12000
+MAX_READ_COVERAGE_CHARS = 600
 READ_ONLY_REJECTED_HINT = (
-    "two recent rejected loops only read files; next attempt must patch/write "
-    "or declare a blocker"
+    "consecutive worker loops inspected files but emitted no write action; "
+    "next attempt must patch/write or declare a blocker"
 )
 # v0.7 memory recall caps (VAL-MEM-011)
 MAX_RECALLED_MEMORIES = 5
@@ -69,6 +73,7 @@ class _LoopHistorySlice:
     rejected_lines: list[str]
     successful_evidence_ids: list[str]
     successful_evidence_lines: list[str]
+    read_coverage_summary: str | None
     last_self_summary: str | None
 
 
@@ -162,7 +167,13 @@ class ContextBuilder:
         evidence_ids = history.successful_evidence_ids[: K_EVIDENCE_WINDOW * 5]
         evidence_lines = history.successful_evidence_lines[: K_EVIDENCE_WINDOW * 5]
         failure_lines = history.rejected_lines[: K_REJECT_WINDOW * 4]
-        if self._should_emit_read_only_rejected_hint(task_id, loop_id):
+        if history.read_coverage_summary:
+            failure_lines.insert(0, history.read_coverage_summary)
+        if self._should_emit_read_only_rejected_hint(
+            task_id,
+            loop_id,
+            agent_id,
+        ):
             failure_lines.insert(0, READ_ONLY_REJECTED_HINT)
         (
             prior_handoff_summary,
@@ -288,6 +299,7 @@ class ContextBuilder:
         traces = self.repo.list_loop_traces(task_id)
 
         rejected_lines: list[str] = []
+        seen_failed_check_keys: set[str] = set()
         rejected = [
             trace
             for trace in traces
@@ -301,14 +313,16 @@ class ContextBuilder:
             if report is None:
                 continue
             for check in report.check_results:
-                if not check.passed:
-                    rejected_lines.append(
-                        summarize_failed_check(
-                            check,
-                            trace.loop_id,
-                            max_chars=MAX_FAILED_CHECK_CHARS,
-                        )
+                if check.passed or check.check_key in seen_failed_check_keys:
+                    continue
+                seen_failed_check_keys.add(check.check_key)
+                rejected_lines.append(
+                    summarize_failed_check(
+                        check,
+                        trace.loop_id,
+                        max_chars=MAX_FAILED_CHECK_CHARS,
                     )
+                )
 
         committed_loop_ids = {trace.loop_id for trace in traces if trace.committed}
         rejected_loop_ids = {
@@ -316,6 +330,7 @@ class ContextBuilder:
         }
         min_loop_id = current_loop_id - K_EVIDENCE_WINDOW
         evidence_rows: list[tuple[int, int, str, str]] = []
+        read_coverage: list[tuple[int, str, int, int]] = []
         for index, row in enumerate(
             self.repo.list_successful_tool_call_evidence(task_id)
         ):
@@ -338,6 +353,9 @@ class ContextBuilder:
                 continue
             if not is_successful_evidence_payload(EvidenceType.TOOL_CALL, payload):
                 continue
+            coverage = _read_coverage_entry(payload, loop_id)
+            if coverage is not None:
+                read_coverage.append(coverage)
             evidence_id = str(row.get("evidence_id", ""))
             if not evidence_id:
                 continue
@@ -353,12 +371,13 @@ class ContextBuilder:
                     ),
                 )
             )
-        evidence_rows.sort(key=lambda item: (-item[0], item[1]))
+        evidence_rows.sort(key=lambda item: (-item[0], -item[1]))
 
         return _LoopHistorySlice(
             rejected_lines=rejected_lines,
             successful_evidence_ids=[row[2] for row in evidence_rows],
             successful_evidence_lines=[row[3] for row in evidence_rows],
+            read_coverage_summary=_render_read_coverage(read_coverage),
             last_self_summary=last_summary,
         )
 
@@ -398,7 +417,27 @@ class ContextBuilder:
                     label = handoff.assignment_id or handoff.agent_id
                     lines.append(f"Upstream {label}: {summary}")
 
-        return _clip_oldest_lines(lines, MAX_HISTORY_CHARS)
+        continuation_events = self.repo.list_events(
+            task_id,
+            since_loop=loop_id,
+            until_loop=loop_id,
+            event_types=[EventType.CANDIDATE_CONTINUATION_SEEDED.value],
+        )
+        if continuation_events:
+            payload = continuation_events[-1].get("payload")
+            source_loop_id = (
+                payload.get("source_loop_id")
+                if isinstance(payload, dict)
+                else loop_id - 1
+            )
+            lines.append(
+                "Candidate workspace continues the rejected edits from loop "
+                f"{source_loop_id}. Best remains unchanged; preserve useful edits "
+                "in this isolated candidate and repair validation failures before "
+                "handoff."
+            )
+
+        return _clip_oldest_lines(lines, MAX_RECENT_SUMMARY_CHARS)
 
     @staticmethod
     def _is_upstream_same_loop_handoff(
@@ -416,8 +455,27 @@ class ContextBuilder:
         return True
 
     def _should_emit_read_only_rejected_hint(
-        self, task_id: str, current_loop_id: int
+        self,
+        task_id: str,
+        current_loop_id: int,
+        agent_id: str,
     ) -> bool:
+        streak_events = self.repo.list_events(
+            task_id,
+            until_loop=max(0, current_loop_id - 1),
+            event_types=[EventType.WORKER_READ_ONLY_STREAK.value],
+        )
+        for event in reversed(streak_events):
+            payload = event.get("payload")
+            if not isinstance(payload, dict):
+                continue
+            if payload.get("agent_id") != agent_id:
+                continue
+            return (
+                event.get("loop_id") == current_loop_id - 1
+                and payload.get("threshold_reached") is True
+            )
+
         policy = self.repo.get_hunger_policy(task_id)
         if policy.completion_mode != CompletionMode.SPEND_BUDGET:
             return False
@@ -472,6 +530,72 @@ def _is_prompt_safe_rejected_evidence(payload: dict[str, object]) -> bool:
     return bool(result.strip())
 
 
+_READ_ARGS_RE = re.compile(
+    r"^path=(?P<path>.+?) offset=(?P<offset>\d+) limit=(?P<limit>\d+)$"
+)
+_READ_RESULT_RE = re.compile(r"^\[lines (?P<start>\d+)-(?P<end>\d+) of \d+\]")
+
+
+def _read_coverage_entry(
+    payload: dict[str, object],
+    loop_id: int,
+) -> tuple[int, str, int, int] | None:
+    if str(payload.get("tool_name", "")) != "read_file":
+        return None
+    args_match = _READ_ARGS_RE.match(str(payload.get("args_summary", "")))
+    if args_match is None:
+        return None
+    path = args_match.group("path")
+    start = int(args_match.group("offset"))
+    end = start + int(args_match.group("limit")) - 1
+    result_match = _READ_RESULT_RE.match(str(payload.get("result_summary", "")))
+    if result_match is not None:
+        start = int(result_match.group("start"))
+        end = int(result_match.group("end"))
+    return loop_id, path, start, end
+
+
+def _render_read_coverage(
+    entries: list[tuple[int, str, int, int]],
+) -> str | None:
+    if not entries:
+        return None
+    ranges_by_path: dict[str, list[tuple[int, int]]] = {}
+    loops_by_path: dict[str, set[int]] = {}
+    for loop_id, path, start, end in entries:
+        ranges_by_path.setdefault(path, []).append((start, end))
+        loops_by_path.setdefault(path, set()).add(loop_id)
+
+    fragments: list[str] = []
+    for path in sorted(
+        ranges_by_path,
+        key=lambda item: (-max(loops_by_path[item]), item),
+    ):
+        merged: list[list[int]] = []
+        for start, end in sorted(ranges_by_path[path]):
+            if not merged or start > merged[-1][1] + 1:
+                merged.append([start, end])
+            else:
+                merged[-1][1] = max(merged[-1][1], end)
+        ranges = ",".join(
+            str(start) if start == end else f"{start}-{end}"
+            for start, end in merged
+        )
+        loops = sorted(loops_by_path[path])
+        loop_label = (
+            f"loop {loops[0]}"
+            if len(loops) == 1
+            else f"loops {loops[0]}-{loops[-1]}"
+        )
+        fragments.append(f"{loop_label} {path}[{ranges}]")
+
+    rendered = (
+        "Already-read coverage; do not reread unchanged ranges: "
+        + "; ".join(fragments)
+    )
+    return _clip_required(rendered, MAX_READ_COVERAGE_CHARS)
+
+
 def _clip_optional(value: str | None, max_chars: int) -> tuple[str | None, bool]:
     if value is None:
         return None, False
@@ -491,10 +615,10 @@ def _clip_recent_summaries(
     prior_handoff_summary: str,
     last_summary: str | None,
 ) -> tuple[str, str | None]:
-    clipped_prior = prior_handoff_summary[:MAX_HISTORY_CHARS]
+    clipped_prior = prior_handoff_summary[:MAX_RECENT_SUMMARY_CHARS]
     if last_summary is None:
         return clipped_prior, None
-    remaining = max(0, MAX_HISTORY_CHARS - len(clipped_prior))
+    remaining = max(0, MAX_RECENT_SUMMARY_CHARS - len(clipped_prior))
     return clipped_prior, last_summary[:remaining]
 
 

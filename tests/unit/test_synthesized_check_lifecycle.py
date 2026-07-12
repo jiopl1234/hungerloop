@@ -107,6 +107,130 @@ async def test_baseline_pass_auto_satisfies_without_worker(
     assert len(events) == 1
 
 
+async def test_baseline_accepts_passing_items_despite_unrelated_regression(
+    tmp_path: Path,
+) -> None:
+    lifecycle, repo, workspace_manager, compiler = _lifecycle(tmp_path)
+    best_root = _seed_best(repo, workspace_manager)
+    (best_root / "ready.txt").write_text("ready", encoding="utf-8")
+    old_item = HungerItem(
+        id="H-OLD",
+        title="previously accepted check",
+        acceptance_checks=[
+            AcceptanceCheck(
+                check_type=AcceptanceCheckType.FILE_EXISTS,
+                params={"path": "flaky.txt"},
+                description="flaky file exists",
+            )
+        ],
+        status=HungerItemStatus.VALIDATED_SATISFIED,
+        gap_score=0,
+    )
+    repo.save_hunger_ledger("t1", HungerLedger(task_id="t1", items=[old_item]))
+    repo.save_hunger_item(old_item)
+    best = repo.get_best_state("t1")
+    assert best is not None
+    repo.save_best_state(
+        best.model_copy(update={"accepted_check_keys": ["H-OLD:0"]})
+    )
+    compiler.compile_spec_coverage(
+        task_id="t1",
+        proposals=[
+            CheckProposal(
+                check_type=AcceptanceCheckType.FILE_EXISTS,
+                params={"path": "ready.txt"},
+                description="ready file exists",
+                source_quote="ready file exists",
+                proposed_by="synthesizer",
+            ),
+            CheckProposal(
+                check_type=AcceptanceCheckType.FILE_EXISTS,
+                params={"path": "missing.txt"},
+                description="missing file exists",
+                source_quote="missing file exists",
+                proposed_by="synthesizer",
+            ),
+        ],
+        generated_by="synthesizer",
+        baseline_pending=True,
+    )
+
+    result = await lifecycle.validate_pending_baseline(task_id="t1", loop_id=2)
+
+    assert result.auto_satisfied_item_ids == ["H-SYN-001"]
+    assert result.failed_item_ids == ["H-SYN-002"]
+    ledger = repo.get_hunger_ledger("t1")
+    items = {item.id: item for item in ledger.items}
+    assert items["H-SYN-001"].status == HungerItemStatus.VALIDATED_SATISFIED
+    assert items["H-SYN-002"].status == HungerItemStatus.OPEN
+    baseline_events = repo.list_events(
+        "t1",
+        event_types=[EventType.SYNTH_CHECK_BASELINE_VALIDATED.value],
+    )
+    report_id = baseline_events[0]["payload"]["validation_report_id"]
+    raw_report = repo.get_validation_report(report_id)
+    assert raw_report is not None
+    assert raw_report.verdict == ValidationVerdict.FAIL
+    assert raw_report.regressed_check_keys == ["H-OLD:0"]
+    updated_best = repo.get_best_state("t1")
+    assert updated_best is not None
+    assert updated_best.accepted_check_keys == ["H-OLD:0", "H-SYN-001:0"]
+    ignored = repo.list_events(
+        "t1",
+        event_types=[EventType.SYNTH_BASELINE_REGRESSION_IGNORED.value],
+    )
+    assert len(ignored) == 1
+    assert ignored[0]["payload"]["check_key"] == "H-OLD:0"
+
+
+async def test_baseline_reconciles_open_item_already_accepted_by_best(
+    tmp_path: Path,
+) -> None:
+    lifecycle, repo, workspace_manager, compiler = _lifecycle(tmp_path)
+    _seed_best(repo, workspace_manager)
+    compiler.compile_spec_coverage(
+        task_id="t1",
+        proposals=[
+            CheckProposal(
+                check_type=AcceptanceCheckType.FILE_EXISTS,
+                params={"path": "flaky.txt"},
+                description="flaky file exists",
+                source_quote="flaky file exists",
+                proposed_by="synthesizer",
+            )
+        ],
+        generated_by="synthesizer",
+        baseline_pending=True,
+    )
+    best = repo.get_best_state("t1")
+    assert best is not None
+    repo.save_best_state(
+        best.model_copy(update={"accepted_check_keys": ["H-SYN-001:0"]})
+    )
+
+    result = await lifecycle.validate_pending_baseline(task_id="t1", loop_id=2)
+
+    assert result.auto_satisfied_item_ids == ["H-SYN-001"]
+    item = repo.get_hunger_ledger("t1").items[0]
+    assert item.status == HungerItemStatus.VALIDATED_SATISFIED
+    assert item.gap_score == 0
+    ignored = repo.list_events(
+        "t1",
+        event_types=[EventType.SYNTH_BASELINE_REGRESSION_IGNORED.value],
+    )
+    assert len(ignored) == 1
+    baseline_events = repo.list_events(
+        "t1",
+        event_types=[EventType.SYNTH_CHECK_BASELINE_VALIDATED.value],
+    )
+    raw_report = repo.get_validation_report(
+        baseline_events[0]["payload"]["validation_report_id"]
+    )
+    assert raw_report is not None
+    assert raw_report.verdict == ValidationVerdict.FAIL
+    assert raw_report.regressed_check_keys == ["H-SYN-001:0"]
+
+
 async def test_failing_fixture_is_closed_and_rejection_is_sticky(
     tmp_path: Path,
 ) -> None:

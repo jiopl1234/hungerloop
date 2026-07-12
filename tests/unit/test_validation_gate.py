@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Any
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -20,7 +21,13 @@ from hungerloop.models.enums import (
     HungerItemType,
     ValidationVerdict,
 )
-from hungerloop.models.hunger import AcceptanceCheck, HungerItem, HungerLedger
+from hungerloop.models.events import EventType
+from hungerloop.models.hunger import (
+    AcceptanceCheck,
+    HungerItem,
+    HungerLedger,
+    HungerPolicy,
+)
 from hungerloop.repository.in_memory_repo import InMemoryRepository
 from hungerloop.services.acceptance_runner import AcceptanceCheckRunner
 from hungerloop.services.sandbox_runner import SandboxRunner
@@ -215,6 +222,117 @@ async def test_regression_against_baseline_emits_fail(
     assert report.verdict == ValidationVerdict.FAIL
     # Regression descriptions should be human-readable.
     assert any("regressed" in r for r in report.regressions)
+
+
+async def test_regression_confirm_rerun_converts_flaky_failure_to_pass(
+    gate_setup: tuple[ValidationGate, InMemoryRepository, WorkspaceManager],
+) -> None:
+    gate, repo, _ = gate_setup
+    item = _file_exists_item("H-001", ["report.md"])
+    repo.save_hunger_ledger("t1", HungerLedger(task_id="t1", items=[item]))
+    repo.save_hunger_item(item)
+    repo.save_best_state(
+        BestState(
+            task_id="t1",
+            state_id="prev",
+            summary="prev",
+            accepted_check_keys=["H-001:0"],
+        )
+    )
+    gate.runner.run = AsyncMock(
+        side_effect=[
+            (False, "initial failure", "ev-initial"),
+            (True, "confirmation pass", "ev-confirm"),
+        ]
+    )
+
+    report = await gate.validate(
+        task_id="t1",
+        loop_id=1,
+        candidate=_candidate(),
+        target_hunger_item_ids=["H-001"],
+    )
+
+    assert report.verdict == ValidationVerdict.PASS
+    assert report.regressed_check_keys == []
+    assert report.check_results[0].passed is True
+    assert "flaky: passed on confirm rerun 1/1" in report.check_results[0].detail
+    assert report.evidence_ids == ["ev-initial", "ev-confirm"]
+    events = repo.list_events(
+        "t1",
+        event_types=[EventType.CHECK_REGRESSION_RECONFIRMED.value],
+    )
+    assert len(events) == 1
+    assert events[0]["payload"]["check_key"] == "H-001:0"
+
+
+async def test_regression_confirm_rerun_keeps_persistent_failure(
+    gate_setup: tuple[ValidationGate, InMemoryRepository, WorkspaceManager],
+) -> None:
+    gate, repo, _ = gate_setup
+    item = _file_exists_item("H-001", ["report.md"])
+    repo.save_hunger_ledger("t1", HungerLedger(task_id="t1", items=[item]))
+    repo.save_hunger_item(item)
+    repo.save_best_state(
+        BestState(
+            task_id="t1",
+            state_id="prev",
+            summary="prev",
+            accepted_check_keys=["H-001:0"],
+        )
+    )
+    gate.runner.run = AsyncMock(
+        side_effect=[
+            (False, "initial failure", "ev-initial"),
+            (False, "confirmation failure", "ev-confirm"),
+        ]
+    )
+
+    report = await gate.validate(
+        task_id="t1",
+        loop_id=1,
+        candidate=_candidate(),
+        target_hunger_item_ids=["H-001"],
+    )
+
+    assert report.verdict == ValidationVerdict.FAIL
+    assert report.regressed_check_keys == ["H-001:0"]
+    assert report.evidence_ids == ["ev-initial", "ev-confirm"]
+    assert repo.list_events(
+        "t1",
+        event_types=[EventType.CHECK_REGRESSION_RECONFIRMED.value],
+    ) == []
+
+
+async def test_regression_confirm_rerun_can_be_disabled(
+    gate_setup: tuple[ValidationGate, InMemoryRepository, WorkspaceManager],
+) -> None:
+    gate, repo, _ = gate_setup
+    repo.set_hunger_policy("t1", HungerPolicy(regression_confirm_reruns=0))
+    item = _file_exists_item("H-001", ["report.md"])
+    repo.save_hunger_ledger("t1", HungerLedger(task_id="t1", items=[item]))
+    repo.save_hunger_item(item)
+    repo.save_best_state(
+        BestState(
+            task_id="t1",
+            state_id="prev",
+            summary="prev",
+            accepted_check_keys=["H-001:0"],
+        )
+    )
+    gate.runner.run = AsyncMock(
+        return_value=(False, "initial failure", "ev-initial")
+    )
+
+    report = await gate.validate(
+        task_id="t1",
+        loop_id=1,
+        candidate=_candidate(),
+        target_hunger_item_ids=["H-001"],
+    )
+
+    assert report.regressed_check_keys == ["H-001:0"]
+    assert gate.runner.run.await_count == 1
 
 
 # ---- evidence wiring --------------------------------------------------------

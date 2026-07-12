@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Any
 
 from hungerloop.models.enums import ValidationVerdict
+from hungerloop.models.events import EventType
 from hungerloop.models.validation import CheckResult, ValidationReport
 from hungerloop.repository.protocol import RepositoryProtocol
 from hungerloop.services.acceptance_runner import AcceptanceCheckRunner
@@ -80,10 +81,12 @@ class ValidationGate:
 
         all_results: list[CheckResult] = []
         all_evidence_ids: list[str] = list(candidate.evidence_ids)
+        checks_by_key: dict[str, Any] = {}
 
         for item in items_to_check:
             for idx, check in enumerate(item.acceptance_checks):
                 check_key = make_check_key(item.id, idx)
+                checks_by_key[check_key] = check
 
                 is_target = item.id in target_hunger_item_ids
                 is_regression_check = check_key in previously_passed
@@ -118,6 +121,16 @@ class ValidationGate:
                 all_results.append(result)
                 if ev_id:
                     all_evidence_ids.append(ev_id)
+
+        all_results, confirmation_evidence_ids = await self._confirm_regressions(
+            task_id=task_id,
+            loop_id=loop_id,
+            candidate=candidate,
+            workspace_root=workspace_root,
+            check_results=all_results,
+            checks_by_key=checks_by_key,
+        )
+        all_evidence_ids.extend(confirmation_evidence_ids)
 
         currently_passed = {r.check_key for r in all_results if r.passed} | {
             key
@@ -169,6 +182,70 @@ class ValidationGate:
             ],
             has_real_progress=has_real_progress,
         )
+
+    async def _confirm_regressions(
+        self,
+        *,
+        task_id: str,
+        loop_id: int,
+        candidate: Any,
+        workspace_root: Path | None,
+        check_results: list[CheckResult],
+        checks_by_key: dict[str, Any],
+    ) -> tuple[list[CheckResult], list[str]]:
+        """Re-run only regressed checks to filter one-shot validation noise."""
+        if not any(result.regressed for result in check_results):
+            return check_results, []
+        max_reruns = self.repo.get_hunger_policy(task_id).regression_confirm_reruns
+        if max_reruns <= 0:
+            return check_results, []
+
+        confirmed_results = list(check_results)
+        evidence_ids: list[str] = []
+        for index, result in enumerate(confirmed_results):
+            if not result.regressed:
+                continue
+            check = checks_by_key[result.check_key]
+            for rerun in range(1, max_reruns + 1):
+                passed, detail, evidence_id = await self.runner.run(
+                    check=check,
+                    task_id=task_id,
+                    loop_id=loop_id,
+                    candidate=candidate,
+                    workspace_root=workspace_root,
+                )
+                if evidence_id:
+                    evidence_ids.append(evidence_id)
+                if not passed:
+                    continue
+
+                confirmed_results[index] = result.model_copy(
+                    update={
+                        "passed": True,
+                        "regressed": False,
+                        "detail": (
+                            f"{result.detail}; flaky: passed on confirm rerun "
+                            f"{rerun}/{max_reruns}: {detail}"
+                        ),
+                        "evidence_id": evidence_id or result.evidence_id,
+                    }
+                )
+                self.repo.append_event(
+                    EventType.CHECK_REGRESSION_RECONFIRMED,
+                    {
+                        "check_key": result.check_key,
+                        "rerun": rerun,
+                        "max_reruns": max_reruns,
+                        "initial_evidence_id": result.evidence_id,
+                        "confirmation_evidence_id": evidence_id,
+                        "workspace_ref": candidate.workspace_ref,
+                    },
+                    task_id=task_id,
+                    loop_id=loop_id,
+                )
+                break
+
+        return confirmed_results, evidence_ids
 
     def _dedupe_items(self, items: list[Any]) -> list[Any]:
         """Deduplicate items by ID, preserving order."""

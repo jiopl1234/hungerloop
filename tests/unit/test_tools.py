@@ -33,6 +33,76 @@ async def test_read_file_returns_content(workspace: Path) -> None:
     assert "hello world" in outcome.result_summary
 
 
+async def test_read_file_respects_line_offset_and_limit(workspace: Path) -> None:
+    (workspace / "data.txt").write_text(
+        "\n".join(f"line {index}" for index in range(1, 21)),
+        encoding="utf-8",
+    )
+
+    outcome = await ReadFileTool().run(
+        args={"path": "data.txt", "offset": 10, "limit": 3},
+        workspace_root=workspace,
+        task_id="t1",
+        loop_id=1,
+    )
+
+    assert outcome.success is True
+    assert "[lines 10-12 of 20]" in outcome.result_summary
+    assert "line 10" in outcome.result_summary
+    assert "line 12" in outcome.result_summary
+    assert "line 9" not in outcome.result_summary
+    assert "line 13" not in outcome.result_summary
+    assert "offset=10 limit=3" in outcome.args_summary
+
+
+async def test_read_file_defaults_to_first_200_lines(workspace: Path) -> None:
+    (workspace / "data.txt").write_text(
+        "\n".join(f"line {index}" for index in range(1, 301)),
+        encoding="utf-8",
+    )
+
+    outcome = await ReadFileTool().run(
+        args={"path": "data.txt"},
+        workspace_root=workspace,
+        task_id="t1",
+        loop_id=1,
+    )
+
+    assert outcome.success is True
+    assert "[lines 1-200 of 300]" in outcome.result_summary
+    assert "line 200" in outcome.result_summary
+    assert "line 201" not in outcome.result_summary
+    assert "offset=1 limit=200" in outcome.args_summary
+
+
+async def test_read_file_rejects_out_of_range_offset(workspace: Path) -> None:
+    (workspace / "data.txt").write_text("one\ntwo\n", encoding="utf-8")
+
+    outcome = await ReadFileTool().run(
+        args={"path": "data.txt", "offset": 10, "limit": 3},
+        workspace_root=workspace,
+        task_id="t1",
+        loop_id=1,
+    )
+
+    assert outcome.success is False
+    assert outcome.result_summary == "offset_out_of_range"
+
+
+async def test_read_file_empty_file_has_stable_range(workspace: Path) -> None:
+    (workspace / "empty.txt").write_text("", encoding="utf-8")
+
+    outcome = await ReadFileTool().run(
+        args={"path": "empty.txt"},
+        workspace_root=workspace,
+        task_id="t1",
+        loop_id=1,
+    )
+
+    assert outcome.success is True
+    assert outcome.result_summary == "[lines 0-0 of 0]\n"
+
+
 async def test_read_file_missing_returns_failure(workspace: Path) -> None:
     outcome = await ReadFileTool().run(
         args={"path": "missing.txt"},
@@ -78,6 +148,77 @@ async def test_patch_file_replaces_unique_match(workspace: Path) -> None:
     assert outcome.success is True
     assert outcome.artifact_type == "file_patch"
     assert (workspace / "code.py").read_text() == "foo\nBAR\nbaz\n"
+
+
+async def test_patch_file_normalizes_whitespace_for_unique_line_window(
+    workspace: Path,
+) -> None:
+    (workspace / "code.py").write_text(
+        "def run():\n    value = 1\n    return value\n",
+        encoding="utf-8",
+    )
+    outcome = await PatchFileTool().run(
+        args={
+            "path": "code.py",
+            "old_text": "def run():\n  value = 1\n  return value",
+            "new_text": "def run():\n    value = 2\n    return value",
+        },
+        workspace_root=workspace,
+        task_id="t1",
+        loop_id=1,
+    )
+
+    assert outcome.success is True
+    assert outcome.result_summary == "replaced normalized lines 1-3"
+    assert (workspace / "code.py").read_text(encoding="utf-8") == (
+        "def run():\n    value = 2\n    return value\n"
+    )
+
+
+async def test_patch_file_line_anchor_selects_exact_occurrence(workspace: Path) -> None:
+    (workspace / "code.py").write_text(
+        "first\nreturn value\nsecond\nreturn value\n", encoding="utf-8"
+    )
+    outcome = await PatchFileTool().run(
+        args={
+            "path": "code.py",
+            "old_text": "return value",
+            "new_text": "return changed",
+            "start_line": 4,
+            "end_line": 4,
+        },
+        workspace_root=workspace,
+        task_id="t1",
+        loop_id=1,
+    )
+
+    assert outcome.success is True
+    assert (workspace / "code.py").read_text(encoding="utf-8") == (
+        "first\nreturn value\nsecond\nreturn changed\n"
+    )
+
+
+async def test_patch_file_normalized_single_line_preserves_source_indent(
+    workspace: Path,
+) -> None:
+    (workspace / "code.py").write_text(
+        "def run():\n    return   value\n", encoding="utf-8"
+    )
+    outcome = await PatchFileTool().run(
+        args={
+            "path": "code.py",
+            "old_text": "return value",
+            "new_text": "return changed",
+        },
+        workspace_root=workspace,
+        task_id="t1",
+        loop_id=1,
+    )
+
+    assert outcome.success is True
+    assert (workspace / "code.py").read_text(encoding="utf-8") == (
+        "def run():\n    return changed\n"
+    )
 
 
 async def test_patch_file_rejects_ambiguous_match(workspace: Path) -> None:

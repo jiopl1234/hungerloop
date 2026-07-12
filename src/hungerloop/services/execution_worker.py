@@ -17,6 +17,7 @@ import json
 from pathlib import Path
 
 from hungerloop.models.context import ContextPack
+from hungerloop.models.events import EventType
 from hungerloop.models.worker import WorkerResult
 from hungerloop.repository.protocol import RepositoryProtocol
 from hungerloop.services.budget_guard import BudgetGuard
@@ -41,8 +42,9 @@ MAX_SELF_REPAIR_ITERATIONS = 5
 # observed) without sending the full conversation. Char-capped so the
 # replay block can never blow past MAX_INNER_REPLAY_CHARS even on output-
 # heavy iterations.
-K_INNER_REPLAY = 2
-MAX_INNER_REPLAY_CHARS = 5000
+K_INNER_REPLAY = 3
+MAX_INNER_REPLAY_CHARS = 16000
+READ_ONLY_DIAGNOSTIC_THRESHOLD = 2
 
 
 class ExecutionWorker:
@@ -109,6 +111,11 @@ class ExecutionWorker:
         # accepted after pure-read iterations, 0 newly_passed, blocked.
         wrote_anything = False
         wrote_then_verified = False
+        read_count = 0
+        shell_count = 0
+        write_attempt_count = 0
+        patch_no_match_count = 0
+        consecutive_read_only_iterations = 0
         needs_verification = bool(context.acceptance_criteria)
 
         for iteration in range(MAX_SELF_REPAIR_ITERATIONS + 1):
@@ -159,6 +166,20 @@ class ExecutionWorker:
                 artifact_ids.extend(result.artifact_ids)
                 action_results.append((tool_name, result))
 
+            patch_no_match_count += sum(
+                tool_name == "patch_file"
+                and not result.success
+                and any(
+                    marker in (result.error or result.summary)
+                    for marker in (
+                        "old_text not found",
+                        "old_text matches",
+                        "whitespace-normalized match is ambiguous",
+                    )
+                )
+                for tool_name, result in action_results
+            )
+
             new_summary = self._stringify(
                 (response.json_data or {}).get("summary", "")
             ) if response.json_data else ""
@@ -173,8 +194,29 @@ class ExecutionWorker:
             # run_shell success in iter K+M (M>=0) counts as verified —
             # but a run_shell success without any prior write does NOT.
             this_iter_wrote = any(
+                tn in ("write_file", "patch_file") and result.success
+                for tn, result in action_results
+            )
+            read_count += sum(
+                tn == "read_file" and result.success
+                for tn, result in action_results
+            )
+            shell_count += sum(tn == "run_shell" for tn, _ in action_results)
+            write_attempt_count += sum(
+                tn in ("write_file", "patch_file")
+                for tn, _ in action_results
+            )
+            this_iter_attempted_write = any(
                 tn in ("write_file", "patch_file") for tn, _ in action_results
             )
+            this_iter_read = any(
+                tn == "read_file" and result.success
+                for tn, result in action_results
+            )
+            if this_iter_read and not this_iter_attempted_write:
+                consecutive_read_only_iterations += 1
+            else:
+                consecutive_read_only_iterations = 0
             wrote_anything = wrote_anything or this_iter_wrote
             this_iter_shell_succeeded = any(
                 tn == "run_shell" and r.success for tn, r in action_results
@@ -260,21 +302,120 @@ class ExecutionWorker:
                     '{"summary": "...", "actions": []} after a run_shell '
                     "verification has exited 0 in this turn."
                 )
+                if not verification_complete and not wrote_anything:
+                    followup += (
+                        "\n\nMANDATORY EDIT: You have not written or patched "
+                        "any source in this loop. A non-empty read_file or "
+                        "run_shell batch does not count as progress. Your next "
+                        "JSON action batch must include at least one write_file "
+                        "or patch_file action that addresses a failing check, "
+                        "followed by run_shell verification."
+                    )
+                if patch_no_match_count >= 2:
+                    followup += (
+                        "\n\nPATCH ESCALATION: patch_file has missed old_text at "
+                        "least twice in this loop. Stop retrying guessed exact "
+                        "patches. Use read_file with offset/limit to inspect the "
+                        "current enclosing function, then use write_file with the "
+                        "FULL current file content while replacing that complete "
+                        "function. Re-run verification after the rewrite."
+                    )
+            remaining_calls = MAX_SELF_REPAIR_ITERATIONS - iteration
+            budget_note = (
+                f"CALL BUDGET: {remaining_calls} model call(s) remain in this "
+                "loop after this response."
+            )
+            if consecutive_read_only_iterations >= 2 and not wrote_anything:
+                followup = (
+                    "STOP READING: consecutive action batches inspected files "
+                    "without attempting an edit. "
+                    f"{budget_note} Use the next response to patch/write the "
+                    "best-supported fix and verify it; do not request another "
+                    "code slice.\n\n"
+                    + followup
+                )
+            else:
+                followup += f"\n\n{budget_note}"
+            if iteration == MAX_SELF_REPAIR_ITERATIONS - 1:
+                followup += (
+                    "\n\nFINAL MODEL CALL: your next response is the last "
+                    "response available in this loop. It must contain a "
+                    "write_file/patch_file edit and run_shell verification. "
+                    "A read-only response will be discarded with no progress."
+                )
             messages = [
                 *messages,
                 {"role": "assistant", "content": assistant_payload},
                 {"role": "user", "content": followup},
             ]
 
+        if (
+            read_count > 0
+            and write_attempt_count == 0
+            and needs_verification
+        ):
+            streak = self._read_only_streak_before_loop(
+                task_id=context.task_id,
+                agent_id=context.agent_id,
+                loop_id=context.loop_id,
+            ) + 1
+            self.repo.append_event(
+                EventType.WORKER_READ_ONLY_STREAK,
+                {
+                    "agent_id": context.agent_id,
+                    "streak": streak,
+                    "read_count": read_count,
+                    "shell_count": shell_count,
+                    "write_count": write_attempt_count,
+                    "threshold_reached": (
+                        streak >= READ_ONLY_DIAGNOSTIC_THRESHOLD
+                    ),
+                    "context_truncated": context.truncation_info is not None,
+                    "failing_check_keys": list(context.failing_check_keys),
+                    "target_hunger_item_ids": list(
+                        context.target_hunger_item_ids
+                    ),
+                },
+                task_id=context.task_id,
+                loop_id=context.loop_id,
+            )
+
+        replay_entries = list(messages[seed_len:])
+        final_reads = [
+            result
+            for tool_name, result in action_results
+            if tool_name == "read_file" and result.success
+        ]
+        if final_reads and not this_iter_wrote:
+            read_lines = []
+            for result in final_reads:
+                detail = result.output_excerpt or result.summary
+                read_lines.append(
+                    "- read_file: success=True\n  output:\n    "
+                    + detail.replace("\n", "\n    ")
+                )
+            replay_entries.extend(
+                [
+                    {
+                        "role": "assistant",
+                        "content": json.dumps(response.json_data or {}),
+                    },
+                    {
+                        "role": "user",
+                        "content": (
+                            "Read results from the final action batch of this "
+                            "loop:\n\n" + "\n".join(read_lines)
+                        ),
+                    },
+                ]
+            )
+
         # Persist the last K stitched pairs from this loop's inner-loop
         # so the NEXT run() for the same (task, agent) can replay them.
-        # `messages[seed_len:]` is exactly the assistant/user pairs that
-        # the stitch step appended; the final iteration's response is NOT
-        # in messages (the loop breaks before stitching it), which is
-        # fine — its `summary` is already captured separately and its
-        # validator-visible outcome flows through ContextPack's
-        # failure_patterns_to_avoid on the next loop.
-        self._inner_replay[replay_key] = _build_replay_block(messages[seed_len:])
+        # Normal stitched pairs come from ``messages``. A final successful
+        # read batch is added explicitly above because the loop can break
+        # before the normal follow-up stitch runs.
+        self._inner_replay[replay_key] = _build_replay_block(replay_entries)
 
         return WorkerResult(
             agent_id=context.agent_id,
@@ -284,6 +425,30 @@ class ExecutionWorker:
             evidence_ids=evidence_ids,
             artifact_ids=artifact_ids,
         )
+
+    def _read_only_streak_before_loop(
+        self,
+        *,
+        task_id: str,
+        agent_id: str,
+        loop_id: int,
+    ) -> int:
+        events = self.repo.list_events(
+            task_id,
+            until_loop=max(0, loop_id - 1),
+            event_types=[EventType.WORKER_READ_ONLY_STREAK.value],
+        )
+        for event in reversed(events):
+            payload = event.get("payload")
+            if not isinstance(payload, dict):
+                continue
+            if payload.get("agent_id") != agent_id:
+                continue
+            if event.get("loop_id") != loop_id - 1:
+                return 0
+            streak = payload.get("streak")
+            return streak if isinstance(streak, int) else 0
+        return 0
 
     @staticmethod
     def _messages(

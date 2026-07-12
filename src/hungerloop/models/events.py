@@ -36,6 +36,7 @@ class EventType(str, Enum):
     WORKER_FINISHED = "worker_finished"
     WORKER_FAILED = "worker_failed"
     CONTEXT_TRUNCATED = "context_truncated"
+    WORKER_READ_ONLY_STREAK = "worker_read_only_streak"
     WORKER_HANDOFF_EMITTED = "worker.handoff_emitted"
     WORKER_HANDOFF_RECEIVED = "worker.handoff_received"
     WORKER_HANDOFF_BLOCKER_RECORDED = "worker.handoff_blocker_recorded"
@@ -80,6 +81,7 @@ class EventType(str, Enum):
     CHECK_PASSED = "check_passed"
     CHECK_FAILED = "check_failed"
     CHECK_REGRESSED = "check_regressed"
+    CHECK_REGRESSION_RECONFIRMED = "check_regression_reconfirmed"
 
     # ----- Mission phase state machine (v0.6 M4) -------------------------
     MISSION_CREATED = "mission.created"
@@ -102,6 +104,7 @@ class EventType(str, Enum):
     CANDIDATE_CREATED = "candidate_created"
     CANDIDATE_COMMITTED = "candidate_committed"
     CANDIDATE_REJECTED = "candidate_rejected"
+    CANDIDATE_CONTINUATION_SEEDED = "candidate_continuation_seeded"
 
     # ----- Hunger -------------------------------------------------------
     HUNGER_RESUMED = "hunger_resumed"
@@ -156,6 +159,7 @@ class EventType(str, Enum):
     SYNTH_CHECK_REJECTED = "synth_check_rejected"
     SYNTH_CHECK_FIXTURE_REJECTED = "synth_check_fixture_rejected"
     SYNTH_CHECK_BASELINE_VALIDATED = "synth_check_baseline_validated"
+    SYNTH_BASELINE_REGRESSION_IGNORED = "synth_baseline_regression_ignored"
     SYNTH_CHECK_AUTO_SATISFIED = "synth_check_auto_satisfied"
     SYNTH_CHECK_CONFLICT_DETECTED = "synth_check_conflict_detected"
     SYNTH_CHECK_QUARANTINED = "synth_check_quarantined"
@@ -163,6 +167,7 @@ class EventType(str, Enum):
     SYNTH_AUDIT_FAILED_OPEN = "synth_audit_failed_open"
     SYNTHESIS_ATTEMPTED = "synthesis_attempted"
     SYNTHESIS_SKIPPED = "synthesis_skipped"
+    SYNTHESIS_BACKFILL_STOPPED = "synthesis_backfill_stopped"
 
     # ----- Discovery credit (v0.7) --------------------------------------
     DISCOVERY_CREDIT = "discovery_credit"

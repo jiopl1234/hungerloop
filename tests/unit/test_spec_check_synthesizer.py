@@ -369,6 +369,38 @@ class TestSynthesisParsesValidatesGates:
         assert rejected[0]["source_quote"] == bad_path_proposal["source_quote"]
 
     @pytest.mark.asyncio
+    async def test_syntax_invalid_shell_proposal_never_reaches_ledger(self) -> None:
+        repo = _setup_repo()
+        bad_proposal = _make_shell_proposal_json(
+            argv=["python", "-c", "try: pass; except: pass"],
+            description="run the required pytest check",
+            source_quote="pass pytest",
+        )
+        raw_response = json.dumps([bad_proposal])
+        client = _FakeCompletionClient([_make_response(raw_response)])
+        synth = _make_synthesizer(repo=repo, completion_client=client)
+
+        result = await synth.synthesize(
+            task_id="t1",
+            loop_id=1,
+            mission_prose=_MISSION_PROSE,
+            feature_descriptions=_FEATURE_DESCS,
+            synthesis_max_total_items=20,
+        )
+
+        assert result.accepted_count == 0
+        assert repo.get_hunger_ledger("t1").items == []
+        events = repo.list_events(
+            "t1", event_types=[EventType.SYNTH_CHECK_REJECTED.value]
+        )
+        assert len(events) == 1
+        payload = events[0]["payload"]
+        assert isinstance(payload, dict)
+        rejected = payload["rejected_proposals"]
+        assert isinstance(rejected, list)
+        assert rejected[0]["reason"] == "assertion_not_executable:syntax_error"
+
+    @pytest.mark.asyncio
     async def test_unanchored_source_quote_rejected(self) -> None:
         repo = _setup_repo()
         # Source quote not in mission prose

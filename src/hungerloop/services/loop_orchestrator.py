@@ -395,6 +395,35 @@ class LoopOrchestrator:
                 loop_id=loop_id,
             )
             return self._emit_stop(task_id, StopReason.SAFETY_STOP)
+        previous_trace = next(
+            (
+                trace
+                for trace in reversed(self.repo.list_loop_traces(task_id))
+                if trace.loop_id == loop_id - 1
+            ),
+            None,
+        )
+        if (
+            plan.assignments
+            and previous_trace is not None
+            and previous_trace.candidate_state_id is not None
+            and not previous_trace.committed
+            and previous_trace.stop_reason is None
+            and self.workspace_manager.continue_candidate_from_rejected(
+                task_id, loop_id
+            )
+        ):
+            self.repo.append_event(
+                EventType.CANDIDATE_CONTINUATION_SEEDED,
+                {
+                    "source_loop_id": loop_id - 1,
+                    "source_workspace_ref": f"rejected/loop_{loop_id - 1:03d}",
+                    "candidate_workspace_ref": f"candidates/loop_{loop_id:03d}",
+                    "best_untouched": True,
+                },
+                task_id=task_id,
+                loop_id=loop_id,
+            )
         self._emit_feature_assigned_events(
             task_id=task_id,
             loop_id=loop_id,
@@ -1742,7 +1771,7 @@ class LoopOrchestrator:
                 self.repo,
                 task_id,
             )
-            for _ in range(max_rounds):
+            for round_index in range(1, max_rounds + 1):
                 covered_digest = build_covered_check_digest(
                     repo=self.repo,
                     task_id=task_id,
@@ -1773,14 +1802,37 @@ class LoopOrchestrator:
                 )
                 if not injected_ids:
                     break
-                await self.synthesized_check_lifecycle.validate_pending_baseline(
-                    task_id=task_id,
-                    loop_id=loop_id,
-                    workspace_root=self.workspace_manager.candidate_files_dir(
-                        task_id,
-                        loop_id,
-                    ),
+                baseline_result = (
+                    await self.synthesized_check_lifecycle.validate_pending_baseline(
+                        task_id=task_id,
+                        loop_id=loop_id,
+                        workspace_root=self.workspace_manager.candidate_files_dir(
+                            task_id,
+                            loop_id,
+                        ),
+                    )
                 )
+                if not baseline_result.failed_item_ids:
+                    self.repo.append_event(
+                        EventType.SYNTHESIS_BACKFILL_STOPPED,
+                        {
+                            "reason": "zero_actionable_yield",
+                            "round_index": round_index,
+                            "injected_item_ids": list(injected_ids),
+                            "attempted_item_ids": list(
+                                baseline_result.attempted_item_ids
+                            ),
+                            "auto_satisfied_item_ids": list(
+                                baseline_result.auto_satisfied_item_ids
+                            ),
+                            "rejected_fixture_item_ids": list(
+                                baseline_result.rejected_fixture_item_ids
+                            ),
+                        },
+                        task_id=task_id,
+                        loop_id=loop_id,
+                    )
+                    break
         except SafetyStopError:
             raise
         except Exception as exc:

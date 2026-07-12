@@ -17,7 +17,7 @@ import json
 import shutil
 import tempfile
 from pathlib import Path
-from typing import TYPE_CHECKING, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Literal, Protocol, runtime_checkable
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -42,18 +42,70 @@ REASON_NONDETERMINISTIC = "nondeterministic"
 REASON_MISSING_FIXTURE = "missing_fixture"
 REASON_FIXTURE_SETUP_FAILED = "fixture_setup_failed"
 REASON_FIXTURE_NONDETERMINISTIC = "fixture_nondeterministic"
+REASON_ASSERTION_NOT_EXECUTABLE = "assertion_not_executable"
+
+DryRunFailureKind = Literal["syntax_error", "setup_error", "timeout"]
+
+
+class DryRunResult(BaseModel):
+    """Structured dry-run result that distinguishes invalid checks from failures."""
+
+    passed: bool
+    failure_kind: DryRunFailureKind | None = None
+    stderr_excerpt: str = ""
+
+
+def _coerce_dry_run_result(result: bool | DryRunResult) -> DryRunResult:
+    if isinstance(result, bool):
+        return DryRunResult(passed=result)
+    return result
+
+
+def _assertion_not_executable_reason(result: DryRunResult) -> str | None:
+    if result.failure_kind is None:
+        return None
+    return f"{REASON_ASSERTION_NOT_EXECUTABLE}:{result.failure_kind}"
+
+
+def _classify_sandbox_failure(
+    *,
+    stderr: str,
+    stdout: str,
+    timed_out: bool,
+) -> DryRunFailureKind | None:
+    if timed_out:
+        return "timeout"
+    combined = f"{stderr}\n{stdout}"
+    if any(
+        marker in combined
+        for marker in ("SyntaxError", "IndentationError", "TabError")
+    ):
+        return "syntax_error"
+    return None
 
 
 @runtime_checkable
 class DryRunner(Protocol):
     """Adapter for dry-running shell proposals.
 
-    Implementations wrap ``SandboxRunner`` (or a fake in tests) and return
-    ``True`` when the command exits zero, ``False`` otherwise.
+    The stable public method returns a bool. Production adapters may also
+    implement :class:`DetailedDryRunner` for diagnostic classification.
     """
 
-    async def dry_run(self, argv: list[str], cwd: Path | None = None) -> bool:
-        """Run *argv* once and return whether exit code is 0."""
+    async def dry_run(
+        self, argv: list[str], cwd: Path | None = None
+    ) -> bool:
+        """Run *argv* once and return whether it exits zero."""
+        ...
+
+
+@runtime_checkable
+class DetailedDryRunner(Protocol):
+    """Optional adapter extension exposing failure classification."""
+
+    async def dry_run_detailed(
+        self, argv: list[str], cwd: Path | None = None
+    ) -> DryRunResult:
         ...
 
 
@@ -81,13 +133,15 @@ class SandboxDryRunner(DryRunner):
         self._timeout = timeout
         self._cwd = cwd or Path.cwd()
 
-    async def dry_run(self, argv: list[str], cwd: Path | None = None) -> bool:
-        """Run *argv* once and return ``True`` iff exit code is 0."""
+    async def dry_run_detailed(
+        self, argv: list[str], cwd: Path | None = None
+    ) -> DryRunResult:
+        """Run *argv* once and classify high-confidence execution failures."""
         run_cwd = cwd if cwd is not None else self._cwd
         isolated_root: Path | None = None
         try:
             if not run_cwd.is_dir():
-                return False
+                return DryRunResult(passed=False, failure_kind="setup_error")
             isolated_root = Path(
                 tempfile.mkdtemp(
                     prefix=".hungerloop-dry-run-",
@@ -104,12 +158,30 @@ class SandboxDryRunner(DryRunner):
                 timeout=self._timeout,
                 evidence_label="check_proposal_dry_run",
             )
-            return result.exit_code == 0
-        except (ValueError, FileNotFoundError, PermissionError, OSError):
-            return False
+            return DryRunResult(
+                passed=result.exit_code == 0 and not result.timed_out,
+                failure_kind=_classify_sandbox_failure(
+                    stderr=result.stderr,
+                    stdout=result.stdout,
+                    timed_out=result.timed_out,
+                ),
+                stderr_excerpt=result.stderr[:1000],
+            )
+        except (ValueError, FileNotFoundError, PermissionError, OSError) as exc:
+            return DryRunResult(
+                passed=False,
+                failure_kind="setup_error",
+                stderr_excerpt=f"{type(exc).__name__}: {exc}"[:1000],
+            )
         finally:
             if isolated_root is not None:
                 shutil.rmtree(isolated_root, ignore_errors=True)
+
+    async def dry_run(self, argv: list[str], cwd: Path | None = None) -> bool:
+        """Compatibility API returning only the process success boolean."""
+        return (
+            await self.dry_run_detailed(argv, cwd=cwd)
+        ).passed
 
 
 class RejectedProposal(BaseModel):
@@ -182,6 +254,25 @@ def _validate_argv(argv: object, allowlist: list[str]) -> str | None:
     head = _normalize_executable(argv[0])
     if head not in allowlist:
         return REASON_NON_ALLOWLISTED
+    return None
+
+
+def _python_inline_syntax_reason(argv: object) -> str | None:
+    """Statically reject malformed allowlisted ``python -c`` snippets."""
+    if not isinstance(argv, list) or not argv:
+        return None
+    if not isinstance(argv[0], str) or _normalize_executable(argv[0]) != "python":
+        return None
+    try:
+        command_index = argv.index("-c")
+    except ValueError:
+        return None
+    if command_index + 1 >= len(argv) or not isinstance(argv[command_index + 1], str):
+        return None
+    try:
+        compile(argv[command_index + 1], "<synthesized-check>", "exec")
+    except (SyntaxError, ValueError, TypeError):
+        return f"{REASON_ASSERTION_NOT_EXECUTABLE}:syntax_error"
     return None
 
 
@@ -261,6 +352,12 @@ class CheckProposalGate:
                 if reason is not None:
                     _reject(proposal, reason, key)
                     continue
+                syntax_reason = _python_inline_syntax_reason(
+                    proposal.params.get("argv")
+                )
+                if syntax_reason is not None:
+                    _reject(proposal, syntax_reason, key)
+                    continue
                 if require_fixture and proposal.fixture_argv is None:
                     _reject(proposal, REASON_MISSING_FIXTURE, key)
                     continue
@@ -271,6 +368,9 @@ class CheckProposalGate:
                     )
                     if fixture_reason is not None:
                         _reject(proposal, fixture_reason, key)
+                        continue
+                    if _python_inline_syntax_reason(proposal.fixture_argv) is not None:
+                        _reject(proposal, REASON_FIXTURE_SETUP_FAILED, key)
                         continue
                 if defer_fixture_precheck:
                     accepted.append(proposal)
@@ -322,6 +422,21 @@ class CheckProposalGate:
         argv = proposal.params.get("argv")
         return _validate_argv(argv, self._allowlist)
 
+    async def _run_dry_once(
+        self,
+        argv: list[str],
+        *,
+        cwd: Path | None,
+    ) -> DryRunResult:
+        """Use diagnostics when available while preserving bool-only fakes."""
+        if self._dry_runner is None:
+            return DryRunResult(passed=False, failure_kind="setup_error")
+        if isinstance(self._dry_runner, DetailedDryRunner):
+            return await self._dry_runner.dry_run_detailed(argv, cwd=cwd)
+        return _coerce_dry_run_result(
+            await self._dry_runner.dry_run(argv, cwd=cwd)
+        )
+
     async def _dry_run_check(
         self, proposal: CheckProposal, *, cwd: Path | None = None
     ) -> str | None:
@@ -337,10 +452,15 @@ class CheckProposalGate:
         argv = proposal.params.get("argv", [])
         assert isinstance(argv, list)
 
-        result1 = await self._dry_runner.dry_run(list(argv), cwd=cwd)
-        result2 = await self._dry_runner.dry_run(list(argv), cwd=cwd)
-
-        if result1 != result2:
+        result1 = await self._run_dry_once(list(argv), cwd=cwd)
+        non_executable = _assertion_not_executable_reason(result1)
+        if non_executable is not None:
+            return non_executable
+        result2 = await self._run_dry_once(list(argv), cwd=cwd)
+        non_executable = _assertion_not_executable_reason(result2)
+        if non_executable is not None:
+            return non_executable
+        if result1.passed != result2.passed:
             return REASON_NONDETERMINISTIC
         return None
 
@@ -354,11 +474,11 @@ class CheckProposalGate:
         if self._dry_runner is None:
             return "no_dry_runner"
 
-        result1 = await self._dry_runner.dry_run(list(argv), cwd=cwd)
-        result2 = await self._dry_runner.dry_run(list(argv), cwd=cwd)
-        if result1 != result2:
+        result1 = await self._run_dry_once(list(argv), cwd=cwd)
+        result2 = await self._run_dry_once(list(argv), cwd=cwd)
+        if result1.passed != result2.passed or result1.failure_kind != result2.failure_kind:
             return REASON_FIXTURE_NONDETERMINISTIC
-        if not result1:
+        if not result1.passed:
             return REASON_FIXTURE_SETUP_FAILED
         return None
 
@@ -385,8 +505,14 @@ class CheckProposalGate:
             script,
             json.dumps([fixture_argv, assertion_argv]),
         ]
-        result1 = await self._dry_runner.dry_run(composite_argv, cwd=cwd)
-        result2 = await self._dry_runner.dry_run(composite_argv, cwd=cwd)
-        if result1 != result2:
+        result1 = await self._run_dry_once(composite_argv, cwd=cwd)
+        non_executable = _assertion_not_executable_reason(result1)
+        if non_executable is not None:
+            return non_executable
+        result2 = await self._run_dry_once(composite_argv, cwd=cwd)
+        non_executable = _assertion_not_executable_reason(result2)
+        if non_executable is not None:
+            return non_executable
+        if result1.passed != result2.passed:
             return REASON_NONDETERMINISTIC
         return None

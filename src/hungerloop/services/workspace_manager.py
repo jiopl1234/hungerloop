@@ -45,6 +45,18 @@ _DEFAULT_SEED_IGNORE_NAMES = frozenset(
         "tasks",
     }
 )
+_CONTINUATION_IGNORE_NAMES = frozenset(
+    {
+        ".git",
+        ".mypy_cache",
+        ".pytest_cache",
+        ".ruff_cache",
+        ".tox",
+        ".venv",
+        "__pycache__",
+        "hungerloop.sqlite*",
+    }
+)
 
 
 def _sha256_of_file(path: Path) -> str:
@@ -62,6 +74,27 @@ def _sha256_of_file(path: Path) -> str:
                 break
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _workspace_file_hashes(root: Path) -> dict[str, str]:
+    """Return content hashes for files below a workspace directory."""
+    if not root.is_dir():
+        return {}
+    return {
+        relative.as_posix(): _sha256_of_file(path)
+        for path in root.rglob("*")
+        if not _is_continuation_noise_path(relative := path.relative_to(root))
+        if path.is_file()
+    }
+
+
+def _is_continuation_noise_path(path: Path) -> bool:
+    for part in path.parts:
+        if part in _CONTINUATION_IGNORE_NAMES:
+            return True
+        if part.startswith("hungerloop.sqlite"):
+            return True
+    return False
 
 
 def _copy_seed_source(source: Path, destination: Path) -> None:
@@ -158,6 +191,50 @@ class WorkspaceManager:
             source_workspace_ref="best",
         )
         return dst
+
+    def continue_candidate_from_rejected(
+        self,
+        task_id: str,
+        loop_id: int,
+        *,
+        source_loop_id: int | None = None,
+    ) -> bool:
+        """Seed a candidate from the immediately prior rejected candidate.
+
+        The rejected tree is copied into the new candidate only. ``best`` and
+        the rejected evidence directory are never modified, so I-3/I-4 still
+        make the validation/commit gate the sole promotion authority.
+        """
+        previous_loop_id = (
+            loop_id - 1 if source_loop_id is None else source_loop_id
+        )
+        if previous_loop_id != loop_id - 1:
+            raise ValueError("rejected continuation must come from the prior loop")
+
+        source = self.rejected_files_dir(task_id, previous_loop_id)
+        if not source.is_dir():
+            return False
+        best = self.best_files_dir(task_id)
+        if _workspace_file_hashes(source) == _workspace_file_hashes(best):
+            return False
+
+        destination = self.candidate_files_dir(task_id, loop_id)
+        if destination.exists():
+            shutil.rmtree(destination)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(
+            source,
+            destination,
+            ignore=shutil.ignore_patterns(*sorted(_CONTINUATION_IGNORE_NAMES)),
+        )
+        self._write_manifest(
+            task_id=task_id,
+            loop_id=loop_id,
+            path=destination,
+            status="candidate",
+            source_workspace_ref=f"rejected/loop_{previous_loop_id:03d}",
+        )
+        return True
 
     def promote_candidate_to_best(self, task_id: str, loop_id: int) -> None:
         """Atomically replace ``best/files`` with the named candidate.

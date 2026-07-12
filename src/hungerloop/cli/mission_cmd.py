@@ -795,7 +795,8 @@ def _maybe_run_plan_time_synthesis(
         feature_descriptions.append(f"{feature.feature_id}: {desc}")
 
     # Build the completion client from env credentials
-    client = _build_synthesis_completion_client(ctx, model_name="glm-5.2")
+    synthesis_model = _synthesis_model_name()
+    client = _build_synthesis_completion_client(ctx, model_name=synthesis_model)
     if client is None:
         return
 
@@ -827,7 +828,7 @@ def _maybe_run_plan_time_synthesis(
                 synthesis_max_active_items=policy.synthesis_max_active_items,
                 synthesis_batch_size=policy.synthesis_batch_size,
                 synthesis_audit_enabled=policy.synthesis_audit_enabled,
-                model_name="glm-5.2",
+                model_name=synthesis_model,
             )
         )
     except SafetyStopError:
@@ -919,6 +920,12 @@ def _build_synthesis_completion_client(
                 return ModelResponse(content=content, usage=usage)
 
     return _RealCompletionClient(api_key, base_url, model_name)
+
+
+def _synthesis_model_name() -> str:
+    """Return the run-level synthesis model while preserving the default."""
+    configured = os.environ.get("HUNGERLOOP_SYNTHESIS_MODEL", "").strip()
+    return configured or "glm-5.2"
 
 
 def _create_legacy_task(

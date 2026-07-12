@@ -36,6 +36,7 @@ def test_default_synthesis_lifecycle_policy() -> None:
     assert policy.synthesis_batch_size == 3
     assert policy.synthesis_conflict_threshold == 2
     assert policy.synthesis_audit_enabled is False
+    assert policy.regression_confirm_reruns == 1
 
 
 def test_default_refactor_transactions_enabled() -> None:
@@ -58,13 +59,14 @@ def test_default_memory_recall_enabled() -> None:
     assert HungerPolicy().memory_recall_enabled is True
 
 
-def test_all_eight_v07_flags_present() -> None:
-    """All eight v0.7 flags must exist on the model."""
+def test_v07_policy_flags_present() -> None:
+    """All v0.7 policy flags must exist on the model."""
     policy = HungerPolicy()
     flags = [
         "synthesis_enabled",
         "synthesis_plan_time_tier",
         "synthesis_max_total_items",
+        "regression_confirm_reruns",
         "refactor_transactions_enabled",
         "max_declared_regressions",
         "refactor_deadline_loops",
@@ -82,6 +84,7 @@ def test_policy_serialization_preserves_defaults() -> None:
     assert restored.synthesis_enabled is False
     assert restored.synthesis_plan_time_tier == 0
     assert restored.synthesis_max_total_items == 20
+    assert restored.regression_confirm_reruns == 1
     assert restored.refactor_transactions_enabled is False
     assert restored.max_declared_regressions == 5
     assert restored.refactor_deadline_loops == 3
@@ -98,6 +101,7 @@ def test_policy_serialization_preserves_overrides() -> None:
         synthesis_batch_size=2,
         synthesis_conflict_threshold=3,
         synthesis_audit_enabled=True,
+        regression_confirm_reruns=2,
         refactor_transactions_enabled=True,
         max_declared_regressions=3,
         refactor_deadline_loops=5,
@@ -113,11 +117,17 @@ def test_policy_serialization_preserves_overrides() -> None:
     assert restored.synthesis_batch_size == 2
     assert restored.synthesis_conflict_threshold == 3
     assert restored.synthesis_audit_enabled is True
+    assert restored.regression_confirm_reruns == 2
     assert restored.refactor_transactions_enabled is True
     assert restored.max_declared_regressions == 3
     assert restored.refactor_deadline_loops == 5
     assert restored.memory_auto_promote_enabled is False
     assert restored.memory_recall_enabled is False
+
+
+def test_regression_confirm_reruns_must_not_be_negative() -> None:
+    with pytest.raises(ValidationError):
+        HungerPolicy(regression_confirm_reruns=-1)
 
 
 def test_v06_fields_preserved() -> None:
@@ -225,6 +235,7 @@ def test_in_memory_override_policy_round_trip() -> None:
         synthesis_batch_size=2,
         synthesis_conflict_threshold=3,
         synthesis_audit_enabled=True,
+        regression_confirm_reruns=2,
         refactor_transactions_enabled=True,
         max_declared_regressions=3,
         refactor_deadline_loops=5,
@@ -240,6 +251,7 @@ def test_in_memory_override_policy_round_trip() -> None:
     assert restored.synthesis_batch_size == 2
     assert restored.synthesis_conflict_threshold == 3
     assert restored.synthesis_audit_enabled is True
+    assert restored.regression_confirm_reruns == 2
     assert restored.refactor_transactions_enabled is True
     assert restored.max_declared_regressions == 3
     assert restored.refactor_deadline_loops == 5
@@ -277,6 +289,7 @@ def test_sqlite_override_policy_round_trip(tmp_path: Path) -> None:
         synthesis_batch_size=2,
         synthesis_conflict_threshold=3,
         synthesis_audit_enabled=True,
+        regression_confirm_reruns=2,
         refactor_transactions_enabled=True,
         max_declared_regressions=3,
         refactor_deadline_loops=5,
@@ -294,6 +307,7 @@ def test_sqlite_override_policy_round_trip(tmp_path: Path) -> None:
     assert restored.synthesis_batch_size == 2
     assert restored.synthesis_conflict_threshold == 3
     assert restored.synthesis_audit_enabled is True
+    assert restored.regression_confirm_reruns == 2
     assert restored.refactor_transactions_enabled is True
     assert restored.max_declared_regressions == 3
     assert restored.refactor_deadline_loops == 5

@@ -164,6 +164,19 @@ async def test_native_tool_protocol_request_and_response(
         assert isinstance(tools, list)
         tool_names = {tool["function"]["name"] for tool in tools}
         assert {"read_file", "write_file", "patch_file", "run_shell"} <= tool_names
+        read_tool = next(
+            tool for tool in tools if tool["function"]["name"] == "read_file"
+        )
+        read_properties = read_tool["function"]["parameters"]["properties"]
+        assert {"path", "offset", "limit"} <= set(read_properties)
+        assert read_properties["offset"]["minimum"] == 1
+        assert read_properties["limit"]["maximum"] == 400
+        patch_tool = next(
+            tool for tool in tools if tool["function"]["name"] == "patch_file"
+        )
+        patch_properties = patch_tool["function"]["parameters"]["properties"]
+        assert patch_properties["start_line"]["minimum"] == 1
+        assert patch_properties["end_line"]["minimum"] == 1
         return httpx.Response(
             200,
             json={

@@ -133,6 +133,50 @@ def test_reject_moves_candidate_to_rejected(ws: WorkspaceManager) -> None:
     assert (rejected / "test.txt").read_text() == "data"
 
 
+def test_rejected_candidate_can_seed_next_candidate_without_touching_best(
+    ws: WorkspaceManager,
+) -> None:
+    ws.ensure_task_workspace("task_001")
+    best = ws.best_files_dir("task_001")
+    (best / "app.py").write_text("v1", encoding="utf-8")
+    rejected_candidate = ws.create_candidate_workspace("task_001", loop_id=1)
+    (rejected_candidate / "app.py").write_text("partial", encoding="utf-8")
+    ws.reject_candidate("task_001", loop_id=1)
+
+    continued = ws.create_candidate_workspace("task_001", loop_id=2)
+    assert ws.continue_candidate_from_rejected("task_001", loop_id=2) is True
+    assert continued.joinpath("app.py").read_text(encoding="utf-8") == "partial"
+    assert best.joinpath("app.py").read_text(encoding="utf-8") == "v1"
+    assert ws.rejected_files_dir("task_001", 1).joinpath("app.py").read_text(
+        encoding="utf-8"
+    ) == "partial"
+
+
+def test_identical_rejected_candidate_is_not_carried_forward(
+    ws: WorkspaceManager,
+) -> None:
+    ws.ensure_task_workspace("task_001")
+    ws.create_candidate_workspace("task_001", loop_id=1)
+    ws.reject_candidate("task_001", loop_id=1)
+    ws.create_candidate_workspace("task_001", loop_id=2)
+
+    assert ws.continue_candidate_from_rejected("task_001", loop_id=2) is False
+
+
+def test_runtime_cache_only_rejected_candidate_is_not_carried_forward(
+    ws: WorkspaceManager,
+) -> None:
+    ws.ensure_task_workspace("task_001")
+    candidate = ws.create_candidate_workspace("task_001", loop_id=1)
+    cache = candidate / "__pycache__"
+    cache.mkdir()
+    (cache / "app.pyc").write_bytes(b"cache")
+    ws.reject_candidate("task_001", loop_id=1)
+    ws.create_candidate_workspace("task_001", loop_id=2)
+
+    assert ws.continue_candidate_from_rejected("task_001", loop_id=2) is False
+
+
 def test_promote_nonexistent_candidate_raises(ws: WorkspaceManager) -> None:
     ws.ensure_task_workspace("task_001")
     with pytest.raises(FileNotFoundError):

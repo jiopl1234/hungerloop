@@ -783,7 +783,15 @@ def _native_openai_tools() -> list[dict[str, object]]:
                 "description": "Read a UTF-8 file from the candidate workspace.",
                 "parameters": {
                     "type": "object",
-                    "properties": {"path": {"type": "string"}},
+                    "properties": {
+                        "path": {"type": "string"},
+                        "offset": {"type": "integer", "minimum": 1},
+                        "limit": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "maximum": 400,
+                        },
+                    },
                     "required": ["path"],
                     "additionalProperties": False,
                 },
@@ -812,13 +820,19 @@ def _native_openai_tools() -> list[dict[str, object]]:
             "type": "function",
             "function": {
                 "name": "patch_file",
-                "description": "Replace one unique old_text occurrence in a file.",
+                "description": (
+                    "Replace one unique old_text occurrence. Exact matching is "
+                    "preferred; optional line anchors narrow a whitespace-normalized "
+                    "fallback."
+                ),
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "path": {"type": "string"},
                         "old_text": {"type": "string"},
                         "new_text": {"type": "string"},
+                        "start_line": {"type": "integer", "minimum": 1},
+                        "end_line": {"type": "integer", "minimum": 1},
                     },
                     "required": ["path", "old_text", "new_text"],
                     "additionalProperties": False,

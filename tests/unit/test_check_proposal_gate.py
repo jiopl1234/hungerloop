@@ -1,6 +1,7 @@
 """Unit tests for CheckProposalGate (VAL-SYN-004, VAL-SYN-005)."""
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
 import pytest
@@ -10,6 +11,7 @@ from hungerloop.models.synthesis import CheckProposal
 from hungerloop.repository.in_memory_repo import InMemoryRepository
 from hungerloop.services.check_proposal_gate import (
     CheckProposalGate,
+    DryRunResult,
     SandboxDryRunner,
 )
 from hungerloop.services.sandbox_runner import SandboxRunner
@@ -336,6 +338,64 @@ async def test_sandbox_dry_runner_never_mutates_candidate_workspace(
     assert original.read_text(encoding="utf-8") == "original"
     assert not (candidate_root / "created.txt").exists()
     assert not list(candidate_root.parent.glob(".hungerloop-dry-run-*"))
+
+
+@pytest.mark.asyncio
+async def test_gate_rejects_syntax_error_as_non_executable() -> None:
+    class SyntaxFailureRunner:
+        def __init__(self) -> None:
+            self.call_count = 0
+
+        async def dry_run(self, argv: list[str], cwd: Path | None = None) -> bool:
+            raise AssertionError("gate should use detailed dry-run results")
+
+        async def dry_run_detailed(
+            self, argv: list[str], cwd: Path | None = None
+        ) -> DryRunResult:
+            self.call_count += 1
+            return DryRunResult(
+                passed=False,
+                failure_kind="syntax_error",
+                stderr_excerpt="SyntaxError: invalid syntax",
+            )
+
+    runner = SyntaxFailureRunner()
+    result = await CheckProposalGate(dry_runner=runner).filter(
+        [_shell_proposal(["python", "-m", "generated_check"])]
+    )
+
+    assert result.accepted == []
+    assert result.rejected[0].reason == "assertion_not_executable:syntax_error"
+    assert runner.call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_plan_time_statically_rejects_invalid_python_inline_check() -> None:
+    runner = FakeDryRunner(default=True)
+    result = await CheckProposalGate(dry_runner=runner).filter(
+        [_shell_proposal(["python", "-c", "try: pass; except: pass"])],
+        defer_fixture_precheck=True,
+    )
+
+    assert result.accepted == []
+    assert result.rejected[0].reason == "assertion_not_executable:syntax_error"
+    assert runner.call_count == 0
+
+
+@pytest.mark.asyncio
+async def test_sandbox_dry_runner_classifies_real_python_syntax_error(
+    tmp_path: Path,
+) -> None:
+    result = await SandboxDryRunner(
+        SandboxRunner(InMemoryRepository())
+    ).dry_run_detailed(
+        [sys.executable, "-c", "try: pass; except: pass"],
+        cwd=tmp_path,
+    )
+
+    assert result.passed is False
+    assert result.failure_kind == "syntax_error"
+    assert "SyntaxError" in result.stderr_excerpt
 
 
 @pytest.mark.asyncio

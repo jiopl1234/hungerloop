@@ -18,10 +18,11 @@ from hungerloop.services.tools import default_tool_registry
 def _ctx(
     workspace_ref: str = "cand",
     acceptance_criteria: list[str] | None = None,
+    loop_id: int = 1,
 ) -> ContextPack:
     return ContextPack(
         task_id="t1",
-        loop_id=1,
+        loop_id=loop_id,
         agent_id="execution_worker_v1",
         mission="write a demo report",
         phase=LoopPhase.EXPLORE.value,
@@ -226,6 +227,283 @@ async def test_execution_worker_persists_inner_loop_replay_across_runs(
     assert "Begin loop 2 now." in messages_loop_2[-1]["content"]
 
 
+def test_inner_replay_keeps_three_recent_pairs_within_expanded_budget() -> None:
+    from hungerloop.services.execution_worker import (
+        K_INNER_REPLAY,
+        MAX_INNER_REPLAY_CHARS,
+        _build_replay_block,
+        _total_chars,
+    )
+
+    entries: list[dict[str, str]] = []
+    for index in range(1, 5):
+        entries.extend(
+            [
+                {"role": "assistant", "content": f'{{"summary":"read-{index}"}}'},
+                {"role": "user", "content": f"READ-{index}:" + (str(index) * 4000)},
+            ]
+        )
+
+    replay = _build_replay_block(entries)
+
+    assert K_INNER_REPLAY == 3
+    assert MAX_INNER_REPLAY_CHARS == 16000
+    assert len(replay) == 6
+    rendered = "\n".join(message["content"] for message in replay)
+    assert "READ-1:" not in rendered
+    assert "READ-2:" in rendered
+    assert "READ-3:" in rendered
+    assert "READ-4:" in rendered
+    assert _total_chars(replay) <= MAX_INNER_REPLAY_CHARS
+
+
+async def test_execution_worker_surfaces_ranged_read_in_current_turn(
+    tmp_path: Path,
+) -> None:
+    import json
+    import sys
+
+    from hungerloop.models.usage import ModelUsage
+    from hungerloop.services.model_client import ModelResponse
+
+    lines = [f"line-{index:04d}" for index in range(1, 751)]
+    lines[690] = "TARGET-LINE-691"
+    (tmp_path / "large.py").write_text("\n".join(lines), encoding="utf-8")
+    read_body: dict[str, object] = {
+        "summary": "inspect target implementation",
+        "actions": [
+            {
+                "tool_name": "read_file",
+                "args": {"path": "large.py", "offset": 691, "limit": 3},
+            }
+        ],
+    }
+    edit_body: dict[str, object] = {
+        "summary": "apply targeted fix",
+        "actions": [
+            {
+                "tool_name": "write_file",
+                "args": {"path": "marker.txt", "content": "fixed"},
+            },
+            {
+                "tool_name": "run_shell",
+                "args": {
+                    "argv": [sys.executable, "-c", "raise SystemExit(0)"],
+                },
+            },
+        ],
+    }
+    captured_messages: list[list[dict[str, str]]] = []
+
+    class _CapturingClient(DummyModelClient):
+        async def complete_json(self, **kw):  # type: ignore[override]
+            captured_messages.append(list(kw["messages"]))
+            return await super().complete_json(**kw)
+
+    client = _CapturingClient(
+        [
+            ModelResponse(
+                content=json.dumps(read_body),
+                json_data=read_body,
+                usage=ModelUsage(input_tokens=1, output_tokens=1),
+            ),
+            ModelResponse(
+                content=json.dumps(edit_body),
+                json_data=edit_body,
+                usage=ModelUsage(input_tokens=1, output_tokens=1),
+            ),
+        ]
+    )
+    worker, _, workspace = _build_worker(tmp_path, client)
+
+    await worker.run(
+        context=_ctx(acceptance_criteria=["command: verify marker"]),
+        workspace_root=workspace,
+    )
+
+    assert len(captured_messages) == 2
+    second_turn = "\n".join(
+        message["content"] for message in captured_messages[1]
+    )
+    assert "[lines 691-693 of 750]" in second_turn
+    assert "TARGET-LINE-691" in second_turn
+    assert "line-0001" not in second_turn
+
+
+async def test_execution_worker_replays_final_ranged_read_next_loop(
+    tmp_path: Path,
+) -> None:
+    import json
+
+    from hungerloop.models.usage import ModelUsage
+    from hungerloop.services.model_client import ModelResponse
+
+    lines = [f"line-{index:04d}" for index in range(1, 751)]
+    lines[690] = "TARGET-LINE-691"
+    (tmp_path / "large.py").write_text("\n".join(lines), encoding="utf-8")
+    read_body: dict[str, object] = {
+        "summary": "inspect target implementation",
+        "actions": [
+            {
+                "tool_name": "read_file",
+                "args": {"path": "large.py", "offset": 691, "limit": 3},
+            }
+        ],
+    }
+    handoff_body: dict[str, object] = {
+        "summary": "next loop sees prior read",
+        "actions": [],
+    }
+    captured_messages: list[list[dict[str, str]]] = []
+
+    class _CapturingClient(DummyModelClient):
+        async def complete_json(self, **kw):  # type: ignore[override]
+            captured_messages.append(list(kw["messages"]))
+            return await super().complete_json(**kw)
+
+    client = _CapturingClient(
+        [
+            ModelResponse(
+                content=json.dumps(read_body),
+                json_data=read_body,
+                usage=ModelUsage(input_tokens=1, output_tokens=1),
+            ),
+            ModelResponse(
+                content=json.dumps(handoff_body),
+                json_data=handoff_body,
+                usage=ModelUsage(input_tokens=1, output_tokens=1),
+            ),
+        ]
+    )
+    worker, _, workspace = _build_worker(tmp_path, client)
+
+    await worker.run(context=_ctx(loop_id=1), workspace_root=workspace)
+    await worker.run(context=_ctx(loop_id=2), workspace_root=workspace)
+
+    assert len(captured_messages) == 2
+    second_loop = "\n".join(
+        message["content"] for message in captured_messages[1]
+    )
+    assert "Replay of the last 1 action/result pair(s)" in second_loop
+    assert "[lines 691-693 of 750]" in second_loop
+    assert "TARGET-LINE-691" in second_loop
+
+
+async def test_execution_worker_emits_consecutive_read_only_streak(
+    tmp_path: Path,
+) -> None:
+    import json
+
+    from hungerloop.models.events import EventType
+    from hungerloop.models.usage import ModelUsage
+    from hungerloop.services.execution_worker import MAX_SELF_REPAIR_ITERATIONS
+    from hungerloop.services.model_client import ModelResponse
+
+    (tmp_path / "source.py").write_text("target = True\n", encoding="utf-8")
+    read_body: dict[str, object] = {
+        "summary": "inspect without editing",
+        "actions": [
+            {
+                "tool_name": "read_file",
+                "args": {"path": "source.py", "offset": 1, "limit": 1},
+            }
+        ],
+    }
+    response_count = 2 * (MAX_SELF_REPAIR_ITERATIONS + 1)
+    client = DummyModelClient(
+        [
+            ModelResponse(
+                content=json.dumps(read_body),
+                json_data=read_body,
+                usage=ModelUsage(input_tokens=1, output_tokens=1),
+            )
+            for _ in range(response_count)
+        ]
+    )
+    worker, repo, workspace = _build_worker(tmp_path, client)
+    criteria = ["command: verify source"]
+
+    await worker.run(
+        context=_ctx(loop_id=1, acceptance_criteria=criteria),
+        workspace_root=workspace,
+    )
+    await worker.run(
+        context=_ctx(loop_id=2, acceptance_criteria=criteria),
+        workspace_root=workspace,
+    )
+
+    events = repo.list_events(
+        "t1",
+        event_types=[EventType.WORKER_READ_ONLY_STREAK.value],
+    )
+    assert len(events) == 2
+    first_payload = events[0]["payload"]
+    second_payload = events[1]["payload"]
+    assert isinstance(first_payload, dict)
+    assert isinstance(second_payload, dict)
+    assert first_payload["streak"] == 1
+    assert first_payload["threshold_reached"] is False
+    assert second_payload["streak"] == 2
+    assert second_payload["threshold_reached"] is True
+    assert second_payload["read_count"] == MAX_SELF_REPAIR_ITERATIONS + 1
+    assert second_payload["write_count"] == 0
+
+
+async def test_execution_worker_forces_nonempty_read_batches_toward_edit(
+    tmp_path: Path,
+) -> None:
+    import json
+
+    from hungerloop.models.usage import ModelUsage
+    from hungerloop.services.execution_worker import MAX_SELF_REPAIR_ITERATIONS
+    from hungerloop.services.model_client import ModelResponse
+
+    (tmp_path / "source.py").write_text("target = True\n", encoding="utf-8")
+    read_body: dict[str, object] = {
+        "summary": "inspect without editing",
+        "actions": [
+            {
+                "tool_name": "read_file",
+                "args": {"path": "source.py", "offset": 1, "limit": 1},
+            }
+        ],
+    }
+    captured_messages: list[list[dict[str, str]]] = []
+
+    class _CapturingClient(DummyModelClient):
+        async def complete_json(self, **kw):  # type: ignore[override]
+            captured_messages.append(list(kw["messages"]))
+            return await super().complete_json(**kw)
+
+    client = _CapturingClient(
+        [
+            ModelResponse(
+                content=json.dumps(read_body),
+                json_data=read_body,
+                usage=ModelUsage(input_tokens=1, output_tokens=1),
+            )
+            for _ in range(MAX_SELF_REPAIR_ITERATIONS + 1)
+        ]
+    )
+    worker, _, workspace = _build_worker(tmp_path, client)
+
+    await worker.run(
+        context=_ctx(acceptance_criteria=["command: verify source"]),
+        workspace_root=workspace,
+    )
+
+    assert len(captured_messages) == MAX_SELF_REPAIR_ITERATIONS + 1
+    second_call = captured_messages[1][-1]["content"]
+    assert "MANDATORY EDIT" in second_call
+    assert "CALL BUDGET: 5 model call(s) remain" in second_call
+    third_call = captured_messages[2][-1]["content"]
+    assert third_call.startswith("STOP READING")
+    assert "CALL BUDGET: 4 model call(s) remain" in third_call
+    final_call = captured_messages[-1][-1]["content"]
+    assert "FINAL MODEL CALL" in final_call
+    assert "read-only response will be discarded" in final_call
+
+
 def test_execution_worker_renders_acceptance_progress_block() -> None:
     """When ContextPack carries acceptance_check_keys + a non-empty pass/fail
     split, _messages emits the progress block after acceptance_criteria so
@@ -396,6 +674,65 @@ async def test_execution_worker_followup_surfaces_patch_file_diagnostic(
     # only "success=False".
     assert "old_text not found" in body
     assert "closest_matches:" in body
+
+
+async def test_execution_worker_escalates_after_two_patch_misses(
+    tmp_path: Path,
+) -> None:
+    import json
+
+    from hungerloop.models.usage import ModelUsage
+    from hungerloop.services.model_client import ModelResponse
+
+    failed = {
+        "summary": "retry patch",
+        "actions": [
+            {
+                "tool_name": "patch_file",
+                "args": {
+                    "path": "alpha.txt",
+                    "old_text": "missing",
+                    "new_text": "replacement",
+                },
+            }
+        ],
+    }
+    handoff = {"summary": "stop", "actions": []}
+    responses = [
+        ModelResponse(
+            content=json.dumps(failed),
+            json_data=failed,
+            usage=ModelUsage(input_tokens=1, output_tokens=1),
+        ),
+        ModelResponse(
+            content=json.dumps(failed),
+            json_data=failed,
+            usage=ModelUsage(input_tokens=1, output_tokens=1),
+        ),
+        ModelResponse(
+            content=json.dumps(handoff),
+            json_data=handoff,
+            usage=ModelUsage(input_tokens=1, output_tokens=1),
+        ),
+    ]
+    captured: list[list[dict[str, str]]] = []
+
+    class _CapturingClient(DummyModelClient):
+        async def complete_json(self, **kw):  # type: ignore[override]
+            captured.append(list(kw["messages"]))
+            return await super().complete_json(**kw)
+
+    (tmp_path / "alpha.txt").write_text("present\n", encoding="utf-8")
+    worker, _, workspace = _build_worker(
+        tmp_path,
+        _CapturingClient(responses),
+    )
+    await worker.run(context=_ctx(), workspace_root=workspace)
+
+    third_turn = captured[2]
+    last_user = next(message for message in reversed(third_turn) if message["role"] == "user")
+    assert "PATCH ESCALATION" in last_user["content"]
+    assert "write_file" in last_user["content"]
 
 
 async def test_execution_worker_passes_retry_kwargs(tmp_path: Path) -> None:

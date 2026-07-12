@@ -510,12 +510,16 @@ def _build_spec_check_synthesizer(
     if not api_key or not base_url:
         return None
 
-    from hungerloop.cli.mission_cmd import _build_synthesis_completion_client
+    from hungerloop.cli.mission_cmd import (
+        _build_synthesis_completion_client,
+        _synthesis_model_name,
+    )
 
     ctx_stub = type("_CtxStub", (), {"repo": repo})()
+    synthesis_model = _synthesis_model_name()
     completion_client = _build_synthesis_completion_client(
         ctx_stub,
-        model_name="glm-5.2",
+        model_name=synthesis_model,
     )
     if completion_client is None:
         return None
@@ -532,7 +536,7 @@ def _build_spec_check_synthesizer(
         gate=CheckProposalGate(
             dry_runner=SandboxDryRunner(SandboxRunner(repo)),
         ),
-        model_name="glm-5.2",
+        model_name=synthesis_model,
     )
 
 

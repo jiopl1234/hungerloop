@@ -64,6 +64,7 @@ def _closest_match_diagnostic(
     original: str,
     old_text: str,
     max_matches: int = _PATCH_DIAGNOSTIC_MAX_CLOSEST,
+    line_offset: int = 0,
 ) -> str:
     """Render the top-N lines most similar to ``old_text`` for no_match.
 
@@ -78,7 +79,7 @@ def _closest_match_diagnostic(
     if not lines:
         return ""
     scored: list[tuple[float, int, str]] = []
-    for idx, raw in enumerate(lines, start=1):
+    for idx, raw in enumerate(lines, start=1 + line_offset):
         ratio = SequenceMatcher(None, needle, raw.strip()).ratio()
         scored.append((ratio, idx, raw))
     scored.sort(key=lambda tup: (-tup[0], tup[1]))
@@ -97,6 +98,7 @@ def _ambiguous_occurrences_diagnostic(
     original: str,
     old_text: str,
     max_occurrences: int = _PATCH_DIAGNOSTIC_MAX_OCCURRENCES,
+    line_offset: int = 0,
 ) -> str:
     """Render line numbers + 1 line of context for each occurrence."""
     if not old_text:
@@ -106,7 +108,7 @@ def _ambiguous_occurrences_diagnostic(
         return ""
     needle_first = _first_line(old_text)
     hits: list[int] = []
-    for idx, raw in enumerate(lines, start=1):
+    for idx, raw in enumerate(lines, start=1 + line_offset):
         if needle_first and needle_first in raw:
             hits.append(idx)
             if len(hits) >= max_occurrences:
@@ -118,9 +120,10 @@ def _ambiguous_occurrences_diagnostic(
         return ""
     out: list[str] = [f"occurrences (showing up to {max_occurrences}):"]
     for lineno in hits:
-        target = lines[lineno - 1]
-        prev_ctx = lines[lineno - 2] if lineno - 2 >= 0 else ""
-        next_ctx = lines[lineno] if lineno < len(lines) else ""
+        local_index = lineno - line_offset - 1
+        target = lines[local_index]
+        prev_ctx = lines[local_index - 1] if local_index - 1 >= 0 else ""
+        next_ctx = lines[local_index + 1] if local_index + 1 < len(lines) else ""
         out.append(f"  L{lineno}: {_clip_line(target)}")
         if prev_ctx or next_ctx:
             ctx_pieces: list[str] = []
@@ -130,6 +133,90 @@ def _ambiguous_occurrences_diagnostic(
                 ctx_pieces.append(f"next=L{lineno + 1}:{_clip_line(next_ctx)}")
             out.append("    " + " | ".join(ctx_pieces))
     return "\n".join(out)
+
+
+def _positive_line_number(value: object, *, name: str) -> int | None:
+    """Parse an optional one-based line anchor without accepting booleans."""
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        raise ValueError(f"{name} must be a positive integer")
+    try:
+        parsed = int(value) if isinstance(value, (int, str)) else 0
+    except ValueError as exc:
+        raise ValueError(f"{name} must be a positive integer") from exc
+    if parsed < 1:
+        raise ValueError(f"{name} must be a positive integer")
+    return parsed
+
+
+def _canonical_patch_line(line: str) -> str:
+    """Collapse all whitespace on one line for resilient patch matching."""
+    return " ".join(line.split())
+
+
+def _normalized_line_matches(
+    *,
+    original_lines: list[str],
+    old_text: str,
+) -> list[tuple[int, int]]:
+    """Return line-window matches after per-line whitespace normalization."""
+    old_lines = old_text.splitlines()
+    while old_lines and not old_lines[0].strip():
+        old_lines.pop(0)
+    while old_lines and not old_lines[-1].strip():
+        old_lines.pop()
+    if not old_lines:
+        return []
+
+    needle = [_canonical_patch_line(line) for line in old_lines]
+    haystack = [
+        _canonical_patch_line(line.rstrip("\r\n")) for line in original_lines
+    ]
+    width = len(needle)
+    return [
+        (index, index + width)
+        for index in range(0, len(haystack) - width + 1)
+        if haystack[index : index + width] == needle
+    ]
+
+
+def _replacement_preserving_line_ending(segment: str, new_text: str) -> str:
+    """Keep the source line terminator for a normalized full-line match."""
+    if new_text.endswith(("\n", "\r")):
+        return new_text
+    if segment.endswith("\r\n"):
+        return new_text + "\r\n"
+    if segment.endswith("\n"):
+        return new_text + "\n"
+    if segment.endswith("\r"):
+        return new_text + "\r"
+    return new_text
+
+
+def _leading_indent_of_first_content_line(text: str) -> str:
+    for line in text.splitlines():
+        if line.strip():
+            return line[: len(line) - len(line.lstrip())]
+    return ""
+
+
+def _reindent_normalized_replacement(segment: str, new_text: str) -> str:
+    """Rebase replacement indentation onto the matched source line."""
+    source_indent = _leading_indent_of_first_content_line(segment)
+    replacement_indent = _leading_indent_of_first_content_line(new_text)
+    if source_indent == replacement_indent:
+        return new_text
+
+    rebased: list[str] = []
+    for line in new_text.splitlines(keepends=True):
+        content = line
+        if line.strip():
+            if replacement_indent and content.startswith(replacement_indent):
+                content = content[len(replacement_indent) :]
+            content = source_indent + content
+        rebased.append(content)
+    return "".join(rebased)
 
 
 def _cap_diagnostic(text: str, limit: int = _PATCH_DIAGNOSTIC_CHAR_BUDGET) -> str:
@@ -201,11 +288,18 @@ def _truncate(text: str, limit: int = 2000) -> str:
     return text if len(text) <= limit else text[:limit]
 
 
+READ_FILE_MAX_LINES = 400
+READ_FILE_RESULT_CHARS = 8000
+
+
 class ReadFileTool:
     """Read a UTF-8 file from the candidate workspace."""
 
     name: str = "read_file"
-    args_schema: str = "args = {path: str (required)}"
+    args_schema: str = (
+        "args = {path: str (required), offset: int (optional, 1-based line, "
+        "default 1), limit: int (optional, 1-400 lines, default 200)}"
+    )
     side_effect_level: SideEffectLevel = "read"
     requires_network: bool = False
 
@@ -230,11 +324,53 @@ class ReadFileTool:
             )
 
         content = safe.read_text(encoding="utf-8", errors="replace")
-        preview = _truncate(content)
+        lines = content.splitlines(keepends=True)
+        offset_raw = args.get("offset")
+        limit_raw = args.get("limit")
+        offset = 1 if offset_raw is None else offset_raw
+        limit = 200 if limit_raw is None else limit_raw
+        if (
+            not isinstance(offset, int)
+            or isinstance(offset, bool)
+            or offset < 1
+            or not isinstance(limit, int)
+            or isinstance(limit, bool)
+            or limit < 1
+        ):
+            return ToolOutcome(
+                success=False,
+                summary="read_file offset/limit must be positive integers",
+                args_summary=f"path={path_arg}",
+                result_summary="bad_args",
+            )
+        limit = min(limit, READ_FILE_MAX_LINES)
+        total_lines = len(lines)
+        if offset > max(1, total_lines):
+            return ToolOutcome(
+                success=False,
+                summary=(
+                    f"read_file offset {offset} is beyond {total_lines} lines "
+                    f"in {path_arg}"
+                ),
+                args_summary=f"path={path_arg} offset={offset} limit={limit}",
+                result_summary="offset_out_of_range",
+            )
+
+        selected_lines = lines[offset - 1 : offset - 1 + limit]
+        selected = "".join(selected_lines)
+        if total_lines == 0:
+            range_label = "lines 0-0 of 0"
+        else:
+            end_line = offset + len(selected_lines) - 1
+            range_label = f"lines {offset}-{end_line} of {total_lines}"
+        preview = _truncate(
+            f"[{range_label}]\n{selected}",
+            READ_FILE_RESULT_CHARS,
+        )
         return ToolOutcome(
             success=True,
-            summary=f"read {len(content)} chars from {path_arg}",
-            args_summary=f"path={path_arg}",
+            summary=f"read {range_label} from {path_arg}",
+            args_summary=f"path={path_arg} offset={offset} limit={limit}",
             result_summary=preview,
         )
 
@@ -277,7 +413,7 @@ class WriteFileTool:
 
 
 class PatchFileTool:
-    """Replace a single, unique occurrence of ``old_text`` in a file.
+    """Replace one unique exact or whitespace-normalized match in a file.
 
     The non-uniqueness rule prevents accidental corruption when the
     caller is non-LLM (e.g. a deterministic test script) — it also lets
@@ -287,7 +423,8 @@ class PatchFileTool:
     name: str = "patch_file"
     args_schema: str = (
         "args = {path: str (required), old_text: str (required), "
-        "new_text: str (required)}"
+        "new_text: str (required), start_line: int >= 1 (optional), "
+        "end_line: int >= start_line (optional)}"
     )
     side_effect_level: SideEffectLevel = "file_write"
     requires_network: bool = False
@@ -306,6 +443,27 @@ class PatchFileTool:
         new_text = _stringify(args.get("new_text", ""))
         safe = resolve_workspace_path(workspace_root, path_arg)
 
+        if not old_text:
+            return ToolOutcome(
+                success=False,
+                summary="patch_file requires non-empty old_text",
+                args_summary=f"path={path_arg}",
+                result_summary="invalid_old_text",
+            )
+
+        try:
+            start_line = _positive_line_number(
+                args.get("start_line"), name="start_line"
+            )
+            end_line = _positive_line_number(args.get("end_line"), name="end_line")
+        except ValueError as exc:
+            return ToolOutcome(
+                success=False,
+                summary=str(exc),
+                args_summary=f"path={path_arg}",
+                result_summary="invalid_line_anchor",
+            )
+
         if not safe.is_file():
             return ToolOutcome(
                 success=False,
@@ -315,15 +473,103 @@ class PatchFileTool:
             )
 
         original = safe.read_text(encoding="utf-8")
-        occurrences = original.count(old_text)
+        original_lines = original.splitlines(keepends=True)
+        total_lines = len(original_lines)
+        if total_lines == 0:
+            return ToolOutcome(
+                success=False,
+                summary=(
+                    f"old_text not found in {path_arg}\n"
+                    f"old_text_preview ({len(old_text)} chars): "
+                    f"{_clip_line(_first_line(old_text))}"
+                ),
+                args_summary=f"path={path_arg}",
+                result_summary="no_match",
+            )
+        effective_start = start_line or 1
+        effective_end = end_line or total_lines
+        if (
+            effective_start > effective_end
+            or effective_start > total_lines
+            or effective_end > total_lines
+        ):
+            return ToolOutcome(
+                success=False,
+                summary=(
+                    f"invalid line anchor for {path_arg}: requested "
+                    f"{effective_start}-{effective_end}, file has {total_lines} lines"
+                ),
+                args_summary=f"path={path_arg}",
+                result_summary="invalid_line_anchor",
+            )
+
+        region_start = sum(len(line) for line in original_lines[: effective_start - 1])
+        region_end = sum(len(line) for line in original_lines[:effective_end])
+        region = original[region_start:region_end]
+        occurrences = region.count(old_text)
         if occurrences == 0:
+            region_lines = original_lines[effective_start - 1 : effective_end]
+            normalized_matches = _normalized_line_matches(
+                original_lines=region_lines,
+                old_text=old_text,
+            )
+            if len(normalized_matches) == 1:
+                local_start_line, local_end_line = normalized_matches[0]
+                local_start = sum(len(line) for line in region_lines[:local_start_line])
+                local_end = sum(len(line) for line in region_lines[:local_end_line])
+                match_start = region_start + local_start
+                match_end = region_start + local_end
+                segment = original[match_start:match_end]
+                replacement = _replacement_preserving_line_ending(
+                    segment,
+                    _reindent_normalized_replacement(segment, new_text),
+                )
+                patched = original[:match_start] + replacement + original[match_end:]
+                safe.write_text(patched, encoding="utf-8")
+                matched_start_line = effective_start + local_start_line
+                matched_end_line = effective_start + local_end_line - 1
+                return ToolOutcome(
+                    success=True,
+                    summary=(
+                        f"patched {path_arg} using whitespace-normalized lines "
+                        f"{matched_start_line}-{matched_end_line}"
+                    ),
+                    args_summary=(
+                        f"path={path_arg} old_len={len(old_text)} "
+                        f"new_len={len(new_text)} match=whitespace_normalized"
+                    ),
+                    result_summary=(
+                        f"replaced normalized lines "
+                        f"{matched_start_line}-{matched_end_line}"
+                    ),
+                    artifact_type="file_patch",
+                    artifact_path=path_arg,
+                    artifact_summary=f"patch_file {path_arg}",
+                )
+            if len(normalized_matches) > 1:
+                matched_lines = [
+                    str(effective_start + match[0])
+                    for match in normalized_matches[:_PATCH_DIAGNOSTIC_MAX_OCCURRENCES]
+                ]
+                return ToolOutcome(
+                    success=False,
+                    summary=_cap_diagnostic(
+                        f"old_text whitespace-normalized match is ambiguous in "
+                        f"{path_arg}: {len(normalized_matches)} matches at lines "
+                        + ", ".join(matched_lines)
+                    ),
+                    args_summary=f"path={path_arg}",
+                    result_summary=f"ambiguous_normalized:{len(normalized_matches)}",
+                )
             header = (
                 f"old_text not found in {path_arg}\n"
                 f"old_text_preview ({len(old_text)} chars): "
                 f"{_clip_line(_first_line(old_text))}"
             )
             closest = _closest_match_diagnostic(
-                original=original, old_text=old_text
+                original=region,
+                old_text=old_text,
+                line_offset=effective_start - 1,
             )
             body = f"{header}\n{closest}" if closest else header
             return ToolOutcome(
@@ -339,7 +585,9 @@ class PatchFileTool:
                 f"{_clip_line(_first_line(old_text))}"
             )
             occ_block = _ambiguous_occurrences_diagnostic(
-                original=original, old_text=old_text
+                original=region,
+                old_text=old_text,
+                line_offset=effective_start - 1,
             )
             body = f"{header}\n{occ_block}" if occ_block else header
             return ToolOutcome(
@@ -349,7 +597,10 @@ class PatchFileTool:
                 result_summary=f"ambiguous:{occurrences}",
             )
 
-        patched = original.replace(old_text, new_text, 1)
+        local_match_start = region.find(old_text)
+        match_start = region_start + local_match_start
+        match_end = match_start + len(old_text)
+        patched = original[:match_start] + new_text + original[match_end:]
         safe.write_text(patched, encoding="utf-8")
 
         return ToolOutcome(
@@ -357,7 +608,7 @@ class PatchFileTool:
             summary=f"patched {path_arg}",
             args_summary=(
                 f"path={path_arg} "
-                f"old_len={len(old_text)} new_len={len(new_text)}"
+                f"old_len={len(old_text)} new_len={len(new_text)} match=exact"
             ),
             result_summary=f"replaced {len(old_text)} -> {len(new_text)} chars",
             artifact_type="file_patch",

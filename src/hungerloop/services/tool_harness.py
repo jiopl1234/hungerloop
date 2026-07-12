@@ -299,7 +299,11 @@ class ToolHarness:
             )
 
         output_excerpt: str | None = None
-        if outcome.sandbox_result is not None:
+        if tool_name == "read_file" and outcome.success:
+            from hungerloop.services.evidence_render import clip_head_tail
+
+            output_excerpt = clip_head_tail(outcome.result_summary, 6000)
+        elif outcome.sandbox_result is not None:
             from hungerloop.services.evidence_render import clip_head_tail
 
             sandbox = outcome.sandbox_result

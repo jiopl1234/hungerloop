@@ -12,6 +12,7 @@ from hungerloop.models.enums import (
     LoopPhase,
     ValidationVerdict,
 )
+from hungerloop.models.events import EventType
 from hungerloop.models.hunger import AcceptanceCheck, HungerItem, HungerPolicy
 from hungerloop.models.planning import BudgetAllocation
 from hungerloop.models.tracing import LoopTrace
@@ -31,6 +32,17 @@ from hungerloop.services.context_builder import (
 from hungerloop.services.execution_worker import ExecutionWorker
 from hungerloop.services.prior_loop_context import render_prior_loop_context_block
 
+_READ_FILE_SCHEMA = (
+    "- read_file: args = {path: str (required), offset: int (optional, "
+    "1-based line, default 1), limit: int (optional, 1-400 lines, "
+    "default 200)}"
+)
+_PATCH_FILE_SCHEMA = (
+    "- patch_file: args = {path: str (required), old_text: str (required), "
+    "new_text: str (required), start_line: int >= 1 (optional), "
+    "end_line: int >= start_line (optional)}"
+)
+
 EXPECTED_LOOP1_PROMPT = (
     """\
 Mission:
@@ -48,9 +60,9 @@ Acceptance check status in best/ workspace at start of this loop:
 - 1 still FAILING — focus inner-loop here. Keys (cross-reference [<key>] in the list above): H-001:0
 
 Allowed tools and args schema:
-- read_file: args = {path: str (required)}
+{READ_FILE_SCHEMA}
 - write_file: args = {path: str (required), content: str (required)}
-- patch_file: args = {path: str (required), old_text: str (required), new_text: str (required)}
+{PATCH_FILE_SCHEMA}
 - run_shell: args = {argv: list[str] (required, non-empty), timeout: int = 60}
 
 Required JSON shape example:
@@ -59,6 +71,8 @@ Required JSON shape example:
     '"args":{"path":"hello.txt","content":"hello"}}]}\n\n'
     "Use exactly the listed args shape for each tool. For run_shell, use "
     "an argv array and never a command string."
+).replace("{READ_FILE_SCHEMA}", _READ_FILE_SCHEMA).replace(
+    "{PATCH_FILE_SCHEMA}", _PATCH_FILE_SCHEMA
 )
 
 
@@ -124,7 +138,12 @@ def _build_pack(
     )
 
 
-def _failed_report(loop_id: int, *, path: str = "fizzbuzz.py") -> ValidationReport:
+def _failed_report(
+    loop_id: int,
+    *,
+    path: str = "fizzbuzz.py",
+    item_id: str = "H-001",
+) -> ValidationReport:
     return ValidationReport(
         id=f"VAL-t1-{loop_id}",
         task_id="t1",
@@ -134,9 +153,9 @@ def _failed_report(loop_id: int, *, path: str = "fizzbuzz.py") -> ValidationRepo
         verdict=ValidationVerdict.FAIL,
         check_results=[
             CheckResult(
-                hunger_item_id="H-001",
+                hunger_item_id=item_id,
                 check_index=0,
-                check_key="H-001:0",
+                check_key=f"{item_id}:0",
                 check_type=AcceptanceCheckType.FILE_EXISTS,
                 passed=False,
                 detail=f"file_exists({path}): False",
@@ -151,8 +170,9 @@ def _seed_rejected_loop(
     *,
     summary: str = "Explore directory and create fizzbuzz.py module",
     path: str = "fizzbuzz.py",
+    item_id: str = "H-001",
 ) -> str:
-    report = _failed_report(loop_id, path=path)
+    report = _failed_report(loop_id, path=path, item_id=item_id)
     repo.save_validation_report(report)
     repo.save_loop_trace(
         LoopTrace(
@@ -192,8 +212,9 @@ def _seed_rejected_loop_without_tool_evidence(
     *,
     summary: str = "Explore directory and create fizzbuzz.py module",
     path: str = "fizzbuzz.py",
+    item_id: str = "H-001",
 ) -> None:
-    report = _failed_report(loop_id, path=path)
+    report = _failed_report(loop_id, path=path, item_id=item_id)
     repo.save_validation_report(report)
     repo.save_loop_trace(
         LoopTrace(
@@ -300,7 +321,21 @@ def test_loop2_after_rejected_loop1_renders_failures_and_self_summary_only() -> 
     assert "patterns to avoid (do NOT repeat these actions" in user_message
     assert "loop 1: H-001:0 file_exists →" in user_message
     assert "last attempt summary: Explore directory and create" in user_message
-    assert "successful actions already on record" not in user_message
+
+
+def test_context_mentions_rejected_candidate_continuation() -> None:
+    repo = InMemoryRepository()
+    repo.append_event(
+        EventType.CANDIDATE_CONTINUATION_SEEDED,
+        {"source_loop_id": 1},
+        task_id="t1",
+        loop_id=2,
+    )
+
+    pack = _build_pack(repo, loop_id=2)
+
+    assert "continues the rejected edits from loop 1" in pack.prior_handoff_summary
+    assert "Best remains unchanged" in pack.prior_handoff_summary
 
 
 def test_loop3_after_committed_loop2_renders_evidence_summaries() -> None:
@@ -344,6 +379,92 @@ def test_loop2_after_rejected_loop1_keeps_read_file_evidence_summary() -> None:
     user_message = ExecutionWorker._messages(pack)[1]["content"]
     assert "successful actions already on record" in user_message
     assert "loop 1 tool_call read_file fizzbuzz.py:" in user_message
+
+
+def test_latest_ranged_read_survives_history_truncation() -> None:
+    repo = InMemoryRepository()
+    _seed_rejected_loop_without_tool_evidence(repo, 1)
+    for index in range(12):
+        repo.save_tool_call_as_evidence(
+            task_id="t1",
+            loop_id=1,
+            agent_id="execution_worker_v1",
+            tool_name="read_file",
+            args_summary=f"path=large.py offset={index + 1} limit=200",
+            result_summary="noise-" + (str(index) * 900),
+            success=True,
+            elapsed_ms=1,
+        )
+    target_evidence = repo.save_tool_call_as_evidence(
+        task_id="t1",
+        loop_id=1,
+        agent_id="execution_worker_v1",
+        tool_name="read_file",
+        args_summary="path=large.py offset=691 limit=3",
+        result_summary=(
+            "[lines 691-693 of 750]\n"
+            "TARGET-LINE-691\nline-0692\nline-0693"
+        ),
+        success=True,
+        elapsed_ms=1,
+    )
+    report = repo.get_validation_report("VAL-t1-1")
+    assert report is not None
+    extra_failures = [
+        CheckResult(
+            hunger_item_id=f"H-NOISE-{index:02d}",
+            check_index=0,
+            check_key=f"H-NOISE-{index:02d}:0",
+            check_type=AcceptanceCheckType.FILE_EXISTS,
+            passed=False,
+            detail="failure-" + (str(index) * 700),
+        )
+        for index in range(10)
+    ]
+    repo.save_validation_report(
+        report.model_copy(
+            update={"check_results": [*report.check_results, *extra_failures]}
+        )
+    )
+
+    pack = _build_pack(repo, loop_id=2, path="large.py")
+
+    assert pack.truncation_info is not None
+    assert target_evidence in pack.relevant_evidence_ids
+    assert "TARGET-LINE-691" in "\n".join(pack.relevant_evidence_summaries)
+    assert pack.failure_patterns_to_avoid[0].startswith("Already-read coverage")
+    assert "large.py[1-211,691-693]" in pack.failure_patterns_to_avoid[0]
+
+
+def test_read_coverage_merges_ranges_across_recent_loops() -> None:
+    repo = InMemoryRepository()
+    for loop_id in (1, 2):
+        _seed_rejected_loop_without_tool_evidence(
+            repo,
+            loop_id,
+            item_id=f"H-{loop_id:03d}",
+        )
+    for loop_id, offset, limit, rendered_end in (
+        (1, 1, 200, 200),
+        (2, 150, 200, 349),
+        (2, 500, 20, 519),
+    ):
+        repo.save_tool_call_as_evidence(
+            task_id="t1",
+            loop_id=loop_id,
+            agent_id="execution_worker_v1",
+            tool_name="read_file",
+            args_summary=f"path=large.py offset={offset} limit={limit}",
+            result_summary=f"[lines {offset}-{rendered_end} of 750]\ncontent",
+            success=True,
+            elapsed_ms=1,
+        )
+
+    pack = _build_pack(repo, loop_id=3, path="large.py")
+
+    coverage = pack.failure_patterns_to_avoid[0]
+    assert coverage.startswith("Already-read coverage")
+    assert "loops 1-2 large.py[1-349,500-519]" in coverage
 
 
 def test_budgeted_mode_warns_after_two_read_only_rejections() -> None:
@@ -390,6 +511,74 @@ def test_default_mode_does_not_warn_after_two_read_only_rejections() -> None:
     pack = _build_pack(repo, loop_id=3, path="fizzbuzz.py")
 
     assert READ_ONLY_REJECTED_HINT not in pack.failure_patterns_to_avoid
+
+
+def test_default_mode_warns_from_worker_read_only_streak_event() -> None:
+    repo = InMemoryRepository()
+    repo.append_event(
+        EventType.WORKER_READ_ONLY_STREAK,
+        {
+            "agent_id": "execution_worker_v1",
+            "streak": 2,
+            "read_count": 3,
+            "shell_count": 1,
+            "write_count": 0,
+            "threshold_reached": True,
+        },
+        task_id="t1",
+        loop_id=2,
+    )
+
+    pack = _build_pack(repo, loop_id=3, path="fizzbuzz.py")
+
+    assert pack.failure_patterns_to_avoid[0] == READ_ONLY_REJECTED_HINT
+    assert READ_ONLY_REJECTED_HINT in ExecutionWorker._messages(pack)[1]["content"]
+
+
+def test_read_only_streak_event_is_scoped_to_worker_agent() -> None:
+    repo = InMemoryRepository()
+    repo.append_event(
+        EventType.WORKER_READ_ONLY_STREAK,
+        {
+            "agent_id": "other_worker",
+            "streak": 2,
+            "threshold_reached": True,
+        },
+        task_id="t1",
+        loop_id=2,
+    )
+
+    pack = _build_pack(repo, loop_id=3, path="fizzbuzz.py")
+
+    assert READ_ONLY_REJECTED_HINT not in pack.failure_patterns_to_avoid
+
+
+def test_read_only_streak_finds_agent_event_before_other_worker_event() -> None:
+    repo = InMemoryRepository()
+    repo.append_event(
+        EventType.WORKER_READ_ONLY_STREAK,
+        {
+            "agent_id": "execution_worker_v1",
+            "streak": 2,
+            "threshold_reached": True,
+        },
+        task_id="t1",
+        loop_id=2,
+    )
+    repo.append_event(
+        EventType.WORKER_READ_ONLY_STREAK,
+        {
+            "agent_id": "other_worker",
+            "streak": 1,
+            "threshold_reached": False,
+        },
+        task_id="t1",
+        loop_id=2,
+    )
+
+    pack = _build_pack(repo, loop_id=3, path="fizzbuzz.py")
+
+    assert pack.failure_patterns_to_avoid[0] == READ_ONLY_REJECTED_HINT
 
 
 def test_static_workspace_reader_inventory_sorts_and_truncates() -> None:
@@ -445,7 +634,12 @@ def test_reject_window_caps_history() -> None:
     repo = InMemoryRepository()
     n_seeded = K_REJECT_WINDOW + 2  # 2 should fall outside the window
     for loop_id in range(1, n_seeded + 1):
-        _seed_rejected_loop(repo, loop_id, summary=f"summary {loop_id}")
+        _seed_rejected_loop(
+            repo,
+            loop_id,
+            summary=f"summary {loop_id}",
+            item_id=f"H-{loop_id:03d}",
+        )
 
     pack = _build_pack(repo, loop_id=n_seeded + 1, path="fizzbuzz.py")
 
@@ -456,6 +650,18 @@ def test_reject_window_caps_history() -> None:
     # Loops older than the window should be dropped.
     for dropped_loop in range(1, n_seeded - K_REJECT_WINDOW + 1):
         assert f"loop {dropped_loop}:" not in joined
+
+
+def test_rejected_failures_dedupe_by_check_key_keep_latest() -> None:
+    repo = InMemoryRepository()
+    for loop_id in range(1, 6):
+        _seed_rejected_loop(repo, loop_id, summary=f"summary {loop_id}")
+
+    pack = _build_pack(repo, loop_id=6, path="fizzbuzz.py")
+
+    assert len(pack.failure_patterns_to_avoid) == 1
+    assert pack.failure_patterns_to_avoid[0].startswith("loop 5: H-001:0")
+    assert "loop 4:" not in pack.failure_patterns_to_avoid[0]
 
 
 def test_evidence_window_excludes_loops_before_k_window() -> None:
@@ -495,14 +701,15 @@ def test_history_truncation_info_and_determinism() -> None:
             verdict=ValidationVerdict.FAIL,
             check_results=[
                 CheckResult(
-                    hunger_item_id="H-001",
+                    hunger_item_id=f"H-{loop_id:03d}-{index}",
                     check_index=0,
-                    check_key="H-001:0",
+                    check_key=f"H-{loop_id:03d}-{index}:0",
                     check_type=AcceptanceCheckType.FILE_EXISTS,
                     passed=False,
-                    detail=f"file_exists(fizzbuzz_{loop_id}.py): False " + ("f" * 180),
+                    detail=f"file_exists(fizzbuzz_{loop_id}.py): False "
+                    + ("f" * 700),
                 )
-                for _ in range(4)
+                for index in range(4)
             ],
         )
         repo.save_validation_report(report)
@@ -612,7 +819,7 @@ def test_apply_history_cap_does_not_assert_when_static_block_exceeds_cap() -> No
     # Construct synthetic inputs whose non-evictable static block alone
     # is already larger than MAX_HISTORY_CHARS so eviction cannot help.
     huge_last_summary = "L" * (MAX_HISTORY_CHARS // 2)
-    huge_best_summary = "B" * (MAX_HISTORY_CHARS // 2)
+    huge_best_summary = "B" * (MAX_HISTORY_CHARS + 1000)
     huge_best_files = ["F" * 100 for _ in range(8)]
 
     (

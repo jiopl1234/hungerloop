@@ -11,7 +11,7 @@ from hungerloop.models.blackboard import CandidateState
 from hungerloop.models.enums import AcceptanceCheckType, HungerItemStatus, ValidationVerdict
 from hungerloop.models.events import EventType
 from hungerloop.models.hunger import AcceptanceCheck, HungerItem, HungerLedger
-from hungerloop.models.validation import ValidationReport
+from hungerloop.models.validation import CheckResult, ValidationReport
 from hungerloop.repository.protocol import RepositoryProtocol
 from hungerloop.services.hunger_update import HungerUpdateService
 from hungerloop.services.refinement_compiler import (
@@ -169,16 +169,22 @@ class SynthesizedCheckLifecycle:
             )
         self.repo.save_validation_report(report)
 
+        effective_report = self._ignore_baseline_regressions(
+            task_id=task_id,
+            loop_id=loop_id,
+            report=report,
+        )
         accepted = (
-            report.verdict in {ValidationVerdict.PASS, ValidationVerdict.PARTIAL}
-            and not report.regressed_check_keys
+            effective_report.verdict
+            in {ValidationVerdict.PASS, ValidationVerdict.PARTIAL}
+            and not effective_report.regressed_check_keys
         )
         auto_satisfied = (
-            list(report.satisfied_hunger_item_ids) if accepted else []
+            list(effective_report.satisfied_hunger_item_ids) if accepted else []
         )
         if accepted:
-            self.hunger_update.apply_validation(task_id, report)
-            self._record_baseline_acceptance(task_id, loop_id, report)
+            self.hunger_update.apply_validation(task_id, effective_report)
+            self._record_baseline_acceptance(task_id, loop_id, effective_report)
 
         for item in ready:
             self.refinement_compiler.complete_synthesis_baseline(
@@ -215,6 +221,110 @@ class SynthesizedCheckLifecycle:
             failed,
             rejected_fixture_ids,
         )
+
+    def _ignore_baseline_regressions(
+        self,
+        *,
+        task_id: str,
+        loop_id: int,
+        report: ValidationReport,
+    ) -> ValidationReport:
+        """Remove regression noise from read-only validation of a best copy."""
+        if not report.regressed_check_keys:
+            return report
+
+        ignored_keys = set(report.regressed_check_keys)
+        target_item_ids = set(report.attempted_hunger_item_ids)
+        reconciled_target_keys = {
+            result.check_key
+            for result in report.check_results
+            if result.check_key in ignored_keys
+            and result.hunger_item_id in target_item_ids
+        }
+        check_results = [
+            result.model_copy(
+                update={
+                    "passed": True,
+                    "newly_passed": result.check_key in reconciled_target_keys,
+                    "regressed": False,
+                    "detail": (
+                        f"{result.detail}; baseline regression ignored: "
+                        "best workspace was unchanged"
+                    ),
+                }
+            )
+            if result.check_key in ignored_keys
+            else result
+            for result in report.check_results
+        ]
+        satisfied_items, unsatisfied_items = self._aggregate_target_satisfaction(
+            task_id=task_id,
+            item_ids=report.attempted_hunger_item_ids,
+            check_results=check_results,
+        )
+        newly_passed = sorted(
+            set(report.newly_passed_check_keys) | reconciled_target_keys
+        )
+        if report.missing_evidence:
+            verdict = ValidationVerdict.FAIL
+        elif satisfied_items and not unsatisfied_items:
+            verdict = ValidationVerdict.PASS
+        elif newly_passed:
+            verdict = ValidationVerdict.PARTIAL
+        else:
+            verdict = ValidationVerdict.FAIL
+
+        effective_report = report.model_copy(
+            update={
+                "check_results": check_results,
+                "currently_passed_check_keys": sorted(
+                    set(report.currently_passed_check_keys) | ignored_keys
+                ),
+                "newly_passed_check_keys": newly_passed,
+                "regressed_check_keys": [],
+                "satisfied_hunger_item_ids": satisfied_items,
+                "unsatisfied_hunger_item_ids": unsatisfied_items,
+                "regressions": [],
+                "verdict": verdict,
+                "has_real_progress": bool(newly_passed),
+            }
+        )
+        for check_key in sorted(ignored_keys):
+            self.repo.append_event(
+                EventType.SYNTH_BASELINE_REGRESSION_IGNORED,
+                {
+                    "check_key": check_key,
+                    "validation_report_id": report.id,
+                    "reason": "best_workspace_unchanged",
+                },
+                task_id=task_id,
+                loop_id=loop_id,
+            )
+        return effective_report
+
+    def _aggregate_target_satisfaction(
+        self,
+        *,
+        task_id: str,
+        item_ids: list[str],
+        check_results: list[CheckResult],
+    ) -> tuple[list[str], list[str]]:
+        results_by_item: dict[str, list[CheckResult]] = {}
+        for result in check_results:
+            results_by_item.setdefault(result.hunger_item_id, []).append(result)
+
+        satisfied: list[str] = []
+        unsatisfied: list[str] = []
+        for item in self.repo.get_hunger_items(item_ids):
+            results = results_by_item.get(item.id, [])
+            if item.acceptance_mode == "all":
+                passed = bool(results) and all(result.passed for result in results)
+            elif item.acceptance_mode == "any":
+                passed = any(result.passed for result in results)
+            else:
+                passed = False
+            (satisfied if passed else unsatisfied).append(item.id)
+        return satisfied, unsatisfied
 
     def resolve_conflicts(
         self,

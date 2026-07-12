@@ -87,6 +87,28 @@ async def test_write_file_records_evidence_and_artifact(
     assert artifact.path == "report.md"
 
 
+async def test_read_file_returns_content_to_worker_followup(
+    harness_setup: tuple[ToolHarness, InMemoryRepository, BudgetGuard, Path],
+) -> None:
+    harness, _, _, workspace = harness_setup
+    (workspace / "source.py").write_text(
+        "\n".join(f"line {index}" for index in range(1, 30)),
+        encoding="utf-8",
+    )
+
+    result = await harness.execute(
+        _ctx(),
+        "read_file",
+        {"path": "source.py", "offset": 20, "limit": 3},
+        workspace,
+    )
+
+    assert result.success is True
+    assert result.output_excerpt is not None
+    assert "[lines 20-22 of 29]" in result.output_excerpt
+    assert "line 20" in result.output_excerpt
+
+
 async def test_failed_tool_still_writes_evidence_no_artifact(
     harness_setup: tuple[ToolHarness, InMemoryRepository, BudgetGuard, Path],
 ) -> None:
