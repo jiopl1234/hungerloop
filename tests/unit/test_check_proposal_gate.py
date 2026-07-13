@@ -383,6 +383,19 @@ async def test_plan_time_statically_rejects_invalid_python_inline_check() -> Non
 
 
 @pytest.mark.asyncio
+async def test_static_precheck_ignores_non_interpreter_dash_c_option() -> None:
+    runner = FakeDryRunner(default=True)
+    result = await CheckProposalGate(dry_runner=runner).filter(
+        [_shell_proposal(["python", "-m", "pytest", "-c", "try: pass"])],
+        defer_fixture_precheck=True,
+    )
+
+    assert len(result.accepted) == 1
+    assert result.rejected == []
+    assert runner.call_count == 0
+
+
+@pytest.mark.asyncio
 async def test_sandbox_dry_runner_classifies_real_python_syntax_error(
     tmp_path: Path,
 ) -> None:
@@ -396,6 +409,63 @@ async def test_sandbox_dry_runner_classifies_real_python_syntax_error(
     assert result.passed is False
     assert result.failure_kind == "syntax_error"
     assert "SyntaxError" in result.stderr_excerpt
+
+
+@pytest.mark.asyncio
+async def test_sandbox_dry_runner_does_not_classify_successful_stdout_text(
+    tmp_path: Path,
+) -> None:
+    result = await SandboxDryRunner(
+        SandboxRunner(InMemoryRepository())
+    ).dry_run_detailed(
+        [sys.executable, "-c", "print('SyntaxError: example output')"],
+        cwd=tmp_path,
+    )
+
+    assert result.passed is True
+    assert result.failure_kind is None
+
+
+@pytest.mark.asyncio
+async def test_sandbox_dry_runner_does_not_classify_custom_exception(
+    tmp_path: Path,
+) -> None:
+    result = await SandboxDryRunner(
+        SandboxRunner(InMemoryRepository())
+    ).dry_run_detailed(
+        [
+            sys.executable,
+            "-c",
+            (
+                "class FormulaSyntaxError(Exception): pass; "
+                "raise FormulaSyntaxError('invalid formula')"
+            ),
+        ],
+        cwd=tmp_path,
+    )
+
+    assert result.passed is False
+    assert result.failure_kind is None
+    assert "FormulaSyntaxError" in result.stderr_excerpt
+
+
+@pytest.mark.asyncio
+async def test_sandbox_dry_runner_requires_exception_trailer_colon(
+    tmp_path: Path,
+) -> None:
+    result = await SandboxDryRunner(
+        SandboxRunner(InMemoryRepository())
+    ).dry_run_detailed(
+        [
+            sys.executable,
+            "-c",
+            "import sys; sys.stderr.write('SyntaxError\\n'); sys.exit(1)",
+        ],
+        cwd=tmp_path,
+    )
+
+    assert result.passed is False
+    assert result.failure_kind is None
 
 
 @pytest.mark.asyncio

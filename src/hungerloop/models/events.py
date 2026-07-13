@@ -81,7 +81,7 @@ class EventType(str, Enum):
     CHECK_PASSED = "check_passed"
     CHECK_FAILED = "check_failed"
     CHECK_REGRESSED = "check_regressed"
-    CHECK_REGRESSION_RECONFIRMED = "check_regression_reconfirmed"
+    CHECK_REGRESSION_DISCONFIRMED = "check_regression_disconfirmed"
 
     # ----- Mission phase state machine (v0.6 M4) -------------------------
     MISSION_CREATED = "mission.created"
@@ -105,6 +105,7 @@ class EventType(str, Enum):
     CANDIDATE_COMMITTED = "candidate_committed"
     CANDIDATE_REJECTED = "candidate_rejected"
     CANDIDATE_CONTINUATION_SEEDED = "candidate_continuation_seeded"
+    CANDIDATE_CONTINUATION_SKIPPED = "candidate_continuation_skipped"
 
     # ----- Hunger -------------------------------------------------------
     HUNGER_RESUMED = "hunger_resumed"
@@ -160,6 +161,7 @@ class EventType(str, Enum):
     SYNTH_CHECK_FIXTURE_REJECTED = "synth_check_fixture_rejected"
     SYNTH_CHECK_BASELINE_VALIDATED = "synth_check_baseline_validated"
     SYNTH_BASELINE_REGRESSION_IGNORED = "synth_baseline_regression_ignored"
+    SYNTH_BASELINE_IDENTITY_MISMATCH = "synth_baseline_identity_mismatch"
     SYNTH_CHECK_AUTO_SATISFIED = "synth_check_auto_satisfied"
     SYNTH_CHECK_CONFLICT_DETECTED = "synth_check_conflict_detected"
     SYNTH_CHECK_QUARANTINED = "synth_check_quarantined"

@@ -17,6 +17,7 @@ from hungerloop.models.enums import (
     StopReason,
     ValidationVerdict,
 )
+from hungerloop.models.events import EventType
 from hungerloop.models.handoff import HandoffProcessingResult
 from hungerloop.models.hunger import (
     AcceptanceCheck,
@@ -386,6 +387,91 @@ async def test_next_loop_continues_rejected_candidate_in_isolation(
         "t1", event_types=["candidate_continuation_seeded"]
     )
     assert continuation_events[0]["payload"]["source_loop_id"] == 1
+    assert continuation_events[0]["payload"]["chain_length"] == 1
+
+
+@pytest.mark.parametrize(
+    ("policy", "prior_payload", "regressed_check_keys", "expected_reason"),
+    [
+        (
+            HungerPolicy(rejected_candidate_continuation_enabled=False),
+            None,
+            [],
+            "policy_disabled",
+        ),
+        (
+            HungerPolicy(rejected_candidate_continuation_max_chain=2),
+            {"chain_length": 2, "regressed_check_keys": []},
+            [],
+            "max_chain_reached",
+        ),
+        (
+            HungerPolicy(rejected_candidate_continuation_max_chain=2),
+            {"chain_length": 1, "regressed_check_keys": ["H-OLD:0"]},
+            ["H-OLD:0"],
+            "repeated_regression",
+        ),
+    ],
+)
+def test_rejected_candidate_continuation_falls_back_to_best(
+    tmp_path: Path,
+    policy: HungerPolicy,
+    prior_payload: dict[str, object] | None,
+    regressed_check_keys: list[str],
+    expected_reason: str,
+) -> None:
+    repo = InMemoryRepository()
+    orchestrator = _build_orchestrator(tmp_path=tmp_path, repo=repo, workers={})
+    workspace_manager = orchestrator.workspace_manager
+    best = workspace_manager.best_files_dir("t1")
+    (best / "app.py").write_text("best = True\n", encoding="utf-8")
+    workspace_manager.write_manifest(
+        task_id="t1",
+        path=best,
+        status="best",
+        source_workspace_ref="test_seed",
+    )
+    rejected_candidate = workspace_manager.create_candidate_workspace("t1", 1)
+    (rejected_candidate / "app.py").write_text("poisoned = True\n", encoding="utf-8")
+    workspace_manager.reject_candidate("t1", 1)
+    current_candidate = workspace_manager.create_candidate_workspace("t1", 2)
+    if prior_payload is not None:
+        repo.append_event(
+            EventType.CANDIDATE_CONTINUATION_SEEDED,
+            prior_payload,
+            task_id="t1",
+            loop_id=1,
+        )
+    previous_trace = LoopTrace(
+        task_id="t1",
+        loop_id=1,
+        phase="work",
+        active_hunger=100,
+        drive_budget=100,
+        work_pressure=100,
+        candidate_state_id="CAND-t1-1",
+        committed=False,
+        regressed_check_keys=regressed_check_keys,
+    )
+
+    orchestrator._maybe_continue_rejected_candidate(
+        task_id="t1",
+        loop_id=2,
+        policy=policy,
+        previous_trace=previous_trace,
+        has_assignments=True,
+    )
+
+    assert current_candidate.joinpath("app.py").read_text(encoding="utf-8") == (
+        "best = True\n"
+    )
+    events = repo.list_events(
+        "t1",
+        event_types=[EventType.CANDIDATE_CONTINUATION_SKIPPED.value],
+    )
+    assert len(events) == 1
+    assert events[0]["payload"]["reason"] == expected_reason
+    assert events[0]["payload"]["fallback_workspace_ref"] == "best"
 
 
 async def test_step_persists_handoff_and_emits_scoped_events(
@@ -746,6 +832,12 @@ async def test_pending_synthesis_baseline_clears_when_policy_is_disabled(
             summary="best",
             updated_at_loop=1,
         )
+    )
+    orchestrator.workspace_manager.write_manifest(
+        task_id="t1",
+        path=best_root,
+        status="best",
+        source_workspace_ref="test_seed",
     )
 
     outcome = await orchestrator.step("t1")

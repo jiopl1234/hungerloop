@@ -81,6 +81,26 @@ class SynthesizedCheckLifecycle:
         validation_root = workspace_root or best_root
         if not validation_root.exists():
             return BaselineValidationResult([], [], [], [])
+        workspace_matches_best = self.workspace_manager.workspace_matches_best_manifest(
+            task_id,
+            validation_root,
+        )
+        if not workspace_matches_best:
+            self.repo.append_event(
+                EventType.SYNTH_BASELINE_IDENTITY_MISMATCH,
+                {
+                    "item_ids": [item.id for item in pending],
+                    "reason": "validation_workspace_does_not_match_best_manifest",
+                },
+                task_id=task_id,
+                loop_id=loop_id,
+            )
+            return BaselineValidationResult(
+                [item.id for item in pending],
+                [],
+                [item.id for item in pending],
+                [],
+            )
 
         candidate = CandidateState(
             id=best.state_id,
@@ -173,6 +193,7 @@ class SynthesizedCheckLifecycle:
             task_id=task_id,
             loop_id=loop_id,
             report=report,
+            workspace_matches_best=workspace_matches_best,
         )
         accepted = (
             effective_report.verdict
@@ -198,7 +219,8 @@ class SynthesizedCheckLifecycle:
                 {
                     "item_id": item.id,
                     "passed": passed,
-                    "validation_report_id": report.id,
+                    "validation_report_id": effective_report.id,
+                    "raw_validation_report_id": report.id,
                 },
                 task_id=task_id,
                 loop_id=loop_id,
@@ -208,7 +230,8 @@ class SynthesizedCheckLifecycle:
                     EventType.SYNTH_CHECK_AUTO_SATISFIED,
                     {
                         "item_id": item.id,
-                        "validation_report_id": report.id,
+                        "validation_report_id": effective_report.id,
+                        "raw_validation_report_id": report.id,
                     },
                     task_id=task_id,
                     loop_id=loop_id,
@@ -228,9 +251,12 @@ class SynthesizedCheckLifecycle:
         task_id: str,
         loop_id: int,
         report: ValidationReport,
+        workspace_matches_best: bool,
     ) -> ValidationReport:
         """Remove regression noise from read-only validation of a best copy."""
         if not report.regressed_check_keys:
+            return report
+        if not workspace_matches_best:
             return report
 
         ignored_keys = set(report.regressed_check_keys)
@@ -276,6 +302,7 @@ class SynthesizedCheckLifecycle:
 
         effective_report = report.model_copy(
             update={
+                "id": f"{report.id}-effective",
                 "check_results": check_results,
                 "currently_passed_check_keys": sorted(
                     set(report.currently_passed_check_keys) | ignored_keys
@@ -289,17 +316,20 @@ class SynthesizedCheckLifecycle:
                 "has_real_progress": bool(newly_passed),
             }
         )
-        for check_key in sorted(ignored_keys):
-            self.repo.append_event(
-                EventType.SYNTH_BASELINE_REGRESSION_IGNORED,
-                {
-                    "check_key": check_key,
-                    "validation_report_id": report.id,
-                    "reason": "best_workspace_unchanged",
-                },
-                task_id=task_id,
-                loop_id=loop_id,
-            )
+        with self.repo.transaction():
+            self.repo.save_validation_report(effective_report)
+            for check_key in sorted(ignored_keys):
+                self.repo.append_event(
+                    EventType.SYNTH_BASELINE_REGRESSION_IGNORED,
+                    {
+                        "check_key": check_key,
+                        "validation_report_id": effective_report.id,
+                        "raw_validation_report_id": report.id,
+                        "reason": "best_workspace_unchanged",
+                    },
+                    task_id=task_id,
+                    loop_id=loop_id,
+                )
         return effective_report
 
     def _aggregate_target_satisfaction(

@@ -161,7 +161,7 @@ async def test_patch_file_normalizes_whitespace_for_unique_line_window(
         args={
             "path": "code.py",
             "old_text": "def run():\n  value = 1\n  return value",
-            "new_text": "def run():\n    value = 2\n    return value",
+            "new_text": "def run():\n  value = 2\n  return value",
         },
         workspace_root=workspace,
         task_id="t1",
@@ -209,6 +209,8 @@ async def test_patch_file_normalized_single_line_preserves_source_indent(
             "path": "code.py",
             "old_text": "return value",
             "new_text": "return changed",
+            "start_line": 2,
+            "end_line": 2,
         },
         workspace_root=workspace,
         task_id="t1",
@@ -219,6 +221,74 @@ async def test_patch_file_normalized_single_line_preserves_source_indent(
     assert (workspace / "code.py").read_text(encoding="utf-8") == (
         "def run():\n    return changed\n"
     )
+
+
+async def test_patch_file_rejects_unanchored_normalized_single_line(
+    workspace: Path,
+) -> None:
+    (workspace / "code.py").write_text(
+        "def run():\n    return   value\n", encoding="utf-8"
+    )
+    outcome = await PatchFileTool().run(
+        args={
+            "path": "code.py",
+            "old_text": "return value",
+            "new_text": "return changed",
+        },
+        workspace_root=workspace,
+        task_id="t1",
+        loop_id=1,
+    )
+
+    assert outcome.success is False
+    assert outcome.result_summary == "unsafe_normalized_single_line"
+    assert "requires a line anchor" in outcome.summary
+    assert (workspace / "code.py").read_text(encoding="utf-8") == (
+        "def run():\n    return   value\n"
+    )
+
+
+async def test_patch_file_preserves_cross_dedent_normalized_reindent(
+    workspace: Path,
+) -> None:
+    original = "def run():\n    if ready:\n        work()\nreturn done\n"
+    (workspace / "code.py").write_text(original, encoding="utf-8")
+    outcome = await PatchFileTool().run(
+        args={
+            "path": "code.py",
+            "old_text": "if ready:\n    work()\nreturn done",
+            "new_text": "if ready:\n    changed()\nreturn done",
+        },
+        workspace_root=workspace,
+        task_id="t1",
+        loop_id=1,
+    )
+
+    assert outcome.success is True
+    assert (workspace / "code.py").read_text(encoding="utf-8") == (
+        "def run():\n    if ready:\n        changed()\nreturn done\n"
+    )
+
+
+async def test_patch_file_rejects_ambiguous_intentional_reindent(
+    workspace: Path,
+) -> None:
+    original = "def run():\n    value = 1\n    return value\n"
+    (workspace / "code.py").write_text(original, encoding="utf-8")
+    outcome = await PatchFileTool().run(
+        args={
+            "path": "code.py",
+            "old_text": "value = 1\nreturn value",
+            "new_text": "    value = 2\n    return value",
+        },
+        workspace_root=workspace,
+        task_id="t1",
+        loop_id=1,
+    )
+
+    assert outcome.success is False
+    assert outcome.result_summary == "unsafe_normalized_indentation"
+    assert (workspace / "code.py").read_text(encoding="utf-8") == original
 
 
 async def test_patch_file_rejects_ambiguous_match(workspace: Path) -> None:

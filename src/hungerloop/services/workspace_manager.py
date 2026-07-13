@@ -88,6 +88,36 @@ def _workspace_file_hashes(root: Path) -> dict[str, str]:
     }
 
 
+def _manifest_file_hashes(root: Path) -> dict[str, str] | None:
+    manifest_path = root.parent / "manifest.json"
+    if not manifest_path.is_file():
+        return None
+    try:
+        payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    recorded_path = payload.get("path")
+    if not isinstance(recorded_path, str):
+        return None
+    try:
+        if Path(recorded_path).resolve() != root.resolve():
+            return None
+    except OSError:
+        return None
+    raw_files = payload.get("files")
+    if not isinstance(raw_files, dict):
+        return None
+    hashes: dict[str, str] = {}
+    for relative_path, digest in raw_files.items():
+        if not isinstance(relative_path, str) or not isinstance(digest, str):
+            return None
+        if not _is_continuation_noise_path(Path(relative_path)):
+            hashes[relative_path] = digest
+    return hashes
+
+
 def _is_continuation_noise_path(path: Path) -> bool:
     for part in path.parts:
         if part in _CONTINUATION_IGNORE_NAMES:
@@ -215,7 +245,13 @@ class WorkspaceManager:
         if not source.is_dir():
             return False
         best = self.best_files_dir(task_id)
-        if _workspace_file_hashes(source) == _workspace_file_hashes(best):
+        source_hashes = _manifest_file_hashes(source)
+        if source_hashes is None:
+            source_hashes = _workspace_file_hashes(source)
+        best_hashes = _manifest_file_hashes(best)
+        if best_hashes is None:
+            best_hashes = _workspace_file_hashes(best)
+        if source_hashes == best_hashes:
             return False
 
         destination = self.candidate_files_dir(task_id, loop_id)
@@ -235,6 +271,17 @@ class WorkspaceManager:
             source_workspace_ref=f"rejected/loop_{previous_loop_id:03d}",
         )
         return True
+
+    def workspace_matches_best_manifest(
+        self,
+        task_id: str,
+        workspace_root: Path,
+    ) -> bool:
+        """Return whether a workspace exactly matches the recorded best manifest."""
+        expected_hashes = _manifest_file_hashes(self.best_files_dir(task_id))
+        if expected_hashes is None or not workspace_root.is_dir():
+            return False
+        return _workspace_file_hashes(workspace_root) == expected_hashes
 
     def promote_candidate_to_best(self, task_id: str, loop_id: int) -> None:
         """Atomically replace ``best/files`` with the named candidate.

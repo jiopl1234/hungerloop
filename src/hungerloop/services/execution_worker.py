@@ -115,7 +115,8 @@ class ExecutionWorker:
         shell_count = 0
         write_attempt_count = 0
         patch_no_match_count = 0
-        consecutive_read_only_iterations = 0
+        consecutive_nonwriting_iterations = 0
+        blocked_nonwriting_action_count = 0
         needs_verification = bool(context.acceptance_criteria)
 
         for iteration in range(MAX_SELF_REPAIR_ITERATIONS + 1):
@@ -151,17 +152,44 @@ class ExecutionWorker:
 
             actions = self._extract_actions(response.json_data)
             action_results: list[tuple[str, ToolResult]] = []
+            batch_has_write_action = any(
+                self._stringify(action.get("tool_name", ""))
+                in ("write_file", "patch_file")
+                for action in actions
+            )
+            block_nonwriting_batch = (
+                consecutive_nonwriting_iterations >= 2
+                and not wrote_anything
+                and bool(actions)
+                and not batch_has_write_action
+            )
             for action in actions:
                 tool_name = self._stringify(action.get("tool_name", ""))
                 args_raw = action.get("args", {})
                 args = args_raw if isinstance(args_raw, dict) else {}
 
-                result = await self.tool_harness.execute(
-                    context=context,
-                    tool_name=tool_name,
-                    args=args,
-                    workspace_root=workspace_root,
-                )
+                if block_nonwriting_batch:
+                    blocked_nonwriting_action_count += 1
+                    result = ToolResult(
+                        tool_name=tool_name,
+                        success=False,
+                        summary=(
+                            "read-only action blocked after two consecutive "
+                            "non-writing batches; use write_file or patch_file"
+                        ),
+                        error=(
+                            "read_only_budget_exhausted: the next action batch "
+                            "must edit the candidate before further inspection"
+                        ),
+                        error_type="read_only_budget_exhausted",
+                    )
+                else:
+                    result = await self.tool_harness.execute(
+                        context=context,
+                        tool_name=tool_name,
+                        args=args,
+                        workspace_root=workspace_root,
+                    )
                 evidence_ids.extend(result.evidence_ids)
                 artifact_ids.extend(result.artifact_ids)
                 action_results.append((tool_name, result))
@@ -175,6 +203,8 @@ class ExecutionWorker:
                         "old_text not found",
                         "old_text matches",
                         "whitespace-normalized match is ambiguous",
+                        "whitespace-normalized single-line patch requires",
+                        "whitespace-normalized patch has an unsafe indentation",
                     )
                 )
                 for tool_name, result in action_results
@@ -209,14 +239,10 @@ class ExecutionWorker:
             this_iter_attempted_write = any(
                 tn in ("write_file", "patch_file") for tn, _ in action_results
             )
-            this_iter_read = any(
-                tn == "read_file" and result.success
-                for tn, result in action_results
-            )
-            if this_iter_read and not this_iter_attempted_write:
-                consecutive_read_only_iterations += 1
+            if action_results and not this_iter_attempted_write:
+                consecutive_nonwriting_iterations += 1
             else:
-                consecutive_read_only_iterations = 0
+                consecutive_nonwriting_iterations = 0
             wrote_anything = wrote_anything or this_iter_wrote
             this_iter_shell_succeeded = any(
                 tn == "run_shell" and r.success for tn, r in action_results
@@ -325,7 +351,7 @@ class ExecutionWorker:
                 f"CALL BUDGET: {remaining_calls} model call(s) remain in this "
                 "loop after this response."
             )
-            if consecutive_read_only_iterations >= 2 and not wrote_anything:
+            if consecutive_nonwriting_iterations >= 2 and not wrote_anything:
                 followup = (
                     "STOP READING: consecutive action batches inspected files "
                     "without attempting an edit. "
@@ -350,7 +376,7 @@ class ExecutionWorker:
             ]
 
         if (
-            read_count > 0
+            (read_count > 0 or shell_count > 0)
             and write_attempt_count == 0
             and needs_verification
         ):
@@ -367,6 +393,9 @@ class ExecutionWorker:
                     "read_count": read_count,
                     "shell_count": shell_count,
                     "write_count": write_attempt_count,
+                    "blocked_nonwriting_action_count": (
+                        blocked_nonwriting_action_count
+                    ),
                     "threshold_reached": (
                         streak >= READ_ONLY_DIAGNOSTIC_THRESHOLD
                     ),

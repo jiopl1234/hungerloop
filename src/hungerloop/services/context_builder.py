@@ -437,6 +437,34 @@ class ContextBuilder:
                 "handoff."
             )
 
+        skipped_continuation_events = self.repo.list_events(
+            task_id,
+            since_loop=loop_id,
+            until_loop=loop_id,
+            event_types=[EventType.CANDIDATE_CONTINUATION_SKIPPED.value],
+        )
+        if skipped_continuation_events:
+            payload = skipped_continuation_events[-1].get("payload")
+            reason = payload.get("reason") if isinstance(payload, dict) else "unsafe"
+            repeated = (
+                payload.get("repeated_regressed_check_keys", [])
+                if isinstance(payload, dict)
+                else []
+            )
+            detail = (
+                f" Repeated regression keys: {', '.join(repeated)}."
+                if isinstance(repeated, list)
+                and all(isinstance(value, str) for value in repeated)
+                and repeated
+                else ""
+            )
+            lines.append(
+                "Rejected-candidate continuation was abandoned "
+                f"({reason}); this candidate was reset from best.{detail} "
+                "Re-implement only the useful change without carrying the prior "
+                "regression forward."
+            )
+
         return _clip_oldest_lines(lines, MAX_RECENT_SUMMARY_CHARS)
 
     @staticmethod

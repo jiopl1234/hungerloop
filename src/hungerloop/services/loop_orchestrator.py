@@ -395,35 +395,14 @@ class LoopOrchestrator:
                 loop_id=loop_id,
             )
             return self._emit_stop(task_id, StopReason.SAFETY_STOP)
-        previous_trace = next(
-            (
-                trace
-                for trace in reversed(self.repo.list_loop_traces(task_id))
-                if trace.loop_id == loop_id - 1
-            ),
-            None,
+        previous_trace = self.repo.get_loop_trace(task_id, loop_id - 1)
+        self._maybe_continue_rejected_candidate(
+            task_id=task_id,
+            loop_id=loop_id,
+            policy=policy,
+            previous_trace=previous_trace,
+            has_assignments=bool(plan.assignments),
         )
-        if (
-            plan.assignments
-            and previous_trace is not None
-            and previous_trace.candidate_state_id is not None
-            and not previous_trace.committed
-            and previous_trace.stop_reason is None
-            and self.workspace_manager.continue_candidate_from_rejected(
-                task_id, loop_id
-            )
-        ):
-            self.repo.append_event(
-                EventType.CANDIDATE_CONTINUATION_SEEDED,
-                {
-                    "source_loop_id": loop_id - 1,
-                    "source_workspace_ref": f"rejected/loop_{loop_id - 1:03d}",
-                    "candidate_workspace_ref": f"candidates/loop_{loop_id:03d}",
-                    "best_untouched": True,
-                },
-                task_id=task_id,
-                loop_id=loop_id,
-            )
         self._emit_feature_assigned_events(
             task_id=task_id,
             loop_id=loop_id,
@@ -802,6 +781,89 @@ class LoopOrchestrator:
         if stagnation["global_blocked"]:
             return self._emit_stop(task_id, StopReason.BLOCKED)
         return trace
+
+    def _maybe_continue_rejected_candidate(
+        self,
+        *,
+        task_id: str,
+        loop_id: int,
+        policy: HungerPolicy,
+        previous_trace: LoopTrace | None,
+        has_assignments: bool,
+    ) -> None:
+        if (
+            not has_assignments
+            or previous_trace is None
+            or previous_trace.candidate_state_id is None
+            or previous_trace.committed
+            or previous_trace.stop_reason is not None
+        ):
+            return
+
+        source_loop_id = loop_id - 1
+        source_events = self.repo.list_events(
+            task_id,
+            since_loop=source_loop_id,
+            until_loop=source_loop_id,
+            event_types=[EventType.CANDIDATE_CONTINUATION_SEEDED.value],
+        )
+        source_payload = source_events[-1].get("payload") if source_events else {}
+        if not isinstance(source_payload, dict):
+            source_payload = {}
+        raw_chain_length = source_payload.get("chain_length", 0)
+        prior_chain_length = (
+            raw_chain_length
+            if isinstance(raw_chain_length, int) and not isinstance(raw_chain_length, bool)
+            else 0
+        )
+        chain_length = prior_chain_length + 1
+        raw_prior_regressed = source_payload.get("regressed_check_keys", [])
+        prior_regressed = (
+            {value for value in raw_prior_regressed if isinstance(value, str)}
+            if isinstance(raw_prior_regressed, list)
+            else set()
+        )
+        current_regressed = set(previous_trace.regressed_check_keys)
+        repeated_regressions = sorted(prior_regressed & current_regressed)
+
+        skip_reason: str | None = None
+        if not policy.rejected_candidate_continuation_enabled:
+            skip_reason = "policy_disabled"
+        elif repeated_regressions:
+            skip_reason = "repeated_regression"
+        elif chain_length > policy.rejected_candidate_continuation_max_chain:
+            skip_reason = "max_chain_reached"
+        elif not self.workspace_manager.continue_candidate_from_rejected(
+            task_id,
+            loop_id,
+        ):
+            skip_reason = "source_unavailable_or_matches_best"
+
+        common_payload: dict[str, object] = {
+            "source_loop_id": source_loop_id,
+            "source_workspace_ref": f"rejected/loop_{source_loop_id:03d}",
+            "candidate_workspace_ref": f"candidates/loop_{loop_id:03d}",
+            "chain_length": chain_length,
+            "max_chain_length": policy.rejected_candidate_continuation_max_chain,
+            "regressed_check_keys": sorted(current_regressed),
+            "repeated_regressed_check_keys": repeated_regressions,
+            "best_untouched": True,
+        }
+        if skip_reason is None:
+            self.repo.append_event(
+                EventType.CANDIDATE_CONTINUATION_SEEDED,
+                common_payload,
+                task_id=task_id,
+                loop_id=loop_id,
+            )
+            return
+
+        self.repo.append_event(
+            EventType.CANDIDATE_CONTINUATION_SKIPPED,
+            {**common_payload, "reason": skip_reason, "fallback_workspace_ref": "best"},
+            task_id=task_id,
+            loop_id=loop_id,
+        )
 
     def _save_and_emit_handoffs(
         self,

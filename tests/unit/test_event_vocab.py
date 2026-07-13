@@ -98,6 +98,7 @@ def test_v0_5d_additions_present() -> None:
         "candidate_committed",
         "candidate_rejected",
         "candidate_continuation_seeded",
+        "candidate_continuation_skipped",
         # Stop
         "stop_report_created",
         "error",
@@ -219,8 +220,9 @@ def test_v0_6_m5_mission_state_regeneration_additions_present() -> None:
 
 def test_v0_7_efficiency_diagnostic_additions_present() -> None:
     expected = {
-        "check_regression_reconfirmed",
+        "check_regression_disconfirmed",
         "synth_baseline_regression_ignored",
+        "synth_baseline_identity_mismatch",
         "synthesis_backfill_stopped",
         "worker_read_only_streak",
     }

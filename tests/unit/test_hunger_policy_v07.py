@@ -36,7 +36,9 @@ def test_default_synthesis_lifecycle_policy() -> None:
     assert policy.synthesis_batch_size == 3
     assert policy.synthesis_conflict_threshold == 2
     assert policy.synthesis_audit_enabled is False
-    assert policy.regression_confirm_reruns == 1
+    assert policy.regression_confirm_reruns == 2
+    assert policy.rejected_candidate_continuation_enabled is True
+    assert policy.rejected_candidate_continuation_max_chain == 2
 
 
 def test_default_refactor_transactions_enabled() -> None:
@@ -67,6 +69,8 @@ def test_v07_policy_flags_present() -> None:
         "synthesis_plan_time_tier",
         "synthesis_max_total_items",
         "regression_confirm_reruns",
+        "rejected_candidate_continuation_enabled",
+        "rejected_candidate_continuation_max_chain",
         "refactor_transactions_enabled",
         "max_declared_regressions",
         "refactor_deadline_loops",
@@ -84,7 +88,9 @@ def test_policy_serialization_preserves_defaults() -> None:
     assert restored.synthesis_enabled is False
     assert restored.synthesis_plan_time_tier == 0
     assert restored.synthesis_max_total_items == 20
-    assert restored.regression_confirm_reruns == 1
+    assert restored.regression_confirm_reruns == 2
+    assert restored.rejected_candidate_continuation_enabled is True
+    assert restored.rejected_candidate_continuation_max_chain == 2
     assert restored.refactor_transactions_enabled is False
     assert restored.max_declared_regressions == 5
     assert restored.refactor_deadline_loops == 3
@@ -102,6 +108,8 @@ def test_policy_serialization_preserves_overrides() -> None:
         synthesis_conflict_threshold=3,
         synthesis_audit_enabled=True,
         regression_confirm_reruns=2,
+        rejected_candidate_continuation_enabled=False,
+        rejected_candidate_continuation_max_chain=4,
         refactor_transactions_enabled=True,
         max_declared_regressions=3,
         refactor_deadline_loops=5,
@@ -118,6 +126,8 @@ def test_policy_serialization_preserves_overrides() -> None:
     assert restored.synthesis_conflict_threshold == 3
     assert restored.synthesis_audit_enabled is True
     assert restored.regression_confirm_reruns == 2
+    assert restored.rejected_candidate_continuation_enabled is False
+    assert restored.rejected_candidate_continuation_max_chain == 4
     assert restored.refactor_transactions_enabled is True
     assert restored.max_declared_regressions == 3
     assert restored.refactor_deadline_loops == 5
@@ -128,6 +138,11 @@ def test_policy_serialization_preserves_overrides() -> None:
 def test_regression_confirm_reruns_must_not_be_negative() -> None:
     with pytest.raises(ValidationError):
         HungerPolicy(regression_confirm_reruns=-1)
+
+
+def test_rejected_candidate_continuation_max_chain_must_not_be_negative() -> None:
+    with pytest.raises(ValidationError):
+        HungerPolicy(rejected_candidate_continuation_max_chain=-1)
 
 
 def test_v06_fields_preserved() -> None:

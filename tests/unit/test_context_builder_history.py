@@ -338,6 +338,27 @@ def test_context_mentions_rejected_candidate_continuation() -> None:
     assert "Best remains unchanged" in pack.prior_handoff_summary
 
 
+def test_context_mentions_rejected_candidate_fallback_to_best() -> None:
+    repo = InMemoryRepository()
+    repo.append_event(
+        EventType.CANDIDATE_CONTINUATION_SKIPPED,
+        {
+            "reason": "repeated_regression",
+            "repeated_regressed_check_keys": ["H-OLD:0"],
+        },
+        task_id="t1",
+        loop_id=2,
+    )
+
+    pack = _build_pack(repo, loop_id=2)
+
+    assert "continuation was abandoned (repeated_regression)" in (
+        pack.prior_handoff_summary
+    )
+    assert "reset from best" in pack.prior_handoff_summary
+    assert "H-OLD:0" in pack.prior_handoff_summary
+
+
 def test_loop3_after_committed_loop2_renders_evidence_summaries() -> None:
     repo = InMemoryRepository()
     _seed_rejected_loop(repo, 1)

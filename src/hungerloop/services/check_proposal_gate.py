@@ -70,15 +70,18 @@ def _assertion_not_executable_reason(result: DryRunResult) -> str | None:
 def _classify_sandbox_failure(
     *,
     stderr: str,
-    stdout: str,
+    exit_code: int,
     timed_out: bool,
 ) -> DryRunFailureKind | None:
     if timed_out:
         return "timeout"
-    combined = f"{stderr}\n{stdout}"
+    if exit_code == 0:
+        return None
+    stderr_lines = [line.strip() for line in stderr.splitlines() if line.strip()]
+    terminal_line = stderr_lines[-1] if stderr_lines else ""
     if any(
-        marker in combined
-        for marker in ("SyntaxError", "IndentationError", "TabError")
+        terminal_line.startswith(f"{exception_name}:")
+        for exception_name in ("SyntaxError", "IndentationError", "TabError")
     ):
         return "syntax_error"
     return None
@@ -162,7 +165,7 @@ class SandboxDryRunner(DryRunner):
                 passed=result.exit_code == 0 and not result.timed_out,
                 failure_kind=_classify_sandbox_failure(
                     stderr=result.stderr,
-                    stdout=result.stdout,
+                    exit_code=result.exit_code,
                     timed_out=result.timed_out,
                 ),
                 stderr_excerpt=result.stderr[:1000],
@@ -259,18 +262,14 @@ def _validate_argv(argv: object, allowlist: list[str]) -> str | None:
 
 def _python_inline_syntax_reason(argv: object) -> str | None:
     """Statically reject malformed allowlisted ``python -c`` snippets."""
-    if not isinstance(argv, list) or not argv:
+    if not isinstance(argv, list) or len(argv) < 3:
         return None
     if not isinstance(argv[0], str) or _normalize_executable(argv[0]) != "python":
         return None
-    try:
-        command_index = argv.index("-c")
-    except ValueError:
-        return None
-    if command_index + 1 >= len(argv) or not isinstance(argv[command_index + 1], str):
+    if argv[1] != "-c" or not isinstance(argv[2], str):
         return None
     try:
-        compile(argv[command_index + 1], "<synthesized-check>", "exec")
+        compile(argv[2], "<synthesized-check>", "exec")
     except (SyntaxError, ValueError, TypeError):
         return f"{REASON_ASSERTION_NOT_EXECUTABLE}:syntax_error"
     return None

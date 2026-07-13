@@ -445,7 +445,10 @@ async def test_execution_worker_emits_consecutive_read_only_streak(
     assert first_payload["threshold_reached"] is False
     assert second_payload["streak"] == 2
     assert second_payload["threshold_reached"] is True
-    assert second_payload["read_count"] == MAX_SELF_REPAIR_ITERATIONS + 1
+    assert second_payload["read_count"] == 2
+    assert second_payload["blocked_nonwriting_action_count"] == (
+        MAX_SELF_REPAIR_ITERATIONS - 1
+    )
     assert second_payload["write_count"] == 0
 
 
@@ -502,6 +505,57 @@ async def test_execution_worker_forces_nonempty_read_batches_toward_edit(
     final_call = captured_messages[-1][-1]["content"]
     assert "FINAL MODEL CALL" in final_call
     assert "read-only response will be discarded" in final_call
+
+
+async def test_execution_worker_blocks_shell_only_batches_after_threshold(
+    tmp_path: Path,
+) -> None:
+    import json
+    import sys
+
+    from hungerloop.models.events import EventType
+    from hungerloop.models.usage import ModelUsage
+    from hungerloop.services.execution_worker import MAX_SELF_REPAIR_ITERATIONS
+    from hungerloop.services.model_client import ModelResponse
+
+    shell_body: dict[str, object] = {
+        "summary": "inspect through shell without editing",
+        "actions": [
+            {
+                "tool_name": "run_shell",
+                "args": {"argv": [sys.executable, "-c", "print('source')"]},
+            }
+        ],
+    }
+    client = DummyModelClient(
+        [
+            ModelResponse(
+                content=json.dumps(shell_body),
+                json_data=shell_body,
+                usage=ModelUsage(input_tokens=1, output_tokens=1),
+            )
+            for _ in range(MAX_SELF_REPAIR_ITERATIONS + 1)
+        ]
+    )
+    worker, repo, workspace = _build_worker(tmp_path, client)
+
+    await worker.run(
+        context=_ctx(acceptance_criteria=["command: verify source"]),
+        workspace_root=workspace,
+    )
+
+    events = repo.list_events(
+        "t1",
+        event_types=[EventType.WORKER_READ_ONLY_STREAK.value],
+    )
+    assert len(events) == 1
+    payload = events[0]["payload"]
+    assert isinstance(payload, dict)
+    assert payload["read_count"] == 0
+    assert payload["shell_count"] == MAX_SELF_REPAIR_ITERATIONS + 1
+    assert payload["blocked_nonwriting_action_count"] == (
+        MAX_SELF_REPAIR_ITERATIONS - 1
+    )
 
 
 def test_execution_worker_renders_acceptance_progress_block() -> None:

@@ -206,6 +206,7 @@ class ValidationGate:
             if not result.regressed:
                 continue
             check = checks_by_key[result.check_key]
+            confirmation_results: list[tuple[bool, str, str | None]] = []
             for rerun in range(1, max_reruns + 1):
                 passed, detail, evidence_id = await self.runner.run(
                     check=check,
@@ -216,34 +217,43 @@ class ValidationGate:
                 )
                 if evidence_id:
                     evidence_ids.append(evidence_id)
-                if not passed:
-                    continue
+                confirmation_results.append((passed, detail, evidence_id))
 
+            if confirmation_results and all(
+                passed for passed, _, _ in confirmation_results
+            ):
+                confirmation_evidence_ids = [
+                    evidence_id
+                    for _, _, evidence_id in confirmation_results
+                    if evidence_id
+                ]
                 confirmed_results[index] = result.model_copy(
                     update={
                         "passed": True,
                         "regressed": False,
                         "detail": (
-                            f"{result.detail}; flaky: passed on confirm rerun "
-                            f"{rerun}/{max_reruns}: {detail}"
+                            f"{result.detail}; flaky: passed all "
+                            f"{max_reruns} confirmation reruns"
                         ),
-                        "evidence_id": evidence_id or result.evidence_id,
+                        "evidence_id": (
+                            confirmation_evidence_ids[-1]
+                            if confirmation_evidence_ids
+                            else result.evidence_id
+                        ),
                     }
                 )
                 self.repo.append_event(
-                    EventType.CHECK_REGRESSION_RECONFIRMED,
+                    EventType.CHECK_REGRESSION_DISCONFIRMED,
                     {
                         "check_key": result.check_key,
-                        "rerun": rerun,
                         "max_reruns": max_reruns,
                         "initial_evidence_id": result.evidence_id,
-                        "confirmation_evidence_id": evidence_id,
+                        "confirmation_evidence_ids": confirmation_evidence_ids,
                         "workspace_ref": candidate.workspace_ref,
                     },
                     task_id=task_id,
                     loop_id=loop_id,
                 )
-                break
 
         return confirmed_results, evidence_ids
 

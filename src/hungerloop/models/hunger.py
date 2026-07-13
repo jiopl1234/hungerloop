@@ -177,7 +177,9 @@ class HungerPolicy(BaseModel):
     synthesis_batch_size: int = 3
     synthesis_conflict_threshold: int = 2
     synthesis_audit_enabled: bool = False
-    regression_confirm_reruns: int = 1
+    regression_confirm_reruns: int = 2
+    rejected_candidate_continuation_enabled: bool = True
+    rejected_candidate_continuation_max_chain: int = 2
     refactor_transactions_enabled: bool = False
     max_declared_regressions: int = 5
     refactor_deadline_loops: int = 3
@@ -214,6 +216,15 @@ class HungerPolicy(BaseModel):
     def _validate_regression_confirm_reruns(cls, v: int) -> int:
         if v < 0:
             raise ValueError("regression_confirm_reruns must not be negative")
+        return v
+
+    @field_validator("rejected_candidate_continuation_max_chain")
+    @classmethod
+    def _validate_rejected_candidate_continuation_max_chain(cls, v: int) -> int:
+        if v < 0:
+            raise ValueError(
+                "rejected_candidate_continuation_max_chain must not be negative"
+            )
         return v
 
     @field_validator("max_declared_regressions")

@@ -1,6 +1,7 @@
 """Regression tests for synthesized-check baseline and conflict lifecycle."""
 from __future__ import annotations
 
+import shutil
 from pathlib import Path
 
 from hungerloop.models.blackboard import BestState
@@ -66,7 +67,22 @@ def _seed_best(
             updated_at_loop=1,
         )
     )
+    workspace_manager.write_manifest(
+        task_id="t1",
+        path=best_root,
+        status="best",
+        source_workspace_ref="test_seed",
+    )
     return best_root
+
+
+def _write_best_manifest(workspace_manager: WorkspaceManager) -> None:
+    workspace_manager.write_manifest(
+        task_id="t1",
+        path=workspace_manager.best_files_dir("t1"),
+        status="best",
+        source_workspace_ref="test_seed",
+    )
 
 
 async def test_baseline_pass_auto_satisfies_without_worker(
@@ -89,6 +105,7 @@ async def test_baseline_pass_auto_satisfies_without_worker(
         generated_by="synthesizer",
         baseline_pending=True,
     )
+    _write_best_manifest(workspace_manager)
 
     result = await lifecycle.validate_pending_baseline(task_id="t1", loop_id=2)
 
@@ -154,6 +171,7 @@ async def test_baseline_accepts_passing_items_despite_unrelated_regression(
         generated_by="synthesizer",
         baseline_pending=True,
     )
+    _write_best_manifest(workspace_manager)
 
     result = await lifecycle.validate_pending_baseline(task_id="t1", loop_id=2)
 
@@ -168,10 +186,15 @@ async def test_baseline_accepts_passing_items_despite_unrelated_regression(
         event_types=[EventType.SYNTH_CHECK_BASELINE_VALIDATED.value],
     )
     report_id = baseline_events[0]["payload"]["validation_report_id"]
-    raw_report = repo.get_validation_report(report_id)
+    raw_report_id = baseline_events[0]["payload"]["raw_validation_report_id"]
+    raw_report = repo.get_validation_report(raw_report_id)
     assert raw_report is not None
     assert raw_report.verdict == ValidationVerdict.FAIL
     assert raw_report.regressed_check_keys == ["H-OLD:0"]
+    effective_report = repo.get_validation_report(report_id)
+    assert effective_report is not None
+    assert effective_report.verdict == ValidationVerdict.PARTIAL
+    assert effective_report.regressed_check_keys == []
     updated_best = repo.get_best_state("t1")
     assert updated_best is not None
     assert updated_best.accepted_check_keys == ["H-OLD:0", "H-SYN-001:0"]
@@ -207,6 +230,7 @@ async def test_baseline_reconciles_open_item_already_accepted_by_best(
     repo.save_best_state(
         best.model_copy(update={"accepted_check_keys": ["H-SYN-001:0"]})
     )
+    _write_best_manifest(workspace_manager)
 
     result = await lifecycle.validate_pending_baseline(task_id="t1", loop_id=2)
 
@@ -224,11 +248,85 @@ async def test_baseline_reconciles_open_item_already_accepted_by_best(
         event_types=[EventType.SYNTH_CHECK_BASELINE_VALIDATED.value],
     )
     raw_report = repo.get_validation_report(
-        baseline_events[0]["payload"]["validation_report_id"]
+        baseline_events[0]["payload"]["raw_validation_report_id"]
     )
     assert raw_report is not None
     assert raw_report.verdict == ValidationVerdict.FAIL
     assert raw_report.regressed_check_keys == ["H-SYN-001:0"]
+    effective_report = repo.get_validation_report(
+        baseline_events[0]["payload"]["validation_report_id"]
+    )
+    assert effective_report is not None
+    assert effective_report.verdict == ValidationVerdict.PASS
+    assert effective_report.regressed_check_keys == []
+
+
+async def test_baseline_regressions_are_not_ignored_for_non_best_workspace(
+    tmp_path: Path,
+) -> None:
+    lifecycle, repo, workspace_manager, compiler = _lifecycle(tmp_path)
+    best_root = _seed_best(repo, workspace_manager)
+    (best_root / "ready.txt").write_text("ready", encoding="utf-8")
+    (best_root / "flaky.txt").write_text("present in best", encoding="utf-8")
+    old_item = HungerItem(
+        id="H-OLD",
+        title="previously accepted check",
+        acceptance_checks=[
+            AcceptanceCheck(
+                check_type=AcceptanceCheckType.FILE_EXISTS,
+                params={"path": "flaky.txt"},
+            )
+        ],
+        status=HungerItemStatus.VALIDATED_SATISFIED,
+        gap_score=0,
+    )
+    repo.save_hunger_ledger("t1", HungerLedger(task_id="t1", items=[old_item]))
+    repo.save_hunger_item(old_item)
+    best = repo.get_best_state("t1")
+    assert best is not None
+    repo.save_best_state(
+        best.model_copy(update={"accepted_check_keys": ["H-OLD:0"]})
+    )
+    compiler.compile_spec_coverage(
+        task_id="t1",
+        proposals=[
+            CheckProposal(
+                check_type=AcceptanceCheckType.FILE_EXISTS,
+                params={"path": "ready.txt"},
+                description="ready file exists",
+                source_quote="ready file exists",
+                proposed_by="synthesizer",
+            )
+        ],
+        generated_by="synthesizer",
+        baseline_pending=True,
+    )
+    _write_best_manifest(workspace_manager)
+    drifted_root = tmp_path / "drifted" / "files"
+    shutil.copytree(best_root, drifted_root)
+    (drifted_root / "flaky.txt").unlink()
+
+    result = await lifecycle.validate_pending_baseline(
+        task_id="t1",
+        loop_id=2,
+        workspace_root=drifted_root,
+    )
+
+    assert result.auto_satisfied_item_ids == []
+    assert result.failed_item_ids == ["H-SYN-001"]
+    item = repo.get_hunger_ledger("t1").items[-1]
+    assert item.synthesis_baseline_pending is True
+    assert item.status == HungerItemStatus.OPEN
+    mismatch_events = repo.list_events(
+        "t1",
+        event_types=[EventType.SYNTH_BASELINE_IDENTITY_MISMATCH.value],
+    )
+    assert len(mismatch_events) == 1
+    baseline_events = repo.list_events(
+        "t1",
+        event_types=[EventType.SYNTH_CHECK_BASELINE_VALIDATED.value],
+    )
+    assert baseline_events == []
 
 
 async def test_failing_fixture_is_closed_and_rejection_is_sticky(

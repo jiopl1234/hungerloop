@@ -201,21 +201,42 @@ def _leading_indent_of_first_content_line(text: str) -> str:
     return ""
 
 
-def _reindent_normalized_replacement(segment: str, new_text: str) -> str:
-    """Rebase replacement indentation onto the matched source line."""
-    source_indent = _leading_indent_of_first_content_line(segment)
-    replacement_indent = _leading_indent_of_first_content_line(new_text)
-    if source_indent == replacement_indent:
-        return new_text
+def _reindent_normalized_replacement(
+    segment: str,
+    old_text: str,
+    new_text: str,
+) -> str | None:
+    """Preserve source indentation when old/new line structure is unchanged."""
+    source_lines = segment.splitlines()
+    old_lines = old_text.splitlines()
+    while old_lines and not old_lines[0].strip():
+        old_lines.pop(0)
+    while old_lines and not old_lines[-1].strip():
+        old_lines.pop()
+    new_lines = new_text.splitlines(keepends=True)
+    if len(source_lines) != len(old_lines) or len(new_lines) != len(old_lines):
+        return None
 
     rebased: list[str] = []
-    for line in new_text.splitlines(keepends=True):
-        content = line
-        if line.strip():
-            if replacement_indent and content.startswith(replacement_indent):
-                content = content[len(replacement_indent) :]
-            content = source_indent + content
-        rebased.append(content)
+    for source_line, expected_line, replacement_line in zip(
+        source_lines,
+        old_lines,
+        new_lines,
+        strict=True,
+    ):
+        expected_has_content = bool(expected_line.strip())
+        replacement_has_content = bool(replacement_line.strip())
+        if expected_has_content != replacement_has_content:
+            return None
+        if not replacement_has_content:
+            rebased.append(replacement_line)
+            continue
+        expected_indent = _leading_indent_of_first_content_line(expected_line)
+        replacement_indent = _leading_indent_of_first_content_line(replacement_line)
+        if expected_indent != replacement_indent:
+            return None
+        source_indent = _leading_indent_of_first_content_line(source_line)
+        rebased.append(source_indent + replacement_line[len(replacement_indent) :])
     return "".join(rebased)
 
 
@@ -514,15 +535,47 @@ class PatchFileTool:
                 old_text=old_text,
             )
             if len(normalized_matches) == 1:
+                normalized_fallback_allowed = (
+                    start_line is not None
+                    or end_line is not None
+                    or len(old_text.splitlines()) >= 2
+                )
+                if not normalized_fallback_allowed:
+                    return ToolOutcome(
+                        success=False,
+                        summary=(
+                            "whitespace-normalized single-line patch requires a "
+                            f"line anchor in {path_arg}; provide start_line/end_line "
+                            "or use a multi-line old_text"
+                        ),
+                        args_summary=f"path={path_arg}",
+                        result_summary="unsafe_normalized_single_line",
+                    )
                 local_start_line, local_end_line = normalized_matches[0]
                 local_start = sum(len(line) for line in region_lines[:local_start_line])
                 local_end = sum(len(line) for line in region_lines[:local_end_line])
                 match_start = region_start + local_start
                 match_end = region_start + local_end
                 segment = original[match_start:match_end]
+                rebased_replacement = _reindent_normalized_replacement(
+                    segment,
+                    old_text,
+                    new_text,
+                )
+                if rebased_replacement is None:
+                    return ToolOutcome(
+                        success=False,
+                        summary=(
+                            "whitespace-normalized patch has an unsafe indentation "
+                            f"rebase in {path_arg}; re-read the enclosing block and "
+                            "use an exact patch or write_file"
+                        ),
+                        args_summary=f"path={path_arg}",
+                        result_summary="unsafe_normalized_indentation",
+                    )
                 replacement = _replacement_preserving_line_ending(
                     segment,
-                    _reindent_normalized_replacement(segment, new_text),
+                    rebased_replacement,
                 )
                 patched = original[:match_start] + replacement + original[match_end:]
                 safe.write_text(patched, encoding="utf-8")
