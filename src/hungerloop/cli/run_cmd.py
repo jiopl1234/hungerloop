@@ -100,6 +100,13 @@ def _resolve_stale_threshold(cli_value: int | None) -> int:
     help="In spend-budget mode, keep running until budget exhaustion.",
 )
 @click.option(
+    "--draft-k",
+    "draft_k",
+    type=int,
+    default=None,
+    help="Cold-start draft sampling count (first loop only; 1 disables, max 5).",
+)
+@click.option(
     "--unblock-all",
     is_flag=True,
     default=False,
@@ -188,6 +195,7 @@ def run(
     refinement_profile: str | None,
     max_refinement_tier: int,
     ignore_stagnation: bool,
+    draft_k: int | None,
     unblock_all: bool,
     resume_human: bool,
     raise_cost_ceiling: float | None,
@@ -251,6 +259,7 @@ def run(
         refinement_profile=refinement_profile,
         max_refinement_tier=max_refinement_tier,
         ignore_stagnation=ignore_stagnation,
+        draft_k=draft_k,
         unblock_all=unblock_all,
         resume_human=resume_human,
         raise_cost_ceiling=raise_cost_ceiling,
@@ -344,6 +353,7 @@ def _apply_user_overrides(
     refinement_profile: str | None,
     max_refinement_tier: int,
     ignore_stagnation: bool,
+    draft_k: int | None,
     unblock_all: bool,
     resume_human: bool,
     raise_cost_ceiling: float | None,
@@ -359,6 +369,7 @@ def _apply_user_overrides(
     * ``--unblock-all`` → every BLOCKED item flipped back to OPEN with
       counters reset, plus a per-item audit event (PRD §15.2).
     * ``--raise-cost-ceiling X`` → ``policy.max_total_cost_usd = X``.
+    * ``--draft-k N`` → ``policy.draft_sampling_k = N``.
     """
     if (
         budget_loops is not None
@@ -366,6 +377,7 @@ def _apply_user_overrides(
         or refinement_profile is not None
         or max_refinement_tier > 0
         or ignore_stagnation
+        or draft_k is not None
     ):
         policy = ctx.repo.get_hunger_policy(task_id)
         if budget_loops is not None:
@@ -378,6 +390,8 @@ def _apply_user_overrides(
         policy.max_refinement_tier = max_refinement_tier
         if ignore_stagnation:
             policy.respect_stagnation = False
+        if draft_k is not None:
+            policy.draft_sampling_k = draft_k
         ctx.repo.set_hunger_policy(task_id, policy)
 
     if refill_loops is not None and refill_loops > 0:

@@ -394,6 +394,21 @@ def test_run_budgeted_refinement_flags_update_policy(context: CliContext) -> Non
     assert policy.respect_stagnation is False
 
 
+def test_run_draft_k_flag_sets_policy(context: CliContext) -> None:
+    context.repo.save_hunger_ledger("t1", HungerLedger(task_id="t1", items=[]))
+
+    runner = CliRunner()
+    result = runner.invoke(
+        cli,
+        ["run", "t1", "--draft-k", "3"],
+        obj=context,
+    )
+
+    assert result.exit_code == 0, result.output
+    policy = context.repo.get_hunger_policy("t1")
+    assert policy.draft_sampling_k == 3
+
+
 def test_run_spend_budget_requires_budget_loops(context: CliContext) -> None:
     runner = CliRunner()
     result = runner.invoke(
