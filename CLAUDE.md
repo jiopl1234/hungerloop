@@ -1,6 +1,6 @@
 # HungerLoop — Claude Code Project Notes
 
-Python 3.11+ async agent harness. Current shipped version: **v0.6.0** (mission runtime).
+Python 3.11+ async agent harness. Current shipped version: **v0.7.0** (mission runtime).
 Canonical v0.6 PRD: `specs/PRD/hungerloop_v0_6_prd.md`.
 
 ## Code search — use MCP tools, not grep/Explore
