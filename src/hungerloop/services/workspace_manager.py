@@ -142,6 +142,11 @@ class WorkspaceManager:
     """Manage per-task ``best/candidate/rejected`` workspace directories."""
 
     _LINE_COUNT_MAX_BYTES = 262_144
+    # Only line-count the first N files in sorted order. ContextBuilder
+    # renders at most ~20 best/ entries (``_shape_workspace_files``
+    # max_paths=20), so 40 gives headroom while keeping prompt-build I/O
+    # O(1) in the size of the best/ tree.
+    _LINE_COUNT_MAX_FILES = 40
 
     def __init__(self, root: Path) -> None:
         self.root = root.resolve()
@@ -193,8 +198,18 @@ class WorkspaceManager:
     ) -> list[tuple[str, int, int]]:
         """Return sorted ``(relative_path, byte_size, line_count)`` tuples.
 
-        ``line_count`` is ``-1`` for binary files and for files larger than
-        ``_LINE_COUNT_MAX_BYTES`` (no decode pass on big blobs).
+        ``line_count`` is ``-1`` for binary files, for files larger than
+        ``_LINE_COUNT_MAX_BYTES`` (no decode pass on big blobs), and for
+        every file beyond the first ``_LINE_COUNT_MAX_FILES`` in the final
+        sorted order (rendered size-only, like an oversized/binary blob).
+
+        Only ~20 entries are ever rendered by ``ContextBuilder``
+        (``_shape_workspace_files`` max_paths=20), so bounding the
+        content-read/line-count pass to the sorted head keeps prompt-build
+        I/O O(1) in the size of the best/ tree instead of full-content
+        reading and decoding every file under best/ on every
+        ``build_for_agent`` call. ``stat()`` still runs for every file so
+        byte sizes stay accurate.
         """
         if ref == "best":
             root = self.best_files_dir(task_id)
@@ -205,22 +220,29 @@ class WorkspaceManager:
         if not root.exists():
             return []
 
-        out: list[tuple[str, int, int]] = []
+        # Collect (relative_path, byte_size, absolute_path), stat()-only, then
+        # sort BEFORE the read pass so the line-count budget applies to the
+        # same head that ContextBuilder actually renders.
+        sized: list[tuple[str, int, Path]] = []
         for path in root.rglob("*"):
             rel = path.relative_to(root)
             if _is_ignored_inventory_path(rel):
                 continue
             if not path.is_file():
                 continue
-            size = path.stat().st_size
+            sized.append((rel.as_posix(), path.stat().st_size, path))
+        sized.sort(key=lambda entry: entry[0])
+
+        out: list[tuple[str, int, int]] = []
+        for index, (rel_posix, size, path) in enumerate(sized):
             lines = -1
-            if size <= self._LINE_COUNT_MAX_BYTES:
+            if index < self._LINE_COUNT_MAX_FILES and size <= self._LINE_COUNT_MAX_BYTES:
                 try:
                     lines = len(path.read_text(encoding="utf-8").splitlines())
                 except (UnicodeDecodeError, OSError):
                     lines = -1
-            out.append((rel.as_posix(), size, lines))
-        return sorted(out)
+            out.append((rel_posix, size, lines))
+        return out
 
     def ensure_task_workspace(self, task_id: str) -> None:
         """Create the ``best/files`` directory if missing."""

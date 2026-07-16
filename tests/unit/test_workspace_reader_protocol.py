@@ -50,3 +50,30 @@ def test_list_workspace_file_stats(tmp_path: Path) -> None:
     stats = manager.list_workspace_file_stats("t1", ref="best")
     assert ("a.py", 12, 2) in stats
     assert ("img.bin", 4, -1) in stats
+
+
+def test_list_workspace_file_stats_bounds_line_count_reads(tmp_path: Path) -> None:
+    """Only the first ``_LINE_COUNT_MAX_FILES`` sorted files are line-counted;
+    every file beyond the head is reported size-only (line_count == -1),
+    keeping prompt-build I/O bounded regardless of tree size."""
+    manager = WorkspaceManager(tmp_path)
+    best = manager.best_files_dir("t1")
+    best.mkdir(parents=True)
+    total = manager._LINE_COUNT_MAX_FILES + 5
+    # Zero-padded names so sorted order == creation order == index order.
+    for i in range(total):
+        (best / f"file_{i:03d}.py").write_text("a\nb\n", encoding="utf-8", newline="\n")
+
+    stats = manager.list_workspace_file_stats("t1", ref="best")
+    assert len(stats) == total
+    # Result is sorted by path.
+    assert [name for name, _size, _lines in stats] == sorted(
+        name for name, _size, _lines in stats
+    )
+    # First _LINE_COUNT_MAX_FILES entries carry real line counts (2 lines each).
+    head = stats[: manager._LINE_COUNT_MAX_FILES]
+    assert all(lines == 2 for _name, _size, lines in head)
+    # Everything beyond the head is size-only (-1), but bytes stay accurate.
+    tail = stats[manager._LINE_COUNT_MAX_FILES :]
+    assert tail  # there are extra files past the head
+    assert all(lines == -1 and size == 4 for _name, size, lines in tail)
