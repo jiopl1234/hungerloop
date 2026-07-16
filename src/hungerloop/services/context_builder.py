@@ -41,6 +41,10 @@ MAX_WORKSPACE_FILES_LINE_CHARS = 700
 # The cap relies on the non-evictable section caps above; _apply_history_cap
 # asserts if those caps drift past the rendered prior-loop block budget.
 MAX_HISTORY_CHARS = 12000
+# When the prior-loop block overflows, failure lines older than the newest
+# are first DEGRADED to this many chars (one-liner: loop + check_key +
+# detail head) before any line is dropped outright.
+DEGRADED_FAILURE_LINE_CHARS = 120
 MAX_READ_COVERAGE_CHARS = 600
 MAX_FAILED_TOOL_LINES = 5
 READ_ONLY_REJECTED_HINT = (
@@ -847,6 +851,29 @@ def _apply_history_cap(
             failure_lines=failure_lines,
             evidence_lines=evidence_lines,
         )
+
+    degraded_failures = 0
+    degrade_index = len(failure_lines) - 1
+    # Degrade oldest-first, but never the newest line (index 0) — it keeps
+    # full detail so the most recent failure stays actionable.
+    while len(assembled) > MAX_HISTORY_CHARS and degrade_index >= 1:
+        clipped = _clip_required(
+            failure_lines[degrade_index], DEGRADED_FAILURE_LINE_CHARS
+        )
+        if clipped != failure_lines[degrade_index]:
+            failure_lines[degrade_index] = clipped
+            degraded_failures += 1
+            assembled = _assemble_history(
+                loop_id=loop_id,
+                prior_handoff_summary=prior_handoff_summary,
+                last_summary=last_summary,
+                best_summary=best_summary,
+                best_files=best_files,
+                failure_lines=failure_lines,
+                evidence_lines=evidence_lines,
+            )
+        degrade_index -= 1
+
     while len(assembled) > MAX_HISTORY_CHARS and failure_lines:
         failure_lines.pop()
         dropped_failures += 1
@@ -879,6 +906,7 @@ def _apply_history_cap(
             chars_after=chars_after,
             dropped_failures=dropped_failures,
             dropped_evidence=dropped_evidence,
+            degraded_failures=degraded_failures,
             truncated_best_summary=best_summary_truncated,
         ),
     )

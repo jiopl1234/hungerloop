@@ -20,7 +20,11 @@ from hungerloop.models.enums import (
 )
 from hungerloop.models.hunger import AcceptanceCheck, HungerItem
 from hungerloop.models.planning import BudgetAllocation
-from hungerloop.services.context_builder import ContextBuilder
+from hungerloop.services.context_builder import (
+    DEGRADED_FAILURE_LINE_CHARS,
+    ContextBuilder,
+    _apply_history_cap,
+)
 from hungerloop.services.workspace_reader import WorkspaceReader
 
 
@@ -181,3 +185,29 @@ def test_best_state_summary_passed_through(
         candidate_workspace_ref="candidates/loop_001",
     )
     assert pack.best_state_summary == "prior summary"
+
+
+def test_history_cap_degrades_failures_before_dropping() -> None:
+    lines = [
+        f"loop {i}: H-{i}:0 shell_exit_zero → " + "x" * 2900 for i in range(10)
+    ]
+    (_, _, _, _, out_failures, info) = _apply_history_cap(
+        loop_id=11,
+        prior_handoff_summary="",
+        last_summary=None,
+        best_summary=None,
+        best_files=[],
+        evidence_ids=[],
+        evidence_lines=[],
+        failure_lines=list(lines),
+        best_summary_truncated=False,
+    )
+    assert info is not None
+    assert info.degraded_failures > 0
+    # Oldest lines got degraded to one-liners instead of being dropped.
+    assert any(len(line) <= DEGRADED_FAILURE_LINE_CHARS for line in out_failures)
+    # The newest line keeps its full detail.
+    assert len(out_failures[0]) > DEGRADED_FAILURE_LINE_CHARS
+    # Nothing was dropped outright in this scenario.
+    assert info.dropped_failures == 0
+    assert len(out_failures) == 10

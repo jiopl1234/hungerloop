@@ -24,6 +24,7 @@ class TruncationInfo(BaseModel):
     chars_after: int = Field(..., ge=0)
     dropped_failures: int = Field(0, ge=0)
     dropped_evidence: int = Field(0, ge=0)
+    degraded_failures: int = Field(0, ge=0)
     truncated_best_summary: bool = False
 
 
