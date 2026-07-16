@@ -723,6 +723,16 @@ class SQLiteRepository:
         evidence_payload = {"type": actual_type, **payload}
         return self._insert_evidence(task_id, loop_id, actual_type, evidence_payload)
 
+    def delete_evidence(self, evidence_ids: list[str]) -> None:
+        """Delete evidence rows by id (v0.7.2 draft-sampling loser cleanup)."""
+        if not evidence_ids:
+            return
+        placeholders = ",".join("?" for _ in evidence_ids)
+        self.conn.execute(
+            f"DELETE FROM evidence WHERE evidence_id IN ({placeholders})",
+            tuple(evidence_ids),
+        )
+
     def list_evidence(
         self,
         task_id: str,

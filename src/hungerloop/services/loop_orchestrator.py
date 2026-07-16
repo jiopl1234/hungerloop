@@ -312,6 +312,15 @@ class LoopOrchestrator:
         """
         validation_phase = self._phase_for_validation(mission, plan)
         drafts: list[tuple[int, SchedulerResult, CandidateEvaluation]] = []
+        # Per-draft tool-call evidence ownership (id-diff snapshots). Every
+        # draft's worker pass persists tool-call evidence under the same
+        # task/loop/agent; only the winner is restored, so the non-winner
+        # drafts' rows must be dropped after selection. Otherwise a
+        # discarded draft's successful tool calls render as phantom-state
+        # evidence lines and its failed tool calls inflate
+        # ``failure_patterns_to_avoid`` in the winner's next-loop
+        # ContextBuilder history (v0.7.1 loop memory).
+        draft_evidence_ids: dict[int, set[str]] = {}
         previous_hashes: dict[str, str] | None = None
         for draft_index in range(1, draft_k + 1):
             if draft_index > 1:
@@ -328,6 +337,7 @@ class LoopOrchestrator:
                     loop_id,
                     seed_source_dir=_mission_workspace_seed_source(mission),
                 )
+            evidence_before = self._tool_call_evidence_ids(task_id)
             scheduler_result = await self._run_assignments(
                 task_id=task_id,
                 loop_id=loop_id,
@@ -341,6 +351,12 @@ class LoopOrchestrator:
                 # Deterministic-provider short-circuit: this draft
                 # reproduced the previous one byte-for-byte; further
                 # samples are pure waste (dummy provider, temp-0 configs).
+                # It still ran a worker pass and persisted tool-call evidence,
+                # and is always a loser (never appended to ``drafts``); record
+                # its rows so the post-selection cleanup drops them.
+                draft_evidence_ids[draft_index] = (
+                    self._tool_call_evidence_ids(task_id) - evidence_before
+                )
                 break
             previous_hashes = current_hashes
             probe = self.integrator.integrate(
@@ -365,6 +381,9 @@ class LoopOrchestrator:
                 pipeline_result.deterministic_report,
             )
             self.workspace_manager.archive_draft(task_id, loop_id, draft_index)
+            draft_evidence_ids[draft_index] = (
+                self._tool_call_evidence_ids(task_id) - evidence_before
+            )
             drafts.append((draft_index, scheduler_result, evaluation))
 
         evaluations = [entry[2] for entry in drafts]
@@ -386,6 +405,17 @@ class LoopOrchestrator:
         self.repo.delete_worker_handoffs(task_id, loop_id)
         for handoff in winner_result.handoffs:
             self.repo.save_worker_handoff(handoff)
+        # Drop every non-winner draft's tool-call evidence (losers plus the
+        # short-circuited duplicate). The winner's ids are never in this set,
+        # so its handoff evidence_ids and next-loop history stay intact.
+        loser_evidence_ids = [
+            evidence_id
+            for index, ids in draft_evidence_ids.items()
+            if index != winner_index
+            for evidence_id in sorted(ids)
+        ]
+        if loser_evidence_ids:
+            self.repo.delete_evidence(loser_evidence_ids)
         self.repo.append_event(
             EventType.DRAFT_SAMPLED,
             {
@@ -394,6 +424,7 @@ class LoopOrchestrator:
                 "draft_count": len(drafts),
                 "winner_draft_index": winner_index,
                 "winner_passes_gate": gate_winner is not None,
+                "loser_evidence_rows_deleted": len(loser_evidence_ids),
                 "per_draft": [
                     {
                         "draft_index": index,
@@ -411,6 +442,27 @@ class LoopOrchestrator:
             loop_id=loop_id,
         )
         return winner_result
+
+    def _tool_call_evidence_ids(self, task_id: str) -> set[str]:
+        """Every tool-call evidence id for a task (draft-sampling cleanup).
+
+        Unions the successful and failed tool-call evidence streams — the
+        only two evidence streams ``ContextBuilder`` renders into prompt
+        history. Scoping loser-draft cleanup to these rows removes exactly
+        what can leak into the winner's next loop while leaving
+        model-call/validation evidence (never prompt-rendered, and required
+        for D11 usage reconciliation) untouched.
+        """
+        ids = {
+            str(row.get("evidence_id", ""))
+            for row in self.repo.list_successful_tool_call_evidence(task_id)
+        }
+        ids.update(
+            str(row.get("evidence_id", ""))
+            for row in self.repo.list_failed_tool_call_evidence(task_id)
+        )
+        ids.discard("")
+        return ids
 
     async def _step_inner(self, task_id: str) -> LoopTrace | StopReport:
         policy = self.repo.get_hunger_policy(task_id)

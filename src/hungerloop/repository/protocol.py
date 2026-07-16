@@ -231,6 +231,17 @@ class RepositoryProtocol(Protocol):
     ) -> str: ...
     """Generic additive evidence write path for non-tool/model/shell flows."""
 
+    def delete_evidence(self, evidence_ids: list[str]) -> None: ...
+    """New in v0.7.2: delete evidence rows by id (unknown ids ignored).
+
+    Exists for cold-start draft-sampling loser cleanup: each draft's worker
+    pass persists tool-call evidence under the same task/loop, and only the
+    winner draft is restored. This drops the non-winner drafts' tool-call
+    rows so a discarded draft's successful/failed tool calls never feed the
+    winner's next-loop ContextBuilder history (phantom state / inflated
+    failure_patterns_to_avoid). Model-call/validation evidence is left in
+    place (never prompt-rendered; needed for usage reconciliation)."""
+
     def list_evidence(
         self,
         task_id: str,

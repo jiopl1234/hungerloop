@@ -4,11 +4,14 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 from hungerloop.models.enums import LoopPhase, ValidationVerdict
 from hungerloop.models.planning import Assignment, BudgetAllocation, LoopPlan
 from hungerloop.models.validation import ValidationReport
 from hungerloop.models.worker import WorkerHandoff
 from hungerloop.repository.in_memory_repo import InMemoryRepository
+from hungerloop.repository.sqlite_repo import SQLiteRepository
 from hungerloop.services.acceptance_runner import AcceptanceCheckRunner
 from hungerloop.services.agent_registry import AgentSpecRegistry
 from hungerloop.services.budget_allocator import BudgetAllocator
@@ -257,3 +260,148 @@ async def test_draft_sampling_short_circuits_on_identical_content(
     # Exactly one persisted handoff row survives (the winner's), despite the
     # per-draft re-persist under the same deterministic id.
     assert len(repo.list_worker_handoffs(task_id)) == 1
+
+
+def _tool_call_evidence_ids(repo: InMemoryRepository, task_id: str) -> set[str]:
+    ids = {
+        str(row["evidence_id"])
+        for row in repo.list_successful_tool_call_evidence(task_id)
+    }
+    ids.update(
+        str(row["evidence_id"])
+        for row in repo.list_failed_tool_call_evidence(task_id)
+    )
+    return ids
+
+
+async def test_draft_sampling_deletes_loser_tool_call_evidence(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    """Only the WINNER draft's tool-call evidence survives a sampling run.
+
+    Each draft's worker pass persists tool-call evidence under the same
+    task/loop/agent (mirroring ToolHarness). If the losers' rows were kept
+    they would render as phantom-state evidence lines / inflated
+    ``failure_patterns_to_avoid`` in the winner's next-loop ContextBuilder
+    history.
+    """
+    orchestrator, repo, workspace_manager = _make_orchestrator(tmp_path)
+    task_id, loop_id = "t1", 1
+    workspace_manager.create_candidate_workspace(task_id, loop_id)
+    files = workspace_manager.candidate_files_dir(task_id, loop_id)
+
+    draft_outputs = iter(["draft one", "draft two", "draft three"])
+    # summary -> (successful_evidence_id, failed_evidence_id)
+    draft_evidence: dict[str, tuple[str, str]] = {}
+
+    async def fake_run_assignments(**kwargs: Any) -> Any:
+        summary = next(draft_outputs)
+        (files / "a.py").write_text(summary, encoding="utf-8")
+        ok = repo.save_tool_call_as_evidence(
+            task_id=task_id,
+            loop_id=loop_id,
+            agent_id="execution_worker_v1",
+            tool_name="write_file",
+            args_summary="path=a.py",
+            result_summary=summary,
+            success=True,
+            elapsed_ms=1,
+        )
+        bad = repo.save_tool_call_as_evidence(
+            task_id=task_id,
+            loop_id=loop_id,
+            agent_id="execution_worker_v1",
+            tool_name="patch_file",
+            args_summary=f"path=a.py want={summary}",
+            result_summary="no matching lines",
+            success=False,
+            elapsed_ms=1,
+        )
+        draft_evidence[summary] = (ok, bad)
+        return _persist_draft_handoff(repo, summary)
+
+    reports = iter(
+        [
+            _report(loop_id, newly_passed=[]),  # draft 1: nothing
+            _report(loop_id, newly_passed=["H-1:0"]),  # draft 2: winner
+            _report(loop_id, newly_passed=[]),  # draft 3: nothing
+        ]
+    )
+
+    async def fake_pipeline_run(**kwargs: Any) -> ValidationPipelineResult:
+        return _pipeline_result(next(reports))
+
+    monkeypatch.setattr(orchestrator, "_run_assignments", fake_run_assignments)
+    monkeypatch.setattr(orchestrator.validation_pipeline, "run", fake_pipeline_run)
+
+    await orchestrator._run_draft_sampling(
+        task_id=task_id,
+        loop_id=loop_id,
+        plan=_plan_with_one_assignment(task_id, loop_id),
+        budget=_budget(),
+        draft_k=3,
+        mission=None,
+    )
+
+    winner_ids = set(draft_evidence["draft two"])
+    surviving = _tool_call_evidence_ids(repo, task_id)
+    # Surviving tool-call evidence is EXACTLY the winner's rows.
+    assert surviving == winner_ids
+    # Losers' rows (drafts one + three) are deleted outright.
+    loser_ids = set(draft_evidence["draft one"]) | set(draft_evidence["draft three"])
+    assert surviving.isdisjoint(loser_ids)
+    # Winner's rows are untouched (same ids, content preserved).
+    winner_ok, _winner_bad = draft_evidence["draft two"]
+    successful = {
+        str(row["evidence_id"]): row
+        for row in repo.list_successful_tool_call_evidence(task_id)
+    }
+    assert winner_ok in successful
+    payload = successful[winner_ok]["payload"]
+    assert isinstance(payload, dict)
+    assert payload["result_summary"] == "draft two"
+    # Audit: 2 losers x 2 rows each were deleted.
+    events = [
+        e for e in repo.list_events(task_id) if e["event_type"] == "draft_sampled"
+    ]
+    assert events[0]["payload"]["loser_evidence_rows_deleted"] == 4  # type: ignore[index]
+
+
+@pytest.mark.parametrize("backend", ["in_memory", "sqlite"], ids=["in_memory", "sqlite"])
+def test_delete_evidence_removes_named_rows(backend: str, tmp_path: Path) -> None:
+    """Repo-level: delete_evidence drops only the named ids; unknown ids no-op."""
+    repo: Any
+    if backend == "in_memory":
+        repo = InMemoryRepository()
+    else:
+        repo = SQLiteRepository.open(tmp_path / "evidence.sqlite")
+    repo.create_task("t1", "goal")
+    keep = repo.save_tool_call_as_evidence(
+        task_id="t1",
+        loop_id=1,
+        agent_id="execution_worker_v1",
+        tool_name="write_file",
+        args_summary="path=a.py",
+        result_summary="ok",
+        success=True,
+        elapsed_ms=1,
+    )
+    drop = repo.save_tool_call_as_evidence(
+        task_id="t1",
+        loop_id=1,
+        agent_id="execution_worker_v1",
+        tool_name="patch_file",
+        args_summary="path=a.py",
+        result_summary="no match",
+        success=False,
+        elapsed_ms=1,
+    )
+
+    # Unknown ids are ignored, named ids removed.
+    repo.delete_evidence([drop, "ev-does-not-exist"])
+
+    remaining = {str(row["evidence_id"]) for row in repo.list_evidence("t1")}
+    assert remaining == {keep}
+
+    if isinstance(repo, SQLiteRepository):
+        repo.close()

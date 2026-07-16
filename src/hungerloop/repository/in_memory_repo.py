@@ -485,6 +485,11 @@ class InMemoryRepository:
         }
         return eid
 
+    def delete_evidence(self, evidence_ids: list[str]) -> None:
+        """Delete evidence rows by id (v0.7.2 draft-sampling loser cleanup)."""
+        for evidence_id in evidence_ids:
+            self._evidence.pop(evidence_id, None)
+
     def list_evidence(
         self,
         task_id: str,
