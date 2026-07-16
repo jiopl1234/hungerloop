@@ -14,3 +14,11 @@ class WorkspaceReader(Protocol):
         ref: Literal["best", "candidate"],
         loop_id: int | None = None,
     ) -> list[str]: ...
+
+    def list_workspace_file_stats(
+        self,
+        task_id: str,
+        *,
+        ref: Literal["best", "candidate"],
+        loop_id: int | None = None,
+    ) -> list[tuple[str, int, int]]: ...

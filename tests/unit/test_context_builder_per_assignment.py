@@ -23,6 +23,14 @@ class StaticWorkspaceReader:
         del task_id, ref, loop_id
         return []
 
+    def list_workspace_file_stats(
+        self, task_id: str, *, ref: str, loop_id: int | None = None
+    ) -> list[tuple[str, int, int]]:
+        return [
+            (path, 0, -1)
+            for path in self.list_workspace_files(task_id, ref=ref, loop_id=loop_id)
+        ]
+
 
 def _repo() -> InMemoryRepository:
     repo = InMemoryRepository()

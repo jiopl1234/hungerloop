@@ -846,6 +846,7 @@ class TestCrossTaskRecallSQLite:
         # Build context for task B
         reader = MagicMock()
         reader.list_workspace_files.return_value = []
+        reader.list_workspace_file_stats.return_value = []
 
         # Set up the repo for task B context building
         repo.get_best_state = MagicMock(return_value=None)  # type: ignore
@@ -910,6 +911,7 @@ class TestCrossTaskRecallSQLite:
 
         reader = MagicMock()
         reader.list_workspace_files.return_value = []
+        reader.list_workspace_file_stats.return_value = []
 
         repo.get_best_state = MagicMock(return_value=None)  # type: ignore
         repo.get_latest_handoff_processing_result = MagicMock(return_value=None)  # type: ignore
@@ -975,6 +977,7 @@ class TestCrossTaskRecallSQLiteReal:
         # Build context for task B with recall enabled
         reader = MagicMock()
         reader.list_workspace_files.return_value = []
+        reader.list_workspace_file_stats.return_value = []
 
         pack = ContextBuilder(
             repo=repo,

@@ -141,6 +141,8 @@ def _copy_seed_source(source: Path, destination: Path) -> None:
 class WorkspaceManager:
     """Manage per-task ``best/candidate/rejected`` workspace directories."""
 
+    _LINE_COUNT_MAX_BYTES = 262_144
+
     def __init__(self, root: Path) -> None:
         self.root = root.resolve()
 
@@ -180,6 +182,44 @@ class WorkspaceManager:
                 continue
             if path.is_file():
                 out.append(rel.as_posix())
+        return sorted(out)
+
+    def list_workspace_file_stats(
+        self,
+        task_id: str,
+        *,
+        ref: Literal["best", "candidate"],
+        loop_id: int | None = None,
+    ) -> list[tuple[str, int, int]]:
+        """Return sorted ``(relative_path, byte_size, line_count)`` tuples.
+
+        ``line_count`` is ``-1`` for binary files and for files larger than
+        ``_LINE_COUNT_MAX_BYTES`` (no decode pass on big blobs).
+        """
+        if ref == "best":
+            root = self.best_files_dir(task_id)
+        else:
+            if loop_id is None:
+                raise ValueError("loop_id is required for candidate workspace")
+            root = self.candidate_files_dir(task_id, loop_id)
+        if not root.exists():
+            return []
+
+        out: list[tuple[str, int, int]] = []
+        for path in root.rglob("*"):
+            rel = path.relative_to(root)
+            if _is_ignored_inventory_path(rel):
+                continue
+            if not path.is_file():
+                continue
+            size = path.stat().st_size
+            lines = -1
+            if size <= self._LINE_COUNT_MAX_BYTES:
+                try:
+                    lines = len(path.read_text(encoding="utf-8").splitlines())
+                except (UnicodeDecodeError, OSError):
+                    lines = -1
+            out.append((rel.as_posix(), size, lines))
         return sorted(out)
 
     def ensure_task_workspace(self, task_id: str) -> None:

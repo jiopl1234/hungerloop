@@ -39,3 +39,14 @@ def test_candidate_listing_requires_loop_id(tmp_path: Path) -> None:
     manager = WorkspaceManager(tmp_path)
     with pytest.raises(ValueError):
         manager.list_workspace_files("t1", ref=cast(Literal["candidate"], "candidate"))
+
+
+def test_list_workspace_file_stats(tmp_path: Path) -> None:
+    manager = WorkspaceManager(tmp_path)
+    best = manager.best_files_dir("t1")
+    best.mkdir(parents=True)
+    (best / "a.py").write_text("x = 1\ny = 2\n", encoding="utf-8", newline="\n")
+    (best / "img.bin").write_bytes(b"\xff\xfe\x00\x01")
+    stats = manager.list_workspace_file_stats("t1", ref="best")
+    assert ("a.py", 12, 2) in stats
+    assert ("img.bin", 4, -1) in stats

@@ -23,6 +23,7 @@ from hungerloop.models.planning import BudgetAllocation
 from hungerloop.services.context_builder import (
     DEGRADED_FAILURE_LINE_CHARS,
     ContextBuilder,
+    _annotate_workspace_files,
     _apply_history_cap,
 )
 from hungerloop.services.workspace_reader import WorkspaceReader
@@ -211,3 +212,8 @@ def test_history_cap_degrades_failures_before_dropping() -> None:
     # Nothing was dropped outright in this scenario.
     assert info.dropped_failures == 0
     assert len(out_failures) == 10
+
+
+def test_annotate_workspace_files() -> None:
+    assert _annotate_workspace_files([("a.py", 2048, 100)]) == ["a.py (100L, 2.0KB)"]
+    assert _annotate_workspace_files([("img.png", 500, -1)]) == ["img.png (500B)"]

@@ -170,7 +170,9 @@ class ContextBuilder:
             assignment=assignment,
         )
         best_files = _shape_workspace_files(
-            self.workspace_reader.list_workspace_files(task_id, ref="best"),
+            _annotate_workspace_files(
+                self.workspace_reader.list_workspace_file_stats(task_id, ref="best")
+            ),
             path_cap=MAX_WORKSPACE_FILE_PATH_CHARS,
             line_cap=MAX_WORKSPACE_FILES_LINE_CHARS,
             max_paths=20,
@@ -750,6 +752,31 @@ def _clip_oldest_lines(lines: list[str], max_chars: int) -> str:
     if len(rendered) <= max_chars:
         return rendered
     return rendered[-max_chars:]
+
+
+def _format_bytes(size: int) -> str:
+    if size < 1024:
+        return f"{size}B"
+    if size < 1024 * 1024:
+        return f"{size / 1024:.1f}KB"
+    return f"{size / (1024 * 1024):.1f}MB"
+
+
+def _annotate_workspace_files(
+    stats: list[tuple[str, int, int]],
+) -> list[str]:
+    """Render (path, bytes, lines) as 'path (NL, SIZE)' prompt entries.
+
+    Gives the worker enough to aim a ranged read_file on loop 1 instead
+    of paging blindly from the top of every file.
+    """
+    out: list[str] = []
+    for path, size, lines in stats:
+        if lines >= 0:
+            out.append(f"{path} ({lines}L, {_format_bytes(size)})")
+        else:
+            out.append(f"{path} ({_format_bytes(size)})")
+    return out
 
 
 def _shape_workspace_files(

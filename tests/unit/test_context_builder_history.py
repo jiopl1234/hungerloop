@@ -89,6 +89,14 @@ class StaticWorkspaceReader:
     ) -> list[str]:
         return sorted(self.files)
 
+    def list_workspace_file_stats(
+        self, task_id: str, *, ref: str, loop_id: int | None = None
+    ) -> list[tuple[str, int, int]]:
+        return [
+            (path, 0, -1)
+            for path in self.list_workspace_files(task_id, ref=ref, loop_id=loop_id)
+        ]
+
 
 def _budget() -> BudgetAllocation:
     return BudgetAllocation(phase=LoopPhase.EXPLORE)
@@ -643,10 +651,10 @@ def test_static_workspace_reader_inventory_sorts_and_truncates() -> None:
     pack = _build_pack(repo, loop_id=1, reader=reader)
 
     assert pack.best_workspace_files == [
-        ".pytest_cache/v",
-        "__pycache__/x.pyc",
-        "fizzbuzz.py",
-        "test_fizzbuzz.py",
+        ".pytest_cache/v (0B)",
+        "__pycache__/x.pyc (0B)",
+        "fizzbuzz.py (0B)",
+        "test_fizzbuzz.py (0B)",
     ]
 
 
@@ -665,7 +673,10 @@ def test_workspace_manager_filters_best_inventory(tmp_path: Path) -> None:
 
     pack = _build_pack(repo=InMemoryRepository(), loop_id=1, reader=manager)
 
-    assert pack.best_workspace_files == ["fizzbuzz.py", "test_fizzbuzz.py"]
+    assert pack.best_workspace_files == [
+        "fizzbuzz.py (1L, 1B)",
+        "test_fizzbuzz.py (1L, 1B)",
+    ]
 
 
 def test_20_file_and_long_path_truncation() -> None:
@@ -948,6 +959,11 @@ class _EmptyReader:
     def list_workspace_files(
         self, task_id: str, *, ref: str, loop_id: int | None = None
     ) -> list[str]:
+        return []
+
+    def list_workspace_file_stats(
+        self, task_id: str, *, ref: str, loop_id: int | None = None
+    ) -> list[tuple[str, int, int]]:
         return []
 
 
