@@ -249,9 +249,24 @@ def _is_source_quote_anchored(
 
 
 def _count_synthesized_items(ledger_task_id: str, repo: RepositoryProtocol) -> int:
-    """Count existing ``H-SYN-*`` items in the ledger for a task."""
+    """Count unresolved ``H-SYN-*`` items against the lifetime cap.
+
+    Resolved items (CLOSED — e.g. invalid synthesis — and
+    VALIDATED_SATISFIED — auto-satisfied at baseline) no longer consume
+    ``synthesis_max_total_items``: a zero-information proposal must not
+    permanently shrink the objective budget. Their accepted checks stay
+    in the I-5 regression baseline regardless of this count.
+    """
     ledger = repo.get_hunger_ledger(ledger_task_id)
-    return sum(1 for item in ledger.items if item.id.startswith("H-SYN-"))
+    resolved = {
+        HungerItemStatus.CLOSED,
+        HungerItemStatus.VALIDATED_SATISFIED,
+    }
+    return sum(
+        1
+        for item in ledger.items
+        if item.id.startswith("H-SYN-") and item.status not in resolved
+    )
 
 
 def _count_active_synthesized_items(

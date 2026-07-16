@@ -31,6 +31,7 @@ from hungerloop.services.spec_check_synthesizer import (
     SYNTHESIS_MAX_TOKENS,
     SpecCheckSynthesizer,
     _count_active_synthesized_items,
+    _count_synthesized_items,
     build_covered_check_digest,
     build_synthesis_prompt,
     run_plan_time_synthesis,
@@ -1024,6 +1025,24 @@ def test_blocked_synthesized_item_frees_active_slot() -> None:
         ),
     )
     assert _count_active_synthesized_items("t1", repo) == 1
+
+
+def test_resolved_items_do_not_consume_lifetime_capacity() -> None:
+    repo = InMemoryRepository()
+    repo.save_hunger_ledger(
+        "t1",
+        HungerLedger(
+            task_id="t1",
+            items=[
+                _syn_item("H-SYN-001", HungerItemStatus.OPEN),
+                _syn_item("H-SYN-002", HungerItemStatus.CLOSED),
+                _syn_item("H-SYN-003", HungerItemStatus.VALIDATED_SATISFIED),
+                _syn_item("H-SYN-004", HungerItemStatus.BLOCKED),
+            ],
+        ),
+    )
+    # OPEN and BLOCKED are unresolved and still count; resolved ones do not.
+    assert _count_synthesized_items("t1", repo) == 2
 
 
 # ---------------------------------------------------------------------------
