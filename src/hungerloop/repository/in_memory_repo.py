@@ -568,6 +568,27 @@ class InMemoryRepository:
             )
         return out
 
+    def list_failed_tool_call_evidence(
+        self, task_id: str
+    ) -> list[dict[str, object]]:
+        out: list[dict[str, object]] = []
+        for eid, row in self._evidence.items():
+            if row.get("task_id") != task_id:
+                continue
+            if row.get("type") != EvidenceType.TOOL_CALL.value:
+                continue
+            if row.get("success") is not False:
+                continue
+            out.append(
+                {
+                    "evidence_id": eid,
+                    "task_id": task_id,
+                    "loop_id": row.get("loop_id"),
+                    "payload": dict(row),
+                }
+            )
+        return out
+
     def get_artifacts_by_ids(self, artifact_ids: list[str]) -> list[Artifact]:
         return [self._artifacts[aid] for aid in artifact_ids if aid in self._artifacts]
 

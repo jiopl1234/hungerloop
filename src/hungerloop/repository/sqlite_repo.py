@@ -844,6 +844,34 @@ class SQLiteRepository:
             )
         return out
 
+    def list_failed_tool_call_evidence(
+        self, task_id: str
+    ) -> list[dict[str, object]]:
+        rows = self.conn.execute(
+            """
+            SELECT evidence_id, task_id, loop_id, payload_json
+            FROM evidence
+            WHERE task_id = ?
+              AND evidence_type = ?
+            ORDER BY rowid ASC
+            """,
+            (task_id, EvidenceType.TOOL_CALL.value),
+        ).fetchall()
+        out: list[dict[str, object]] = []
+        for row in rows:
+            payload = _loads(str(row["payload_json"]))
+            if payload.get("success") is not False:
+                continue
+            out.append(
+                {
+                    "evidence_id": str(row["evidence_id"]),
+                    "task_id": str(row["task_id"]),
+                    "loop_id": int(row["loop_id"]) if row["loop_id"] else None,
+                    "payload": payload,
+                }
+            )
+        return out
+
     def save_artifact(self, artifact: Artifact) -> None:
         self._ensure_task(artifact.task_id)
         self.conn.execute(

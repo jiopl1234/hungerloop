@@ -5,6 +5,7 @@ from hungerloop.models.enums import AcceptanceCheckType
 from hungerloop.models.validation import CheckResult
 from hungerloop.services.evidence_render import (
     summarize_failed_check,
+    summarize_failed_tool_call,
     summarize_tool_call,
 )
 
@@ -43,3 +44,15 @@ def test_summarize_read_file_tool_call_preserves_head_and_tail() -> None:
     assert "def compute_stats" in line
     assert "timestamp.strftime()" in line
     assert "…" in line
+
+
+def test_summarize_failed_tool_call_with_repeats() -> None:
+    payload: dict[str, object] = {
+        "tool_name": "patch_file",
+        "args_summary": "path=sheet.py",
+        "result_summary": "no_match: context not found in file",
+    }
+    line = summarize_failed_tool_call(payload, 3, repeat_count=4)
+    assert line.startswith("loop 3 FAILED tool_call patch_file sheet.py")
+    assert "(x4 identical failures)" in line
+    assert "no_match: context not found in file" in line

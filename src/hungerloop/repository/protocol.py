@@ -263,6 +263,15 @@ class RepositoryProtocol(Protocol):
     evidence fields. Used only by the derivation helpers; CLI surfaces
     can still call ``count_evidence_by_type`` for cardinality."""
 
+    def list_failed_tool_call_evidence(
+        self, task_id: str
+    ) -> list[dict[str, object]]: ...
+    """New in v0.7.1: list every FAILED ``tool_call`` evidence row for
+    ``task_id`` in insertion order, same row shape as
+    ``list_successful_tool_call_evidence``. ContextBuilder renders these
+    into ``failure_patterns_to_avoid`` so repeated mechanical tool
+    failures (e.g. patch_file no-match) become visible cross-loop."""
+
     def save_artifact(self, artifact: Artifact) -> None: ...
     """New in v0.5a (Day 5): ToolHarness persists artifacts produced by
     write_file / patch_file. Previously a test-only helper on

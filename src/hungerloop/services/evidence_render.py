@@ -62,6 +62,31 @@ def summarize_tool_call(
     return _clip_line(f"{prefix}{result_summary}", max_chars)
 
 
+def summarize_failed_tool_call(
+    payload: dict[str, object],
+    loop_id: int,
+    *,
+    repeat_count: int = 1,
+    max_chars: int = 200,
+) -> str:
+    """Format one FAILED tool_call evidence row for prompt history.
+
+    ``repeat_count`` > 1 marks byte-identical (tool_name, args) failures —
+    the strongest cross-loop signal that a mechanical step keeps failing
+    the same way and needs a different edit, not a different approach.
+    """
+    tool_name = str(payload.get("tool_name", "?"))
+    location = _tool_location_hint(payload)
+    prefix = f"loop {loop_id} FAILED tool_call {tool_name}"
+    if location:
+        prefix += f" {location}"
+    if repeat_count > 1:
+        prefix += f" (x{repeat_count} identical failures)"
+    prefix += ": "
+    result = str(payload.get("result_summary", ""))
+    return _clip_line(f"{prefix}{result}", max_chars)
+
+
 def summarize_failed_check(
     check_result: CheckResult,
     loop_id: int,

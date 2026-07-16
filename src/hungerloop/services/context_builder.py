@@ -20,6 +20,7 @@ from hungerloop.repository.evidence_success import is_successful_evidence_payloa
 from hungerloop.repository.protocol import RepositoryProtocol
 from hungerloop.services.evidence_render import (
     summarize_failed_check,
+    summarize_failed_tool_call,
     summarize_tool_call,
 )
 from hungerloop.services.prior_loop_context import render_prior_loop_context_block
@@ -41,6 +42,7 @@ MAX_WORKSPACE_FILES_LINE_CHARS = 700
 # asserts if those caps drift past the rendered prior-loop block budget.
 MAX_HISTORY_CHARS = 12000
 MAX_READ_COVERAGE_CHARS = 600
+MAX_FAILED_TOOL_LINES = 5
 READ_ONLY_REJECTED_HINT = (
     "consecutive worker loops inspected files but emitted no write action; "
     "next attempt must patch/write or declare a blocker"
@@ -81,6 +83,7 @@ class _LoopHistorySlice:
     successful_evidence_lines: list[str]
     read_coverage_summary: str | None
     last_self_summary: str | None
+    failed_tool_lines: list[str]
 
 
 class ContextBuilder:
@@ -172,7 +175,9 @@ class ContextBuilder:
         # newest committed loop can occupy all slots before older loops appear.
         evidence_ids = history.successful_evidence_ids[: K_EVIDENCE_WINDOW * 5]
         evidence_lines = history.successful_evidence_lines[: K_EVIDENCE_WINDOW * 5]
-        failure_lines = history.rejected_lines[: K_REJECT_WINDOW * 4]
+        failure_lines = (
+            history.rejected_lines[: K_REJECT_WINDOW * 4] + history.failed_tool_lines
+        )
         if history.read_coverage_summary:
             failure_lines.insert(0, history.read_coverage_summary)
         if self._should_emit_read_only_rejected_hint(
@@ -409,12 +414,48 @@ class ContextBuilder:
             )
         evidence_rows.sort(key=lambda item: (-item[0], -item[1]))
 
+        failed_tool_rows: dict[tuple[str, str], tuple[int, int, dict[str, object]]] = {}
+        min_failed_loop = current_loop_id - K_REJECT_WINDOW
+        for row in self.repo.list_failed_tool_call_evidence(task_id):
+            failed_loop = _coerce_loop_id(row.get("loop_id"))
+            if failed_loop is None:
+                continue
+            if not (min_failed_loop <= failed_loop < current_loop_id):
+                continue
+            if failed_loop not in rejected_loop_ids:
+                continue
+            payload_raw = row.get("payload")
+            if not isinstance(payload_raw, dict):
+                continue
+            payload = dict(payload_raw)
+            if str(payload.get("agent_id", "")) != agent_id:
+                continue
+            signature = (
+                str(payload.get("tool_name", "")),
+                str(payload.get("args_summary", "")),
+            )
+            previous = failed_tool_rows.get(signature)
+            count = previous[1] + 1 if previous else 1
+            failed_tool_rows[signature] = (failed_loop, count, payload)
+        failed_tool_lines = [
+            summarize_failed_tool_call(
+                payload,
+                failed_loop,
+                repeat_count=count,
+                max_chars=MAX_LINE_CHARS,
+            )
+            for failed_loop, count, payload in sorted(
+                failed_tool_rows.values(), key=lambda entry: (-entry[0], -entry[1])
+            )
+        ][:MAX_FAILED_TOOL_LINES]
+
         return _LoopHistorySlice(
             rejected_lines=rejected_lines,
             successful_evidence_ids=[row[2] for row in evidence_rows],
             successful_evidence_lines=[row[3] for row in evidence_rows],
             read_coverage_summary=_render_read_coverage(read_coverage),
             last_self_summary=last_summary,
+            failed_tool_lines=failed_tool_lines,
         )
 
     def _prior_handoff_summary(

@@ -975,3 +975,43 @@ def test_no_suffix_when_check_failed_only_once() -> None:
     _seed_reject_with_details(repo, 1, {"H-1": "exit=1"})
     history = builder._loop_history("t1", "execution_worker_v1", 2)
     assert not any("UNCHANGED" in line or "CHANGED" in line for line in history.rejected_lines)
+
+
+def test_failed_tool_calls_surface_in_history() -> None:
+    repo = InMemoryRepository()
+    builder = ContextBuilder(repo, _EmptyReader())
+    _seed_reject_with_details(repo, 1, {"H-1": "exit=1"})
+    for _ in range(2):
+        repo.save_tool_call_as_evidence(
+            task_id="t1",
+            loop_id=1,
+            agent_id="execution_worker_v1",
+            tool_name="patch_file",
+            args_summary="path=sheet.py",
+            result_summary="no_match: context not found",
+            success=False,
+            elapsed_ms=5,
+        )
+    history = builder._loop_history("t1", "execution_worker_v1", 2)
+    assert any(
+        "FAILED tool_call patch_file" in line and "(x2 identical failures)" in line
+        for line in history.failed_tool_lines
+    )
+
+
+def test_failed_tool_calls_from_committed_loops_are_ignored() -> None:
+    repo = InMemoryRepository()
+    builder = ContextBuilder(repo, _EmptyReader())
+    # No rejected trace for loop 1 -> loop 1 is not in the rejected window.
+    repo.save_tool_call_as_evidence(
+        task_id="t1",
+        loop_id=1,
+        agent_id="execution_worker_v1",
+        tool_name="patch_file",
+        args_summary="path=a.py",
+        result_summary="no_match",
+        success=False,
+        elapsed_ms=5,
+    )
+    history = builder._loop_history("t1", "execution_worker_v1", 2)
+    assert history.failed_tool_lines == []
