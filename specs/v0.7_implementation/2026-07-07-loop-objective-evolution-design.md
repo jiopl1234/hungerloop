@@ -317,3 +317,63 @@ set and no additional skips, xfails, ignores, or `-k` workarounds:
 - `specs/v0.7_placeholders/services_yaml_rich_semantics.md` - not
   delivered (future work).
 - `specs/v0.7_placeholders/web_ui.md` - not delivered (v0.8+ future work).
+
+## 9. Post-GA hardening delta (2026-07-12 → 2026-07-16)
+
+Bench-driven hardening commits (`c93df26`, `8b6c894`, plus follow-up
+fixes) extended the delivered scope. Strict I-3 remains the default; a
+regression is never cleared without fresh passing evidence, and none of
+the additions below use score in any decision.
+
+### Worker repair convergence
+
+- `read_file` accepts `offset`/`limit` (1-based, default 200 lines, max
+  400) and labels results `[lines X-Y of N]`; successful reads persist a
+  capped `output_excerpt` in evidence.
+- `patch_file` accepts optional `start_line`/`end_line` anchors and a
+  whitespace-normalized fallback match. The fallback requires an anchor
+  or a multi-line `old_text`, preserves per-line source indentation, and
+  rejects (rather than guesses) when the replacement changes line count
+  or intended indentation.
+- Read-only stalls are bounded mechanically: after two consecutive
+  non-writing action batches (empty batches count) with no successful
+  write in the loop, further non-writing actions are refused with
+  `read_only_budget_exhausted`. `WORKER_READ_ONLY_STREAK` events record
+  per-agent streaks across loops.
+- Rejected-candidate continuation: an uncommitted prior candidate tree
+  may seed the next loop's candidate (never `best/`, preserving I-4).
+  Gated by `rejected_candidate_continuation_enabled` (default `True`)
+  and `rejected_candidate_continuation_max_chain` (default `2`);
+  abandoned when the same regression key repeats across consecutive
+  rejected loops. Events: `CANDIDATE_CONTINUATION_SEEDED` /
+  `CANDIDATE_CONTINUATION_SKIPPED`.
+- Regression confirmation: `regression_confirm_reruns` (default `2`)
+  re-runs each regressed check; the regression is cleared only when
+  every rerun passes (the first failing rerun stops the spend). The
+  clearing event is `CHECK_REGRESSION_DISCONFIRMED` (renamed from the
+  misleading `check_regression_reconfirmed`).
+
+### Synthesized-check validity
+
+- The proposal gate statically `compile()`s `python -c` snippets
+  (`argv[1] == "-c"` only) and classifies dry-run failures
+  (`syntax_error`/`setup_error`/`timeout`) from the terminal stderr line
+  of non-zero exits, rejecting `assertion_not_executable` proposals.
+- Baseline validation only reconciles regressions after verifying the
+  validated workspace matches the recorded best manifest
+  (`SYNTH_BASELINE_IDENTITY_MISMATCH` otherwise); the rewritten
+  effective report is persisted with a distinct id alongside the raw
+  report. Every writer of `best/files` (promote, mission-state
+  regeneration, refactor rollback) rebuilds `best/manifest.json` so the
+  identity check stays truthful.
+- Post-commit synthesis backfill stops early on zero actionable yield
+  (`SYNTHESIS_BACKFILL_STOPPED`), and the synthesis model is selectable
+  via `HUNGERLOOP_SYNTHESIS_MODEL` (default `glm-5.2`).
+
+### Policy additions
+
+| Flag | Default | Effect |
+|------|---------|--------|
+| `regression_confirm_reruns` | `2` | Reruns required to clear a regressed check; every rerun must pass |
+| `rejected_candidate_continuation_enabled` | `True` | Seed next candidate from the prior rejected tree |
+| `rejected_candidate_continuation_max_chain` | `2` | Consecutive continuation limit before reset to best |
