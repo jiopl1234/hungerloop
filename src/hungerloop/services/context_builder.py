@@ -14,6 +14,7 @@ from hungerloop.models.enums import CompletionMode, EvidenceType
 from hungerloop.models.events import EventType
 from hungerloop.models.hunger import AcceptanceCheck
 from hungerloop.models.planning import Assignment, BudgetAllocation
+from hungerloop.models.validation import CheckResult
 from hungerloop.models.worker import WorkerHandoff
 from hungerloop.repository.evidence_success import is_successful_evidence_payload
 from hungerloop.repository.protocol import RepositoryProtocol
@@ -66,6 +67,11 @@ def _format_check(check: AcceptanceCheck) -> str:
     except (TypeError, ValueError):
         params_blob = str(check.params)
     return f"{desc} [{check.check_type.value} params={params_blob}]"
+
+
+def _normalize_ws(text: str) -> str:
+    """Collapse all whitespace runs so trend comparison ignores formatting."""
+    return " ".join(text.split())
 
 
 @dataclass(frozen=True)
@@ -299,7 +305,8 @@ class ContextBuilder:
         traces = self.repo.list_loop_traces(task_id)
 
         rejected_lines: list[str] = []
-        seen_failed_check_keys: set[str] = set()
+        newest_failed: dict[str, tuple[int, CheckResult]] = {}
+        prior_failed_detail: dict[str, tuple[int, str]] = {}
         rejected = [
             trace
             for trace in traces
@@ -313,16 +320,45 @@ class ContextBuilder:
             if report is None:
                 continue
             for check in report.check_results:
-                if check.passed or check.check_key in seen_failed_check_keys:
+                if check.passed:
                     continue
-                seen_failed_check_keys.add(check.check_key)
-                rejected_lines.append(
-                    summarize_failed_check(
-                        check,
+                if check.check_key not in newest_failed:
+                    newest_failed[check.check_key] = (trace.loop_id, check)
+                elif check.check_key not in prior_failed_detail:
+                    prior_failed_detail[check.check_key] = (
                         trace.loop_id,
-                        max_chars=MAX_FAILED_CHECK_CHARS,
+                        check.detail or "",
                     )
+        for check_key, (failed_loop_id, check) in newest_failed.items():
+            # Trend suffix: compare this check's newest failure output with
+            # its previous occurrence in the window. UNCHANGED means the
+            # last attempt did not move this check's outcome at all;
+            # CHANGED preserves the prior output head so the worker can see
+            # what its fix altered. Deliberately mechanical wording — the
+            # right move is often the SAME approach with a corrected edit.
+            suffix = ""
+            prior = prior_failed_detail.get(check_key)
+            if prior is not None:
+                prior_loop_id, prior_detail = prior
+                if _normalize_ws(check.detail or "") == _normalize_ws(prior_detail):
+                    suffix = (
+                        f" [failure output UNCHANGED since loop {prior_loop_id} — "
+                        "the previous attempt did not change this check's outcome]"
+                    )
+                else:
+                    was = _clip_required(_normalize_ws(prior_detail), 120)
+                    suffix = (
+                        f" [failure output CHANGED since loop {prior_loop_id}; "
+                        f"was: {was}]"
+                    )
+            rejected_lines.append(
+                summarize_failed_check(
+                    check,
+                    failed_loop_id,
+                    max_chars=max(200, MAX_FAILED_CHECK_CHARS - len(suffix)),
                 )
+                + suffix
+            )
 
         committed_loop_ids = {trace.loop_id for trace in traces if trace.committed}
         rejected_loop_ids = {

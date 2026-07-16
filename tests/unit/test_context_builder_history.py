@@ -905,3 +905,73 @@ def test_apply_history_cap_does_not_assert_when_static_block_exceeds_cap() -> No
     assert failure_lines == []
     assert info.dropped_evidence == 0
     assert info.dropped_failures == 0
+
+
+def _seed_reject_with_details(
+    repo: InMemoryRepository, loop_id: int, details: dict[str, str]
+) -> None:
+    report = ValidationReport(
+        id=f"VAL-t1-{loop_id}",
+        task_id="t1",
+        loop_id=loop_id,
+        candidate_state_id=f"cand-{loop_id}",
+        baseline_state_id=None,
+        verdict=ValidationVerdict.FAIL,
+        check_results=[
+            CheckResult(
+                hunger_item_id=item_id,
+                check_index=0,
+                check_key=f"{item_id}:0",
+                check_type=AcceptanceCheckType.SHELL_EXIT_ZERO,
+                passed=False,
+                detail=detail,
+            )
+            for item_id, detail in details.items()
+        ],
+    )
+    repo.save_validation_report(report)
+    repo.save_loop_trace(
+        LoopTrace(
+            task_id="t1",
+            loop_id=loop_id,
+            phase="explore",
+            active_hunger=1.0,
+            drive_budget=1.0,
+            work_pressure=1.0,
+            validation_report_id=report.id,
+            committed=False,
+        )
+    )
+
+
+class _EmptyReader:
+    def list_workspace_files(
+        self, task_id: str, *, ref: str, loop_id: int | None = None
+    ) -> list[str]:
+        return []
+
+
+def test_failure_trend_suffixes() -> None:
+    repo = InMemoryRepository()
+    builder = ContextBuilder(repo, _EmptyReader())
+    _seed_reject_with_details(
+        repo, 1, {"H-1": "exit=1 AssertionError in _recalc", "H-2": "ImportError: sheet"}
+    )
+    # H-1 detail identical modulo whitespace -> UNCHANGED; H-2 differs -> CHANGED
+    _seed_reject_with_details(
+        repo, 2, {"H-1": "exit=1  AssertionError   in _recalc", "H-2": "AssertionError: rows"}
+    )
+    history = builder._loop_history("t1", "execution_worker_v1", 3)
+    h1_line = next(line for line in history.rejected_lines if "H-1:0" in line)
+    h2_line = next(line for line in history.rejected_lines if "H-2:0" in line)
+    assert "failure output UNCHANGED since loop 1" in h1_line
+    assert "failure output CHANGED since loop 1" in h2_line
+    assert "was: ImportError: sheet" in h2_line
+
+
+def test_no_suffix_when_check_failed_only_once() -> None:
+    repo = InMemoryRepository()
+    builder = ContextBuilder(repo, _EmptyReader())
+    _seed_reject_with_details(repo, 1, {"H-1": "exit=1"})
+    history = builder._loop_history("t1", "execution_worker_v1", 2)
+    assert not any("UNCHANGED" in line or "CHANGED" in line for line in history.rejected_lines)
