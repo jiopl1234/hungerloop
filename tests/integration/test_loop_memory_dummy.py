@@ -61,9 +61,19 @@ async def test_loop_memory_dummy_propagates_failure_to_next_prompt(
     _seed(repo)
     dummy = CapturingDummyClient(
         [
+            # Loop 1 writes + verifies a NON-acceptance file so the worker's
+            # inner self-repair loop hands off after one model call, yet
+            # FILE_EXISTS hello.txt still fails -> loop 1 is rejected and its
+            # failure becomes prior-loop context for loop 2.
             _response(
                 "explore",
-                [{"tool_name": "run_shell", "args": {"argv": ["ls", "-la"]}}],
+                [
+                    {
+                        "tool_name": "write_file",
+                        "args": {"path": "notes.txt", "content": "noted"},
+                    },
+                    {"tool_name": "run_shell", "args": {"argv": ["true"]}},
+                ],
             ),
             _response(
                 "write hello",
@@ -71,7 +81,8 @@ async def test_loop_memory_dummy_propagates_failure_to_next_prompt(
                     {
                         "tool_name": "write_file",
                         "args": {"path": "hello.txt", "content": "hi"},
-                    }
+                    },
+                    {"tool_name": "run_shell", "args": {"argv": ["true"]}},
                 ],
             ),
         ]
