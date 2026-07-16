@@ -1,8 +1,8 @@
-# HungerLoop v0.6.0
+# HungerLoop v0.7.0
 
 基于"check 级别提交"和"饥饿度预算"的 Python 异步 Agent 迭代循环框架。v0.6 增加 mission runtime：多 feature 拓扑规划、结构化 worker handoff、三阶段验证流水线、SQLite→artifact 单向镜像以及 mission CLI。
 
-> **状态**：v0.6.0 — Mission runtime GA。CLI 默认打开 `hungerloop.sqlite`，支持跨进程恢复 dummy 运行，并完整保留 v0.5f 的 I-3..I-10 不变量。
+> **状态**：v0.7.0 — Mission runtime GA。CLI 默认打开 `hungerloop.sqlite`，支持跨进程恢复 dummy 运行，并完整保留 v0.5f 的 I-3..I-10 不变量。
 
 ---
 
