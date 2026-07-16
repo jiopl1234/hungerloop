@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sqlite3
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -132,6 +133,47 @@ def test_get_last_worker_result_falls_back_to_legacy_storage(
     repo.save_worker_result(legacy)
 
     assert repo.get_last_worker_result("task-1", "execution_worker_v1", 3) == legacy
+
+
+def test_delete_worker_handoffs_removes_only_that_loop(repo: RepoUnderTest) -> None:
+    repo.save_worker_handoff(_make_worker_handoff(loop_id=1))
+    repo.save_worker_handoff(
+        _make_worker_handoff(loop_id=1, agent_id="research_worker_v1")
+    )
+    repo.save_worker_handoff(_make_worker_handoff(loop_id=2))
+
+    repo.delete_worker_handoffs("task-1", 1)
+
+    remaining = repo.list_worker_handoffs("task-1")
+    assert [handoff.loop_id for handoff in remaining] == [2]
+
+
+def test_sqlite_delete_clears_deterministic_id_collision(tmp_path: Path) -> None:
+    """v0.7.2 draft sampling: a k>=2 loop re-runs the worker pass under one
+    loop_id, so the deterministic handoff primary key collides on re-insert.
+    delete_worker_handoffs must clear the loop's rows so the winner re-persists.
+    """
+    repo = SQLiteRepository.open(tmp_path / "hungerloop.sqlite")
+    repo.create_task("task-1", "Goal")
+    fixed_id = "WH-task-1-1-ASGN-task-1-1-0"
+    first = _make_worker_handoff(loop_id=1, summary="draft-1").model_copy(
+        update={"handoff_id": fixed_id}
+    )
+    repo.save_worker_handoff(first)
+
+    second = _make_worker_handoff(loop_id=1, summary="draft-2").model_copy(
+        update={"handoff_id": fixed_id}
+    )
+    # This is exactly the crash a k>=2 draft loop hit before the fix.
+    with pytest.raises(sqlite3.IntegrityError):
+        repo.save_worker_handoff(second)
+
+    repo.delete_worker_handoffs("task-1", 1)
+    repo.save_worker_handoff(second)
+
+    rows = repo.list_worker_handoffs("task-1")
+    assert [handoff.summary for handoff in rows] == ["draft-2"]
+    repo.close()
 
 
 def test_sqlite_save_worker_handoff_persists_payload_json(tmp_path: Path) -> None:

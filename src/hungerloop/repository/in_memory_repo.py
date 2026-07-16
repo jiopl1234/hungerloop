@@ -616,6 +616,22 @@ class InMemoryRepository:
         self._worker_handoff_order.append(handoff_id)
         return handoff_id
 
+    def delete_worker_handoffs(self, task_id: str, loop_id: int) -> None:
+        """Remove all persisted handoff rows for one loop (v0.7.2 draft sampling)."""
+        doomed = [
+            handoff_id
+            for handoff_id in self._worker_handoff_order
+            if self._worker_handoffs[handoff_id].task_id == task_id
+            and self._worker_handoffs[handoff_id].loop_id == loop_id
+        ]
+        for handoff_id in doomed:
+            del self._worker_handoffs[handoff_id]
+        self._worker_handoff_order = [
+            handoff_id
+            for handoff_id in self._worker_handoff_order
+            if handoff_id not in set(doomed)
+        ]
+
     def save_handoff_processing_result(
         self,
         task_id: str,

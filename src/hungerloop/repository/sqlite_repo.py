@@ -958,6 +958,13 @@ class SQLiteRepository:
         )
         return handoff_id
 
+    def delete_worker_handoffs(self, task_id: str, loop_id: int) -> None:
+        """Remove all persisted handoff rows for one loop (v0.7.2 draft sampling)."""
+        self.conn.execute(
+            "DELETE FROM worker_handoffs WHERE task_id = ? AND loop_id = ?",
+            (task_id, loop_id),
+        )
+
     def save_handoff_processing_result(
         self,
         task_id: str,

@@ -295,6 +295,16 @@ class RepositoryProtocol(Protocol):
     def save_worker_handoff(self, handoff: WorkerHandoff) -> str: ...
     """New in v0.6 M2 (REQ-M2-010): persist a WorkerHandoff row."""
 
+    def delete_worker_handoffs(self, task_id: str, loop_id: int) -> None: ...
+    """New in v0.7.2: delete all persisted handoff rows for one loop.
+
+    Cold-start draft sampling re-runs the worker pass up to k times under
+    the same ``loop_id``; each run persists a handoff whose deterministic
+    id (``WH-<task_id>-<loop_id>-<assignment_id>``) is the table primary
+    key, so the prior run's rows must be cleared before the next run — and
+    the loop's rows re-cleared before re-persisting only the winner's — to
+    avoid a PRIMARY KEY collision on the SQLite backend."""
+
     def save_handoff_processing_result(
         self,
         task_id: str,

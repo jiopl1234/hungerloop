@@ -318,6 +318,11 @@ class LoopOrchestrator:
                 # Independence: clear cross-loop replay and re-seed the
                 # canonical candidate tree from best/ (+ mission seed).
                 self.worker_runtime.reset_inner_replay(task_id)
+                # Drop the prior draft's persisted handoff rows so this
+                # draft's re-run cannot collide on the deterministic handoff
+                # primary key (WH-<task>-<loop>-<assignment>) — a hard
+                # IntegrityError on the SQLite backend.
+                self.repo.delete_worker_handoffs(task_id, loop_id)
                 self.workspace_manager.create_candidate_workspace(
                     task_id,
                     loop_id,
@@ -372,6 +377,15 @@ class LoopOrchestrator:
         # The replay cache now holds the LAST draft's actions; drop it so
         # the next loop does not replay a discarded loser.
         self.worker_runtime.reset_inner_replay(task_id)
+        # Persisted handoff rows currently hold whichever draft ran last;
+        # replace them with exactly the winner's so the loop leaves the same
+        # state a single-draft run would (downstream _save_and_emit_handoffs
+        # skips handoffs that already carry an id, so a loser's handoff can
+        # otherwise feed the next loop's planning context). The delete also
+        # averts a PRIMARY KEY collision on re-insert.
+        self.repo.delete_worker_handoffs(task_id, loop_id)
+        for handoff in winner_result.handoffs:
+            self.repo.save_worker_handoff(handoff)
         self.repo.append_event(
             EventType.DRAFT_SAMPLED,
             {

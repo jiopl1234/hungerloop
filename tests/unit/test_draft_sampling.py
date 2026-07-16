@@ -91,16 +91,27 @@ def _make_orchestrator(
     return orchestrator, repo, workspace_manager
 
 
-def _make_scheduler_result() -> Any:
+# Deterministic per-loop handoff primary key, exactly as
+# worker_scheduler._persist_handoff builds it (retry_count=0):
+# WH-<task>-<loop>-<assignment_id>.
+_HANDOFF_ID = "WH-t1-1-ASGN-t1-1-0"
+
+
+def _persist_draft_handoff(repo: InMemoryRepository, summary: str) -> Any:
+    """Mirror worker_scheduler._persist_handoff: persist a handoff carrying
+    the deterministic per-loop id so the draft primary-key collision class
+    is exercised (each draft re-runs under the same loop_id)."""
     from hungerloop.services.worker_scheduler import SchedulerResult
 
     handoff = WorkerHandoff(
         agent_id="execution_worker_v1",
         task_id="t1",
         loop_id=1,
-        summary="draft",
+        summary=summary,
         evidence_ids=["ev"],
+        handoff_id=_HANDOFF_ID,
     )
+    repo.save_worker_handoff(handoff)
     return SchedulerResult(handoffs=[handoff], skipped_ids=[])
 
 
@@ -162,8 +173,9 @@ async def test_draft_sampling_selects_best_draft(
     draft_outputs = iter(["draft one", "draft two", "draft three"])
 
     async def fake_run_assignments(**kwargs: Any) -> Any:
-        (files / "a.py").write_text(next(draft_outputs), encoding="utf-8")
-        return _make_scheduler_result()
+        summary = next(draft_outputs)
+        (files / "a.py").write_text(summary, encoding="utf-8")
+        return _persist_draft_handoff(repo, summary)
 
     reports = iter(
         [
@@ -198,6 +210,12 @@ async def test_draft_sampling_selects_best_draft(
     assert payload["requested_k"] == 3
     assert payload["draft_count"] == 3
     assert len(payload["per_draft"]) == 3
+    # Important defect: the persisted handoff rows for the loop must hold
+    # exactly the WINNER's handoff (draft two), never the last draft's
+    # (draft three) — otherwise a discarded loser would feed next-loop
+    # planning. The collision-safe delete keeps the row set clean too.
+    handoffs = repo.list_worker_handoffs(task_id)
+    assert [handoff.summary for handoff in handoffs] == ["draft two"]
 
 
 async def test_draft_sampling_short_circuits_on_identical_content(
@@ -211,7 +229,7 @@ async def test_draft_sampling_short_circuits_on_identical_content(
     async def fake_run_assignments(**kwargs: Any) -> Any:
         # Identical bytes every draft — a deterministic provider.
         (files / "a.py").write_text("same content", encoding="utf-8")
-        return _make_scheduler_result()
+        return _persist_draft_handoff(repo, "same content")
 
     async def fake_pipeline_run(**kwargs: Any) -> ValidationPipelineResult:
         return _pipeline_result(_report(loop_id, newly_passed=["H-1:0"]))
@@ -236,3 +254,6 @@ async def test_draft_sampling_short_circuits_on_identical_content(
     assert payload["requested_k"] == 3
     assert payload["draft_count"] == 1
     assert payload["winner_draft_index"] == 1
+    # Exactly one persisted handoff row survives (the winner's), despite the
+    # per-draft re-persist under the same deterministic id.
+    assert len(repo.list_worker_handoffs(task_id)) == 1
