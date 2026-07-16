@@ -47,6 +47,12 @@ from hungerloop.repository.migration_errors import IllegalPhaseTransition
 from hungerloop.repository.protocol import RepositoryProtocol
 from hungerloop.services.budget_allocator import BudgetAllocator
 from hungerloop.services.commit_manager import CommitManager
+from hungerloop.services.commit_selection import (
+    CandidateEvaluation,
+    evaluation_from_validation_report,
+    select_commit_candidate,
+    select_fallback_base,
+)
 from hungerloop.services.context_builder import ContextBuilder
 from hungerloop.services.cost_guard import SafetyStopError
 from hungerloop.services.handoff_processor import HandoffProcessor
@@ -133,6 +139,26 @@ def _mission_workspace_seed_source(mission: Mission | None) -> Path | None:
     if not isinstance(source, str) or not source.strip():
         return None
     return Path(source).expanduser()
+
+
+def _should_draft_sample(
+    *,
+    draft_sampling_k: int,
+    has_assignments: bool,
+    accepted_check_keys: list[str],
+    prior_trace_count: int,
+) -> bool:
+    """Cold-start gate for draft sampling (v0.7.2).
+
+    Restricted to the task's first-ever loop: no prior traces and no
+    accepted checks. Mid-mission draft loops would multiply I-5
+    regression validation by k — explicitly out of scope (see plan).
+    """
+    if draft_sampling_k <= 1 or not has_assignments:
+        return False
+    if accepted_check_keys:
+        return False
+    return prior_trace_count == 0
 
 
 def _validation_pipeline_trace(
@@ -262,6 +288,115 @@ class LoopOrchestrator:
             return self._emit_error_stop(
                 task_id, exc, loop_id=self._current_loop_id
             )
+
+    async def _run_draft_sampling(
+        self,
+        *,
+        task_id: str,
+        loop_id: int,
+        plan: LoopPlan,
+        budget: BudgetAllocation,
+        draft_k: int,
+        mission: Mission | None,
+    ) -> SchedulerResult:
+        """AIDE-style cold-start drafting (v0.7.2, R2).
+
+        Runs the worker pass up to ``draft_k`` times, each into a freshly
+        re-seeded candidate workspace, validates each draft with the
+        deterministic pipeline for SELECTION ONLY, and restores the
+        score-free winner. The caller then re-enters the unchanged
+        handoff → integrate → validate → commit path with the winner's
+        scheduler result, so I-3/I-4/I-5 are enforced by the same gates
+        as a single-draft loop. Losers' handoffs are never processed;
+        their trees survive as candidates/loop_NNN/draft_JJ/ for audit.
+        """
+        validation_phase = self._phase_for_validation(mission, plan)
+        drafts: list[tuple[int, SchedulerResult, CandidateEvaluation]] = []
+        previous_hashes: dict[str, str] | None = None
+        for draft_index in range(1, draft_k + 1):
+            if draft_index > 1:
+                # Independence: clear cross-loop replay and re-seed the
+                # canonical candidate tree from best/ (+ mission seed).
+                self.worker_runtime.reset_inner_replay(task_id)
+                self.workspace_manager.create_candidate_workspace(
+                    task_id,
+                    loop_id,
+                    seed_source_dir=_mission_workspace_seed_source(mission),
+                )
+            scheduler_result = await self._run_assignments(
+                task_id=task_id,
+                loop_id=loop_id,
+                plan=plan,
+                budget=budget,
+            )
+            current_hashes = self.workspace_manager.candidate_files_hashes(
+                task_id, loop_id
+            )
+            if previous_hashes is not None and current_hashes == previous_hashes:
+                # Deterministic-provider short-circuit: this draft
+                # reproduced the previous one byte-for-byte; further
+                # samples are pure waste (dummy provider, temp-0 configs).
+                break
+            previous_hashes = current_hashes
+            probe = self.integrator.integrate(
+                task_id,
+                loop_id,
+                [handoff.as_worker_result() for handoff in scheduler_result.handoffs],
+            )
+            attempted = self._attempted_hunger_item_ids(
+                plan, skipped_ids=scheduler_result.skipped_ids
+            )
+            pipeline_result = await self.validation_pipeline.run(
+                task_id=task_id,
+                loop_id=loop_id,
+                candidate=probe,
+                target_hunger_item_ids=attempted,
+                mission=mission,
+                phase=validation_phase,
+                budget=budget,
+            )
+            evaluation = evaluation_from_validation_report(
+                f"{probe.id}-d{draft_index}",
+                pipeline_result.deterministic_report,
+            )
+            self.workspace_manager.archive_draft(task_id, loop_id, draft_index)
+            drafts.append((draft_index, scheduler_result, evaluation))
+
+        evaluations = [entry[2] for entry in drafts]
+        gate_winner = select_commit_candidate(evaluations)
+        winner_eval = gate_winner or select_fallback_base(evaluations)
+        winner_index, winner_result, _ = next(
+            entry for entry in drafts if entry[2] is winner_eval
+        )
+        self.workspace_manager.restore_draft(task_id, loop_id, winner_index)
+        # The replay cache now holds the LAST draft's actions; drop it so
+        # the next loop does not replay a discarded loser.
+        self.worker_runtime.reset_inner_replay(task_id)
+        self.repo.append_event(
+            EventType.DRAFT_SAMPLED,
+            {
+                "loop_id": loop_id,
+                "requested_k": draft_k,
+                "draft_count": len(drafts),
+                "winner_draft_index": winner_index,
+                "winner_passes_gate": gate_winner is not None,
+                "per_draft": [
+                    {
+                        "draft_index": index,
+                        "candidate_id": evaluation["candidate_id"],
+                        "newly_passed": sorted(
+                            set(evaluation["newly_passed_check_keys"])
+                        ),
+                        "failing_count": len(set(evaluation["failing_check_keys"])),
+                        "verdict": evaluation["verdict"].value,
+                    }
+                    for index, _, evaluation in drafts
+                ],
+            },
+            task_id=task_id,
+            loop_id=loop_id,
+        )
+        return winner_result
 
     async def _step_inner(self, task_id: str) -> LoopTrace | StopReport:
         policy = self.repo.get_hunger_policy(task_id)
@@ -445,12 +580,29 @@ class LoopOrchestrator:
             )
 
         try:
-            scheduler_result = await self._run_assignments(
-                task_id=task_id,
-                loop_id=loop_id,
-                plan=plan,
-                budget=budget,
-            )
+            if _should_draft_sample(
+                draft_sampling_k=policy.draft_sampling_k,
+                has_assignments=bool(plan.assignments),
+                accepted_check_keys=(
+                    list(best_before.accepted_check_keys) if best_before else []
+                ),
+                prior_trace_count=len(self.repo.list_loop_traces(task_id)),
+            ):
+                scheduler_result = await self._run_draft_sampling(
+                    task_id=task_id,
+                    loop_id=loop_id,
+                    plan=plan,
+                    budget=budget,
+                    draft_k=policy.draft_sampling_k,
+                    mission=mission,
+                )
+            else:
+                scheduler_result = await self._run_assignments(
+                    task_id=task_id,
+                    loop_id=loop_id,
+                    plan=plan,
+                    budget=budget,
+                )
         except SafetyStopError:
             self.workspace_manager.reject_candidate(task_id, loop_id)
             self.repo.append_event(
