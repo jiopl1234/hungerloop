@@ -258,17 +258,24 @@ def _count_active_synthesized_items(
     ledger_task_id: str,
     repo: RepositoryProtocol,
 ) -> int:
-    """Count unresolved synthesizer-owned items for backpressure."""
+    """Count unresolved synthesizer-owned items for backpressure.
+
+    BLOCKED items are excluded: a never-pass synthesized item that the
+    StagnationDetector blocks must not hold an active slot forever
+    (spreadsheet-01 residual gap — the slot leak starved all later
+    synthesis with ``synthesis_active_item_limit_reached``).
+    """
     ledger = repo.get_hunger_ledger(ledger_task_id)
-    terminal = {
+    non_occupying = {
         HungerItemStatus.CLOSED,
         HungerItemStatus.VALIDATED_SATISFIED,
+        HungerItemStatus.BLOCKED,
     }
     return sum(
         1
         for item in ledger.items
         if item.generated_by == "synthesizer"
-        and item.status not in terminal
+        and item.status not in non_occupying
         and item.gap_score > 0
     )
 

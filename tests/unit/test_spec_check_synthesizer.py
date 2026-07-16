@@ -12,7 +12,7 @@ from typing import Any
 
 import pytest
 
-from hungerloop.models.enums import AcceptanceCheckType
+from hungerloop.models.enums import AcceptanceCheckType, HungerItemStatus
 from hungerloop.models.events import EventType
 from hungerloop.models.hunger import (
     AcceptanceCheck,
@@ -30,6 +30,7 @@ from hungerloop.services.refinement_compiler import RefinementCompiler
 from hungerloop.services.spec_check_synthesizer import (
     SYNTHESIS_MAX_TOKENS,
     SpecCheckSynthesizer,
+    _count_active_synthesized_items,
     build_covered_check_digest,
     build_synthesis_prompt,
     run_plan_time_synthesis,
@@ -992,6 +993,37 @@ class TestCoveredCheckDigest:
         )
 
         assert "rejected proposal: file_exists:rejected.txt" in digest
+
+
+# ---------------------------------------------------------------------------
+# Slot leak fix: BLOCKED items do not occupy active synthesis slots
+# ---------------------------------------------------------------------------
+
+
+def _syn_item(item_id: str, status: HungerItemStatus) -> HungerItem:
+    return HungerItem(
+        id=item_id,
+        title=item_id,
+        status=status,
+        gap_score=1.0,
+        generated_by="synthesizer",
+    )
+
+
+def test_blocked_synthesized_item_frees_active_slot() -> None:
+    repo = InMemoryRepository()
+    repo.save_hunger_ledger(
+        "t1",
+        HungerLedger(
+            task_id="t1",
+            items=[
+                _syn_item("H-SYN-001", HungerItemStatus.OPEN),
+                _syn_item("H-SYN-002", HungerItemStatus.BLOCKED),
+                _syn_item("H-SYN-003", HungerItemStatus.CLOSED),
+            ],
+        ),
+    )
+    assert _count_active_synthesized_items("t1", repo) == 1
 
 
 # ---------------------------------------------------------------------------
