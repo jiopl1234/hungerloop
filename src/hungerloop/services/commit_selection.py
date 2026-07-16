@@ -22,6 +22,7 @@ from __future__ import annotations
 from typing import TypedDict
 
 from hungerloop.models.enums import ValidationVerdict
+from hungerloop.models.validation import ValidationReport
 
 
 class CandidateEvaluation(TypedDict):
@@ -108,3 +109,49 @@ def select_commit_candidate(
 
     passing.sort(key=sort_key)
     return passing[0]
+
+
+def evaluation_from_validation_report(
+    candidate_id: str,
+    report: ValidationReport,
+) -> CandidateEvaluation:
+    """Adapt a deterministic ValidationReport into a CandidateEvaluation.
+
+    ``score`` is filled with 0.0 — it is schema-only and never read by
+    selection (VAL-REF-006).
+    """
+    failing = [
+        result.check_key for result in report.check_results if not result.passed
+    ]
+    return CandidateEvaluation(
+        candidate_id=candidate_id,
+        newly_passed_check_keys=list(report.newly_passed_check_keys),
+        failing_check_keys=failing,
+        regressed_check_keys=list(report.regressed_check_keys),
+        missing_evidence=list(report.missing_evidence),
+        verdict=report.verdict,
+        score=0.0,
+    )
+
+
+def select_fallback_base(
+    evaluations: list[CandidateEvaluation],
+) -> CandidateEvaluation | None:
+    """Score-free canonical choice when NO evaluation passes the I-3 gate.
+
+    Used by cold-start draft sampling to pick which non-committing draft
+    becomes the loop's candidate (and thus the rejected-continuation seed).
+    Ordering mirrors ``select_commit_candidate``: most unique newly-passed
+    keys, fewest unique failing keys, lexicographic id. Never reads score.
+    """
+    if not evaluations:
+        return None
+
+    def sort_key(ev: CandidateEvaluation) -> tuple[int, int, str]:
+        return (
+            -len(set(ev["newly_passed_check_keys"])),
+            len(set(ev["failing_check_keys"])),
+            ev["candidate_id"],
+        )
+
+    return sorted(evaluations, key=sort_key)[0]

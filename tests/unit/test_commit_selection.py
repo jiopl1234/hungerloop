@@ -3,10 +3,13 @@ from __future__ import annotations
 
 import random
 
-from hungerloop.models.enums import ValidationVerdict
+from hungerloop.models.enums import AcceptanceCheckType, ValidationVerdict
+from hungerloop.models.validation import CheckResult, ValidationReport
 from hungerloop.services.commit_selection import (
     CandidateEvaluation,
+    evaluation_from_validation_report,
     select_commit_candidate,
+    select_fallback_base,
 )
 
 
@@ -205,3 +208,75 @@ class TestMixedGate:
         result = select_commit_candidate(evals)
         assert result is not None
         assert result["candidate_id"] == "c2"
+
+
+# -----------------------------------------------------------------------
+# ValidationReport adapter
+# -----------------------------------------------------------------------
+
+class TestEvaluationFromValidationReport:
+    def test_evaluation_from_validation_report(self) -> None:
+        report = ValidationReport(
+            id="VAL-1",
+            task_id="t1",
+            loop_id=1,
+            candidate_state_id="cand-1",
+            baseline_state_id=None,
+            verdict=ValidationVerdict.PARTIAL,
+            check_results=[
+                CheckResult(
+                    hunger_item_id="H-1",
+                    check_index=0,
+                    check_key="H-1:0",
+                    check_type=AcceptanceCheckType.SHELL_EXIT_ZERO,
+                    passed=True,
+                    detail="ok",
+                ),
+                CheckResult(
+                    hunger_item_id="H-2",
+                    check_index=0,
+                    check_key="H-2:0",
+                    check_type=AcceptanceCheckType.SHELL_EXIT_ZERO,
+                    passed=False,
+                    detail="exit=1",
+                ),
+            ],
+            newly_passed_check_keys=["H-1:0"],
+            regressed_check_keys=[],
+        )
+        evaluation = evaluation_from_validation_report("CAND-t1-1-d1", report)
+        assert evaluation["candidate_id"] == "CAND-t1-1-d1"
+        assert evaluation["newly_passed_check_keys"] == ["H-1:0"]
+        assert evaluation["failing_check_keys"] == ["H-2:0"]
+        assert evaluation["verdict"] is ValidationVerdict.PARTIAL
+        assert evaluation["score"] == 0.0
+
+
+# -----------------------------------------------------------------------
+# Score-free fallback base selection
+# -----------------------------------------------------------------------
+
+class TestSelectFallbackBase:
+    def test_select_fallback_base_prefers_most_progress_then_fewest_failures(self) -> None:
+        def make(
+            candidate_id: str, newly: list[str], failing: list[str]
+        ) -> CandidateEvaluation:
+            return CandidateEvaluation(
+                candidate_id=candidate_id,
+                newly_passed_check_keys=newly,
+                failing_check_keys=failing,
+                regressed_check_keys=["H-9:0"],  # gate-failing on purpose
+                missing_evidence=[],
+                verdict=ValidationVerdict.FAIL,
+                score=0.0,
+            )
+
+        best = select_fallback_base(
+            [
+                make("d1", [], ["a", "b", "c"]),
+                make("d2", ["x"], ["a", "b", "c"]),
+                make("d3", [], ["a"]),
+            ]
+        )
+        assert best is not None and best["candidate_id"] == "d2"
+        assert select_fallback_base([]) is None
