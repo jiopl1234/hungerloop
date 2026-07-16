@@ -165,3 +165,32 @@ def test_promote_missing_candidate_raises(tmp_path: Path) -> None:
     wm.ensure_task_workspace("t1")
     with pytest.raises(FileNotFoundError, match="Candidate workspace"):
         wm.promote_candidate_to_best("t1", loop_id=42)
+
+
+def test_draft_archive_and_restore(tmp_path: Path) -> None:
+    manager = WorkspaceManager(tmp_path)
+    manager.create_candidate_workspace("t1", 1)
+    files = manager.candidate_files_dir("t1", 1)
+    (files / "a.py").write_text("draft one", encoding="utf-8")
+    manager.archive_draft("t1", 1, 1)
+
+    # Second draft overwrites the canonical tree.
+    manager.create_candidate_workspace("t1", 1)
+    (files / "a.py").write_text("draft two", encoding="utf-8")
+    manager.archive_draft("t1", 1, 2)
+
+    manager.restore_draft("t1", 1, 1)
+    assert (files / "a.py").read_text(encoding="utf-8") == "draft one"
+    # Snapshots are retained.
+    assert manager.draft_archive_dir("t1", 1, 2).is_dir()
+
+
+def test_candidate_files_hashes_detects_identical_drafts(tmp_path: Path) -> None:
+    manager = WorkspaceManager(tmp_path)
+    manager.create_candidate_workspace("t1", 1)
+    files = manager.candidate_files_dir("t1", 1)
+    (files / "a.py").write_text("same", encoding="utf-8")
+    first = manager.candidate_files_hashes("t1", 1)
+    manager.create_candidate_workspace("t1", 1)
+    (files / "a.py").write_text("same", encoding="utf-8")
+    assert manager.candidate_files_hashes("t1", 1) == first

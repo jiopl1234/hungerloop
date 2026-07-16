@@ -312,6 +312,51 @@ class WorkspaceManager:
         )
         return True
 
+    def draft_archive_dir(self, task_id: str, loop_id: int, draft_index: int) -> Path:
+        return (
+            self.task_root(task_id)
+            / "candidates"
+            / f"loop_{loop_id:03d}"
+            / f"draft_{draft_index:02d}"
+        )
+
+    def archive_draft(self, task_id: str, loop_id: int, draft_index: int) -> Path:
+        """Snapshot the current candidate files tree as ``draft_JJ/``.
+
+        Snapshots live beside ``files/`` inside the loop directory; they are
+        audit artifacts and are never validated or promoted directly (I-4:
+        only the canonical candidate tree feeds the commit gate).
+        """
+        source = self.candidate_files_dir(task_id, loop_id)
+        destination = self.draft_archive_dir(task_id, loop_id, draft_index)
+        if destination.exists():
+            shutil.rmtree(destination)
+        shutil.copytree(source, destination)
+        return destination
+
+    def restore_draft(self, task_id: str, loop_id: int, draft_index: int) -> None:
+        """Replace the candidate files tree with an archived draft snapshot."""
+        source = self.draft_archive_dir(task_id, loop_id, draft_index)
+        if not source.is_dir():
+            raise FileNotFoundError(f"draft snapshot not found: {source}")
+        destination = self.candidate_files_dir(task_id, loop_id)
+        if destination.exists():
+            shutil.rmtree(destination)
+        shutil.copytree(source, destination)
+        self._write_manifest(
+            task_id=task_id,
+            loop_id=loop_id,
+            path=destination,
+            status="candidate",
+            source_workspace_ref=(
+                f"candidates/loop_{loop_id:03d}/draft_{draft_index:02d}"
+            ),
+        )
+
+    def candidate_files_hashes(self, task_id: str, loop_id: int) -> dict[str, str]:
+        """Content hashes of the current candidate tree (draft short-circuit)."""
+        return _workspace_file_hashes(self.candidate_files_dir(task_id, loop_id))
+
     def workspace_matches_best_manifest(
         self,
         task_id: str,
