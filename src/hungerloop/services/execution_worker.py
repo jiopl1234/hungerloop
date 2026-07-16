@@ -74,6 +74,16 @@ class ExecutionWorker:
         # the span we care about.
         self._inner_replay: dict[tuple[str, str], list[dict[str, str]]] = {}
 
+    def reset_inner_replay(self, task_id: str) -> None:
+        """Drop cross-loop replay state for ``task_id``.
+
+        Draft sampling calls this between samples: without it, draft j+1
+        would replay draft j's stitched action pairs and the samples would
+        not be independent.
+        """
+        for key in [k for k in self._inner_replay if k[0] == task_id]:
+            del self._inner_replay[key]
+
     async def run(
         self, *, context: ContextPack, workspace_root: Path
     ) -> WorkerResult:

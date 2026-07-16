@@ -224,3 +224,46 @@ async def test_tool_not_permitted_maps_to_result(
     assert result.requires_human is False
     assert result.retryable is False
     assert "shell disabled" in (result.error or "")
+
+
+class _FakeWorkerWithReplayReset:
+    """Worker double that also implements `reset_inner_replay`, to verify
+    that `WorkerRuntime.reset_inner_replay` forwards to it."""
+
+    def __init__(self) -> None:
+        self.reset_calls: list[str] = []
+
+    async def run(
+        self, *, context: ContextPack, workspace_root: Path
+    ) -> WorkerResult:
+        return WorkerResult(
+            agent_id=context.agent_id,
+            task_id=context.task_id,
+            loop_id=context.loop_id,
+            summary="ok",
+        )
+
+    def reset_inner_replay(self, task_id: str) -> None:
+        self.reset_calls.append(task_id)
+
+
+def test_reset_inner_replay_forwards_to_workers_that_support_it(
+    repo: InMemoryRepository, cost_guard: CostGuard
+) -> None:
+    worker = _FakeWorkerWithReplayReset()
+    runtime = WorkerRuntime({_AGENT_ID: worker}, cost_guard, BudgetGuard(), repo)
+
+    runtime.reset_inner_replay("t1")
+
+    assert worker.reset_calls == ["t1"]
+
+
+def test_reset_inner_replay_skips_workers_without_the_method(
+    repo: InMemoryRepository, cost_guard: CostGuard
+) -> None:
+    """`_FakeWorker` has no `reset_inner_replay` — forwarding must skip it
+    via the `getattr`/`callable` guard, not raise `AttributeError`."""
+    worker = _FakeWorker()
+    runtime = WorkerRuntime({_AGENT_ID: worker}, cost_guard, BudgetGuard(), repo)
+
+    runtime.reset_inner_replay("t1")  # must not raise

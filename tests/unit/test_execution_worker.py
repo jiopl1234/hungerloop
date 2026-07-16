@@ -94,6 +94,17 @@ async def test_execution_worker_with_no_actions_returns_summary(
     assert result.artifact_ids == []
 
 
+def test_reset_inner_replay_clears_only_the_given_task(tmp_path: Path) -> None:
+    # No `worker` fixture exists in this file; construct via the existing
+    # `_build_worker` factory used by the tests above.
+    worker, _, _ = _build_worker(tmp_path, DummyModelClient())
+    worker._inner_replay[("t1", "agent-a")] = [{"role": "user", "content": "x"}]
+    worker._inner_replay[("t2", "agent-a")] = [{"role": "user", "content": "y"}]
+    worker.reset_inner_replay("t1")
+    assert ("t1", "agent-a") not in worker._inner_replay
+    assert ("t2", "agent-a") in worker._inner_replay
+
+
 async def test_execution_worker_skips_malformed_action(tmp_path: Path) -> None:
     """Non-dict items in the actions list are skipped, not crashing."""
     actions: list[dict[str, object]] = [

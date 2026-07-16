@@ -60,6 +60,13 @@ class WorkerRuntime:
         self.budget_guard = budget_guard
         self.repo = repo
 
+    def reset_inner_replay(self, task_id: str) -> None:
+        """Forward replay reset to every held worker that supports it."""
+        for worker in self.workers.values():
+            reset = getattr(worker, "reset_inner_replay", None)
+            if callable(reset):
+                reset(task_id)
+
     async def run(
         self,
         spec: AgentSpec,
