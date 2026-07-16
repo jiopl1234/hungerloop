@@ -352,3 +352,26 @@ def test_sqlite_round_trip_preserves_v06_fields(tmp_path: Path) -> None:
     assert restored.synthesis_enabled is True
     assert restored.memory_recall_enabled is False
     reopened.close()
+
+
+# ---------------------------------------------------------------------------
+# v0.7.2: draft_sampling_k policy field
+# ---------------------------------------------------------------------------
+
+
+def test_draft_sampling_k_default_off() -> None:
+    assert HungerPolicy().draft_sampling_k == 1
+
+
+def test_draft_sampling_k_bounds() -> None:
+    assert HungerPolicy(draft_sampling_k=5).draft_sampling_k == 5
+    with pytest.raises(ValidationError):
+        HungerPolicy(draft_sampling_k=0)
+    with pytest.raises(ValidationError):
+        HungerPolicy(draft_sampling_k=6)
+
+
+def test_draft_sampling_k_roundtrips_via_payload_json() -> None:
+    policy = HungerPolicy(draft_sampling_k=3)
+    restored = HungerPolicy.model_validate(policy.model_dump(mode="json"))
+    assert restored.draft_sampling_k == 3

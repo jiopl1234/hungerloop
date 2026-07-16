@@ -185,6 +185,10 @@ class HungerPolicy(BaseModel):
     refactor_deadline_loops: int = 3
     memory_auto_promote_enabled: bool = True
     memory_recall_enabled: bool = True
+    # ---- v0.7.2: cold-start draft sampling (default preserves v0.7.1) ----
+    # AIDE-style drafting: on a task's FIRST loop only, sample k independent
+    # candidate drafts and promote the score-free winner. 1 disables.
+    draft_sampling_k: int = 1
 
     @field_validator("synthesis_plan_time_tier")
     @classmethod
@@ -198,6 +202,13 @@ class HungerPolicy(BaseModel):
     def _validate_synthesis_max_total_items(cls, v: int) -> int:
         if v < 0:
             raise ValueError("synthesis_max_total_items must not be negative")
+        return v
+
+    @field_validator("draft_sampling_k")
+    @classmethod
+    def _validate_draft_sampling_k(cls, v: int) -> int:
+        if v < 1 or v > 5:
+            raise ValueError("draft_sampling_k must be between 1 and 5")
         return v
 
     @field_validator(
