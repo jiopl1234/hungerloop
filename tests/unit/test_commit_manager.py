@@ -277,6 +277,15 @@ class _RecordingUpdater:
         self.calls.append((task_id, best_workspace_root))
 
 
+class _MutatingUpdater:
+    """Updater that rewrites a mission artifact inside best/files."""
+
+    def regenerate(self, task_id: str, *, best_workspace_root: Path) -> None:
+        (best_workspace_root / "mission.md").write_text(
+            "# regenerated after commit", encoding="utf-8"
+        )
+
+
 class _FailingUpdater:
     def __init__(self, exc: Exception) -> None:
         self.exc = exc
@@ -345,6 +354,31 @@ def test_mission_commit_regenerates_after_repository_writes(
         "transaction_exit",
     ]
     assert updater.calls == [("t1", ws.best_files_dir("t1"))]
+
+
+def test_mission_commit_refreshes_best_manifest_after_regeneration(
+    repo: MagicMock,
+    ws: WorkspaceManager,
+) -> None:
+    repo.get_mission.return_value = object()
+    candidate_dir = ws.create_candidate_workspace("t1", 1)
+    (candidate_dir / "output.txt").write_text("result", encoding="utf-8")
+
+    cm_with_updater = CommitManager(
+        repo=repo,
+        workspace_manager=ws,
+        mission_state_updater=_MutatingUpdater(),
+    )
+    result = cm_with_updater.apply(
+        _candidate(),
+        _report(newly_passed=["H-001:0"], currently_passed=["H-001:0"]),
+    )
+
+    assert result["committed"] is True
+    # Regeneration mutated best/files after promote wrote the manifest;
+    # the manifest must reflect the live tree or every identity check
+    # (baseline validation, continuation dedup) reports a false mismatch.
+    assert ws.workspace_matches_best_manifest("t1", ws.best_files_dir("t1"))
 
 
 def test_mission_commit_marks_completed_features_before_regeneration(

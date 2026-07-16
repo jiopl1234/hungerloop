@@ -446,24 +446,33 @@ class ContextBuilder:
         if skipped_continuation_events:
             payload = skipped_continuation_events[-1].get("payload")
             reason = payload.get("reason") if isinstance(payload, dict) else "unsafe"
-            repeated = (
-                payload.get("repeated_regressed_check_keys", [])
-                if isinstance(payload, dict)
-                else []
-            )
-            detail = (
-                f" Repeated regression keys: {', '.join(repeated)}."
-                if isinstance(repeated, list)
-                and all(isinstance(value, str) for value in repeated)
-                and repeated
-                else ""
-            )
-            lines.append(
-                "Rejected-candidate continuation was abandoned "
-                f"({reason}); this candidate was reset from best.{detail} "
-                "Re-implement only the useful change without carrying the prior "
-                "regression forward."
-            )
+            # Only reasons that actually discarded prior edits warrant a hint;
+            # policy_disabled and matches-best/missing sources lost nothing,
+            # and urging a re-implementation there would mislead the worker.
+            if reason in ("repeated_regression", "max_chain_reached"):
+                repeated = (
+                    payload.get("repeated_regressed_check_keys", [])
+                    if isinstance(payload, dict)
+                    else []
+                )
+                detail = (
+                    f" Repeated regression keys: {', '.join(repeated)}."
+                    if isinstance(repeated, list)
+                    and all(isinstance(value, str) for value in repeated)
+                    and repeated
+                    else ""
+                )
+                closing = (
+                    "Re-implement only the useful change without carrying "
+                    "the prior regression forward."
+                    if reason == "repeated_regression"
+                    else "Re-implement the useful changes freshly from best."
+                )
+                lines.append(
+                    "Rejected-candidate continuation was abandoned "
+                    f"({reason}); this candidate was reset from best.{detail} "
+                    + closing
+                )
 
         return _clip_oldest_lines(lines, MAX_RECENT_SUMMARY_CHARS)
 

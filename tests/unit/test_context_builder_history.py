@@ -359,6 +359,39 @@ def test_context_mentions_rejected_candidate_fallback_to_best() -> None:
     assert "H-OLD:0" in pack.prior_handoff_summary
 
 
+def test_context_silent_when_continuation_skip_lost_nothing() -> None:
+    repo = InMemoryRepository()
+    repo.append_event(
+        EventType.CANDIDATE_CONTINUATION_SKIPPED,
+        {"reason": "source_unavailable_or_matches_best"},
+        task_id="t1",
+        loop_id=2,
+    )
+
+    pack = _build_pack(repo, loop_id=2)
+
+    # Nothing was abandoned (the rejected tree matched best or was missing);
+    # urging the worker to "re-implement the useful change" would mislead it.
+    assert "continuation was abandoned" not in pack.prior_handoff_summary
+
+
+def test_context_mentions_chain_limit_fallback_without_regression_wording() -> None:
+    repo = InMemoryRepository()
+    repo.append_event(
+        EventType.CANDIDATE_CONTINUATION_SKIPPED,
+        {"reason": "max_chain_reached"},
+        task_id="t1",
+        loop_id=2,
+    )
+
+    pack = _build_pack(repo, loop_id=2)
+
+    assert "continuation was abandoned (max_chain_reached)" in (
+        pack.prior_handoff_summary
+    )
+    assert "regression" not in pack.prior_handoff_summary
+
+
 def test_loop3_after_committed_loop2_renders_evidence_summaries() -> None:
     repo = InMemoryRepository()
     _seed_rejected_loop(repo, 1)

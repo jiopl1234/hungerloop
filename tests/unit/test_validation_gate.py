@@ -305,7 +305,10 @@ async def test_regression_confirm_rerun_keeps_persistent_failure(
 
     assert report.verdict == ValidationVerdict.FAIL
     assert report.regressed_check_keys == ["H-001:0"]
-    assert report.evidence_ids == ["ev-initial", "ev-confirm-1", "ev-confirm-2"]
+    # The first failed rerun already decides the outcome; the remaining
+    # rerun budget must not be spent on a check that cannot be cleared.
+    assert gate.runner.run.await_count == 2
+    assert report.evidence_ids == ["ev-initial", "ev-confirm-1"]
     assert repo.list_events(
         "t1",
         event_types=[EventType.CHECK_REGRESSION_DISCONFIRMED.value],

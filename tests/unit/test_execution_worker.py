@@ -507,6 +507,63 @@ async def test_execution_worker_forces_nonempty_read_batches_toward_edit(
     assert "read-only response will be discarded" in final_call
 
 
+async def test_execution_worker_empty_batches_do_not_reset_nonwriting_block(
+    tmp_path: Path,
+) -> None:
+    import json
+
+    from hungerloop.models.events import EventType
+    from hungerloop.models.usage import ModelUsage
+    from hungerloop.services.model_client import ModelResponse
+
+    (tmp_path / "source.py").write_text("target = True\n", encoding="utf-8")
+    read_body: dict[str, object] = {
+        "summary": "inspect without editing",
+        "actions": [
+            {
+                "tool_name": "read_file",
+                "args": {"path": "source.py", "offset": 1, "limit": 1},
+            }
+        ],
+    }
+    empty_body: dict[str, object] = {"summary": "pausing", "actions": []}
+
+    def _resp(body: dict[str, object]) -> ModelResponse:
+        return ModelResponse(
+            content=json.dumps(body),
+            json_data=body,
+            usage=ModelUsage(input_tokens=1, output_tokens=1),
+        )
+
+    # read, read, empty, read, read, read: the empty batch must not reset
+    # the non-writing streak, so batches 4-6 are all blocked.
+    client = DummyModelClient(
+        [
+            _resp(read_body),
+            _resp(read_body),
+            _resp(empty_body),
+            _resp(read_body),
+            _resp(read_body),
+            _resp(read_body),
+        ]
+    )
+    worker, repo, workspace = _build_worker(tmp_path, client)
+
+    await worker.run(
+        context=_ctx(acceptance_criteria=["command: verify source"]),
+        workspace_root=workspace,
+    )
+
+    events = repo.list_events(
+        "t1",
+        event_types=[EventType.WORKER_READ_ONLY_STREAK.value],
+    )
+    assert len(events) == 1
+    payload = events[0]["payload"]
+    assert isinstance(payload, dict)
+    assert payload["blocked_nonwriting_action_count"] == 3
+
+
 async def test_execution_worker_blocks_shell_only_batches_after_threshold(
     tmp_path: Path,
 ) -> None:

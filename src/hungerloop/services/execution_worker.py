@@ -239,7 +239,10 @@ class ExecutionWorker:
             this_iter_attempted_write = any(
                 tn in ("write_file", "patch_file") for tn, _ in action_results
             )
-            if action_results and not this_iter_attempted_write:
+            # Empty batches count as non-writing too — otherwise a model can
+            # reset the mechanical block by interleaving empty responses
+            # between read batches.
+            if not this_iter_attempted_write:
                 consecutive_nonwriting_iterations += 1
             else:
                 consecutive_nonwriting_iterations = 0

@@ -163,6 +163,19 @@ class CommitManager:
                         except Exception as exc:
                             regeneration_error = exc
                             raise
+                        # Regeneration mutates best/files after promote wrote
+                        # the manifest; rebuild it so identity checks (baseline
+                        # validation, continuation dedup) stay truthful.
+                        self.workspace_manager.write_manifest(
+                            task_id=candidate.task_id,
+                            path=self.workspace_manager.best_files_dir(
+                                candidate.task_id
+                            ),
+                            status="best",
+                            source_workspace_ref=(
+                                f"candidates/loop_{candidate.loop_id:03d}"
+                            ),
+                        )
             except Exception as exc:
                 if regeneration_error is None:
                     raise

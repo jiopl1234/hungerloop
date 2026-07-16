@@ -538,6 +538,42 @@ class TestRollback:
         # New file should be removed
         assert not (best_dir / "new_file.py").exists()
 
+    def test_rollback_refreshes_best_manifest(
+        self,
+        repo: InMemoryRepository,
+        ws: WorkspaceManager,
+        manager: RefactorTransactionManager,
+    ) -> None:
+        _setup_task(repo, accepted_keys=["H-001:0", "H-002:0"])
+        _write_best_files(ws, "task-1", {"file1.py": "original"})
+
+        open_result = manager.open(
+            task_id="task-1",
+            loop_id=10,
+            declared_regression_keys=["H-001:0"],
+            rationale="refactoring",
+        )
+        assert open_result.success is True
+
+        best_dir = ws.best_files_dir("task-1")
+        (best_dir / "file1.py").write_text("modified", encoding="utf-8")
+
+        repo.save_best_state(
+            BestState(
+                task_id="task-1",
+                state_id="BEST-002",
+                summary="failed refactor",
+                accepted_check_keys=["H-002:0"],
+                updated_at_loop=12,
+            )
+        )
+        close_result = manager.close(task_id="task-1", loop_id=12, force=True)
+        assert close_result.status == RefactorTransactionStatus.ROLLED_BACK
+
+        # The restore rewrote best/files wholesale; the manifest must be
+        # rebuilt or identity checks report a permanent false mismatch.
+        assert ws.workspace_matches_best_manifest("task-1", best_dir)
+
     def test_rollback_restores_best_state(
         self,
         repo: InMemoryRepository,

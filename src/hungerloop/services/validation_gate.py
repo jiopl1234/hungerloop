@@ -218,6 +218,10 @@ class ValidationGate:
                 if evidence_id:
                     evidence_ids.append(evidence_id)
                 confirmation_results.append((passed, detail, evidence_id))
+                if not passed:
+                    # Clearing requires every rerun to pass; the first failed
+                    # rerun already decides, so stop spending sandbox budget.
+                    break
 
             if confirmation_results and all(
                 passed for passed, _, _ in confirmation_results

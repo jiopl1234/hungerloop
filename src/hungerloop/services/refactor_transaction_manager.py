@@ -627,6 +627,16 @@ class RefactorTransactionManager:
                 dst.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(str(item), str(dst))
 
+        # The restore rewrote best/files wholesale; rebuild the manifest so
+        # identity checks (baseline validation, continuation dedup) stay
+        # truthful.
+        self.workspace_manager.write_manifest(
+            task_id=txn.task_id,
+            path=best_dir,
+            status="best",
+            source_workspace_ref=txn.snapshot_path,
+        )
+
     # -----------------------------------------------------------------
     # Private: event helpers
     # -----------------------------------------------------------------
