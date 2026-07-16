@@ -409,6 +409,28 @@ def test_run_draft_k_flag_sets_policy(context: CliContext) -> None:
     assert policy.draft_sampling_k == 3
 
 
+def test_run_draft_k_out_of_range_rejected_before_persisting(
+    context: CliContext,
+) -> None:
+    """--draft-k must be bounded by click.IntRange, not the Pydantic
+    field_validator: HungerPolicy has no validate_assignment, and
+    set_hunger_policy serializes via model_dump_json without validation,
+    so an out-of-range value would otherwise persist silently and brick
+    every subsequent get_hunger_policy() call (model_validate raises)."""
+    context.repo.save_hunger_ledger("t1", HungerLedger(task_id="t1", items=[]))
+
+    runner = CliRunner()
+    result = runner.invoke(
+        cli,
+        ["run", "t1", "--draft-k", "6"],
+        obj=context,
+    )
+
+    assert result.exit_code != 0
+    policy = context.repo.get_hunger_policy("t1")
+    assert policy.draft_sampling_k == 1
+
+
 def test_run_spend_budget_requires_budget_loops(context: CliContext) -> None:
     runner = CliRunner()
     result = runner.invoke(

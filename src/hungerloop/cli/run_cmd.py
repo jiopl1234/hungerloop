@@ -102,7 +102,7 @@ def _resolve_stale_threshold(cli_value: int | None) -> int:
 @click.option(
     "--draft-k",
     "draft_k",
-    type=int,
+    type=click.IntRange(1, 5),
     default=None,
     help="Cold-start draft sampling count (first loop only; 1 disables, max 5).",
 )
