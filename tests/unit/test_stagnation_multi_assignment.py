@@ -34,6 +34,7 @@ def _repo_with_items(items: list[HungerItem]) -> MagicMock:
         items=items,
     )
     repo.increment_no_progress_streak.return_value = 1
+    repo.list_loop_traces.return_value = []
     return repo
 
 

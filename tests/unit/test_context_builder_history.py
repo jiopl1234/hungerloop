@@ -400,6 +400,43 @@ def test_context_mentions_chain_limit_fallback_without_regression_wording() -> N
     assert "regression" not in pack.prior_handoff_summary
 
 
+def test_context_seeded_continuation_names_regressed_commit_gate() -> None:
+    repo = InMemoryRepository()
+    repo.append_event(
+        EventType.CANDIDATE_CONTINUATION_SEEDED,
+        {
+            "source_loop_id": 3,
+            "regressed_check_keys": ["H-001:10", "H-001:11"],
+        },
+        task_id="t1",
+        loop_id=4,
+    )
+
+    pack = _build_pack(repo, loop_id=4)
+
+    assert "continues the rejected edits from loop 3" in pack.prior_handoff_summary
+    assert "H-001:10, H-001:11" in pack.prior_handoff_summary
+    # The hint must single these keys out as the commit gate, not leave them
+    # as two more entries in the failing-check list.
+    assert "previously passed" in pack.prior_handoff_summary
+    assert "commit" in pack.prior_handoff_summary
+
+
+def test_context_seeded_continuation_without_regressions_stays_generic() -> None:
+    repo = InMemoryRepository()
+    repo.append_event(
+        EventType.CANDIDATE_CONTINUATION_SEEDED,
+        {"source_loop_id": 1, "regressed_check_keys": []},
+        task_id="t1",
+        loop_id=2,
+    )
+
+    pack = _build_pack(repo, loop_id=2)
+
+    assert "continues the rejected edits from loop 1" in pack.prior_handoff_summary
+    assert "previously passed" not in pack.prior_handoff_summary
+
+
 def test_loop3_after_committed_loop2_renders_evidence_summaries() -> None:
     repo = InMemoryRepository()
     _seed_rejected_loop(repo, 1)

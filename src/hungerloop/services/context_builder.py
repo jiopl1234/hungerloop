@@ -519,6 +519,29 @@ class ContextBuilder:
                 "in this isolated candidate and repair validation failures before "
                 "handoff."
             )
+            raw_regressed = (
+                payload.get("regressed_check_keys", [])
+                if isinstance(payload, dict)
+                else []
+            )
+            seeded_regressed = (
+                [key for key in raw_regressed if isinstance(key, str)]
+                if isinstance(raw_regressed, list)
+                else []
+            )
+            if seeded_regressed:
+                # Round-4 finding: without naming the keys, the regression is
+                # just one more entry in the failing-check list and the
+                # worker never prioritizes the single check gating the
+                # commit.
+                shown = ", ".join(seeded_regressed[:5])
+                lines.append(
+                    "These checks previously passed and their regression is "
+                    f"why loop {source_loop_id} was rejected: {shown}. "
+                    "Repairing them is the commit gate — fix them FIRST; "
+                    "nothing else you newly pass can be kept until they pass "
+                    "again."
+                )
 
         skipped_continuation_events = self.repo.list_events(
             task_id,

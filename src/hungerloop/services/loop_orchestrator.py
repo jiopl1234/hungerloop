@@ -161,6 +161,47 @@ def _should_draft_sample(
     return prior_trace_count == 0
 
 
+AUTO_OPEN_NET_RATIO = 3
+"""Newly-passed checks required per repeated regressed key before the
+auto-open trigger considers a rejected candidate net-positive."""
+
+
+def _auto_open_declared_keys(
+    policy: HungerPolicy,
+    validation: ValidationReport,
+    previous_rejected_trace: LoopTrace | None,
+) -> list[str] | None:
+    """Decide whether to auto-open an ADR-010 transaction for this rejection.
+
+    Returns the keys to declare, or ``None``. Every current regression must
+    repeat the previous rejected candidate's regressions — fresh breakage is
+    never sanctioned — and the newly-passed count must clear both the policy
+    floor and the net-positive ratio. The caller still routes through
+    ``RefactorTransactionManager.open``, which re-validates everything
+    (single-open, keys accepted, snapshot); this function only decides
+    whether to ask.
+    """
+    if not (
+        policy.refactor_transactions_enabled and policy.refactor_auto_open_enabled
+    ):
+        return None
+    regressed = sorted(set(validation.regressed_check_keys))
+    if not regressed or len(regressed) > policy.max_declared_regressions:
+        return None
+    if previous_rejected_trace is None or previous_rejected_trace.committed:
+        return None
+    prior_regressed = set(previous_rejected_trace.regressed_check_keys)
+    if not set(regressed).issubset(prior_regressed):
+        return None
+    newly = len(set(validation.newly_passed_check_keys))
+    if newly < max(
+        policy.refactor_auto_open_min_newly,
+        AUTO_OPEN_NET_RATIO * len(regressed),
+    ):
+        return None
+    return regressed
+
+
 def _validation_pipeline_trace(
     result: ValidationPipelineResult | None,
 ) -> dict[str, object] | None:
@@ -871,6 +912,14 @@ class LoopOrchestrator:
             self.repo.reset_no_progress_streak(task_id)
             stagnation["global_blocked"] = False
 
+        self._maybe_auto_open_refactor_transaction(
+            task_id=task_id,
+            loop_id=loop_id,
+            policy=policy,
+            validation=effective_validation,
+            committed=bool(commit_decision["committed"]),
+        )
+
         # v0.7: Settle due refactor transactions after commit and stagnation
         self._settle_due_transaction(task_id=task_id, loop_id=loop_id)
 
@@ -997,8 +1046,96 @@ class LoopOrchestrator:
             )
 
         if stagnation["global_blocked"]:
+            self._emit_global_stagnation_blocked(
+                task_id=task_id,
+                loop_id=loop_id,
+                streak=stagnation["no_progress_streak"],
+            )
             return self._emit_stop(task_id, StopReason.BLOCKED)
         return trace
+
+    def _emit_global_stagnation_blocked(
+        self,
+        *,
+        task_id: str,
+        loop_id: int,
+        streak: int | None,
+    ) -> None:
+        """Explain a global-stagnation BLOCKED stop in the event log.
+
+        Without this event the stop is indistinguishable from an item-level
+        block: the ledger still shows the item ``working`` and no stagnation
+        event exists (spreadsheet-04 round-4 observability finding).
+        """
+        self.repo.append_event(
+            EventType.GLOBAL_STAGNATION_BLOCKED,
+            {
+                "no_progress_streak": streak,
+                "threshold": self.stagnation_detector.max_global_no_progress,
+                "loop_id": loop_id,
+            },
+            task_id=task_id,
+            loop_id=loop_id,
+        )
+
+    def _previous_rejected_trace(
+        self, task_id: str, loop_id: int
+    ) -> LoopTrace | None:
+        """The most recent candidate-bearing trace before ``loop_id``.
+
+        Returns it regardless of commit status; callers decide what a
+        committed predecessor means. Killed/empty loops (no candidate) are
+        skipped so an interrupted loop does not break repeat detection.
+        """
+        candidates = [
+            trace
+            for trace in self.repo.list_loop_traces(task_id)
+            if trace.loop_id < loop_id and trace.candidate_state_id is not None
+        ]
+        if not candidates:
+            return None
+        return max(candidates, key=lambda trace: trace.loop_id)
+
+    def _maybe_auto_open_refactor_transaction(
+        self,
+        *,
+        task_id: str,
+        loop_id: int,
+        policy: HungerPolicy,
+        validation: ValidationReport,
+        committed: bool,
+    ) -> None:
+        """Open an ADR-010 transaction when a rejection is net-positive.
+
+        Round-4 finding: candidates that newly passed 8-17 checks were
+        discarded whole for repeating a 1-2 key regression, with no
+        autonomous path to the sanctioned I-3 amendment. When the same keys
+        regress in consecutive rejected candidates and the newly-passed
+        count clears the net-positive bar, open a transaction declaring
+        exactly those keys so the next continuation candidate can commit.
+        ``RefactorTransactionManager.open`` re-validates everything and
+        emits the audit events; a failed open is its rejected-open event.
+        """
+        if committed or self.refactor_transaction_manager is None:
+            return
+        previous = self._previous_rejected_trace(task_id, loop_id)
+        declared = _auto_open_declared_keys(policy, validation, previous)
+        if declared is None:
+            return
+        # Policy is already gated by _auto_open_declared_keys; the repo-level
+        # single-open pre-check just avoids a guaranteed rejected-open event.
+        if self.repo.get_open_refactor_transaction(task_id) is not None:
+            return
+        newly_count = len(set(validation.newly_passed_check_keys))
+        self.refactor_transaction_manager.open(
+            task_id=task_id,
+            loop_id=loop_id,
+            declared_regression_keys=declared,
+            rationale=(
+                f"auto_open: {', '.join(declared)} regressed in consecutive "
+                f"rejected candidates while {newly_count} checks newly passed"
+            ),
+        )
 
     def _maybe_continue_rejected_candidate(
         self,
@@ -1044,10 +1181,20 @@ class LoopOrchestrator:
         current_regressed = set(previous_trace.regressed_check_keys)
         repeated_regressions = sorted(prior_regressed & current_regressed)
 
+        transaction_covers_repeats = False
+        if repeated_regressions and policy.refactor_transactions_enabled:
+            active_txn = self.repo.get_open_refactor_transaction(task_id)
+            transaction_covers_repeats = active_txn is not None and set(
+                repeated_regressions
+            ).issubset(set(active_txn.declared_regression_keys))
+
         skip_reason: str | None = None
         if not policy.rejected_candidate_continuation_enabled:
             skip_reason = "policy_disabled"
-        elif repeated_regressions:
+        elif repeated_regressions and not transaction_covers_repeats:
+            # Sanctioned repeats (an open ADR-010 transaction declaring all
+            # of them) are carried forward on purpose — the continuation is
+            # the vehicle for landing the net-positive candidate.
             skip_reason = "repeated_regression"
         elif chain_length > policy.rejected_candidate_continuation_max_chain:
             skip_reason = "max_chain_reached"
@@ -1761,6 +1908,9 @@ class LoopOrchestrator:
         self.repo.save_loop_trace(trace)
 
         if streak >= self.stagnation_detector.max_global_no_progress:
+            self._emit_global_stagnation_blocked(
+                task_id=task_id, loop_id=loop_id, streak=streak
+            )
             return self._emit_stop(task_id, StopReason.BLOCKED)
         return trace
 

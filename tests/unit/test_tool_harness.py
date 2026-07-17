@@ -123,6 +123,18 @@ async def test_failed_tool_still_writes_evidence_no_artifact(
     assert len(result.evidence_ids) == 1  # tool_call evidence still recorded
     assert result.artifact_ids == []
     assert repo._evidence[result.evidence_ids[0]]["success"] is False
+    # The terminal event must carry the error text (bounded) so a failed
+    # call is attributable from the event log alone, without joining
+    # evidence rows.
+    failed_events = [
+        event
+        for event in repo._events
+        if event["event_type"] == "tool_call_failed"
+    ]
+    assert failed_events
+    error_text = failed_events[-1]["payload"].get("error")
+    assert isinstance(error_text, str) and error_text
+    assert "missing.py" in error_text
 
 
 async def test_run_shell_attaches_sandbox_evidence(

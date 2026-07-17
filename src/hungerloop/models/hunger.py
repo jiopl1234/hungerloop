@@ -183,6 +183,12 @@ class HungerPolicy(BaseModel):
     refactor_transactions_enabled: bool = False
     max_declared_regressions: int = 5
     refactor_deadline_loops: int = 3
+    # ---- v0.7.x: autonomous ADR-010 trigger. Off by default; also requires
+    # refactor_transactions_enabled. The trigger only *opens* a transaction —
+    # tolerance, deadline, and rollback stay in RefactorTransactionManager /
+    # CommitManager (the sanctioned I-3 amendment, not a new one).
+    refactor_auto_open_enabled: bool = False
+    refactor_auto_open_min_newly: int = 5
     memory_auto_promote_enabled: bool = True
     memory_recall_enabled: bool = True
     # ---- v0.7.2: cold-start draft sampling (default preserves v0.7.1) ----
@@ -250,6 +256,13 @@ class HungerPolicy(BaseModel):
     def _validate_refactor_deadline_loops(cls, v: int) -> int:
         if v < 0:
             raise ValueError("refactor_deadline_loops must not be negative")
+        return v
+
+    @field_validator("refactor_auto_open_min_newly")
+    @classmethod
+    def _validate_refactor_auto_open_min_newly(cls, v: int) -> int:
+        if v < 1:
+            raise ValueError("refactor_auto_open_min_newly must be positive")
         return v
 
 

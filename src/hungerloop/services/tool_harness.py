@@ -132,6 +132,7 @@ class ToolHarness:
                     "tool_name": tool_name,
                     "agent_id": context.agent_id,
                     "error_type": "unknown_tool",
+                    "error": f"unknown tool: {tool_name}"[:300],
                 },
                 task_id=context.task_id,
                 loop_id=context.loop_id,
@@ -147,7 +148,7 @@ class ToolHarness:
 
         try:
             self._enforce_side_effect_policy(tool, context)
-        except ToolNotPermitted:
+        except ToolNotPermitted as exc:
             # §7.5 invariant: every TOOL_CALL_STARTED has a terminal
             # twin. Emit FAILED with error_type="not_permitted" before
             # propagating so audit aggregations don't under-count
@@ -158,6 +159,7 @@ class ToolHarness:
                     "tool_name": tool_name,
                     "agent_id": context.agent_id,
                     "error_type": "not_permitted",
+                    "error": str(exc)[:300],
                 },
                 task_id=context.task_id,
                 loop_id=context.loop_id,
@@ -165,13 +167,14 @@ class ToolHarness:
             raise
         try:
             self.budget_guard.assert_can_spend(context, addl_tool_calls=1)
-        except WorkerBudgetExceeded:
+        except WorkerBudgetExceeded as exc:
             self.repo.append_event(
                 EventType.TOOL_CALL_FAILED,
                 {
                     "tool_name": tool_name,
                     "agent_id": context.agent_id,
                     "error_type": "budget_exceeded",
+                    "error": str(exc)[:300],
                 },
                 task_id=context.task_id,
                 loop_id=context.loop_id,
@@ -219,6 +222,7 @@ class ToolHarness:
                     "agent_id": context.agent_id,
                     "error_type": error_type,
                     "elapsed_ms": elapsed_ms,
+                    "error": summary[:300],
                 },
                 task_id=context.task_id,
                 loop_id=context.loop_id,
@@ -293,6 +297,12 @@ class ToolHarness:
                     "agent_id": context.agent_id,
                     "error_type": "tool_failed",
                     "elapsed_ms": elapsed_ms,
+                    # Round-4 forensics could not attribute 6/8 patch_file
+                    # failures from the event log; carry the worker-visible
+                    # error text (bounded) on the terminal event.
+                    "error": str(outcome.summary or outcome.result_summary or "")[
+                        :300
+                    ],
                 },
                 task_id=context.task_id,
                 loop_id=context.loop_id,

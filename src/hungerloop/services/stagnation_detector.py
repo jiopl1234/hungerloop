@@ -28,6 +28,9 @@ class StagnationResult(TypedDict):
 
     blocked_items: list[str]
     global_blocked: bool
+    no_progress_streak: int | None
+    """The streak value after this update, or ``None`` when the streak was
+    not incremented (progress reset, or a momentum hold)."""
 
 
 class StagnationDetector:
@@ -138,11 +141,21 @@ class StagnationDetector:
         if mutated:
             self.repo.save_hunger_ledger(task_id, ledger)
 
+        streak_value: int | None = None
         if candidate_committed and validation_report.has_real_progress:
             self.repo.reset_no_progress_streak(task_id)
             global_blocked = False
+        elif self._rejected_newly_momentum(task_id, loop_id, validation_report):
+            # A rejected candidate that strictly out-passes every rejected
+            # loop since the last commit is converging, not stagnating
+            # (e.g. a continuation chain growing 8 → 15 → 17 newly-passed
+            # checks): hold the streak instead of incrementing it. It never
+            # RESETS the streak, and growth is strictly monotone over a
+            # finite check set, so a hold cannot recur unboundedly.
+            global_blocked = False
         else:
             streak: int = self.repo.increment_no_progress_streak(task_id)
+            streak_value = streak
             global_blocked = (
                 respect_stagnation and streak >= self.max_global_no_progress
             )
@@ -150,7 +163,39 @@ class StagnationDetector:
         return {
             "blocked_items": blocked_items,
             "global_blocked": global_blocked,
+            "no_progress_streak": streak_value,
         }
+
+    def _rejected_newly_momentum(
+        self,
+        task_id: str,
+        loop_id: int,
+        validation_report: ValidationReport,
+    ) -> bool:
+        """True when this rejected loop strictly grew the newly-passed count.
+
+        The high-water mark is the largest newly-passed count among rejected
+        candidate loops since the last commit. A single rejected loop with
+        progress is not yet a trend (high-water 0 → False), preserving the
+        invariant that rejected progress alone never suppresses stagnation.
+        """
+        current = len(set(validation_report.newly_passed_check_keys))
+        if current == 0:
+            return False
+        high_water = 0
+        traces = sorted(
+            self.repo.list_loop_traces(task_id), key=lambda t: t.loop_id
+        )
+        for trace in traces:
+            if trace.loop_id >= loop_id or trace.candidate_state_id is None:
+                continue
+            if trace.committed:
+                high_water = 0
+                continue
+            high_water = max(
+                high_water, len(set(trace.newly_passed_check_keys))
+            )
+        return high_water > 0 and current > high_water
 
     def exempted_check_keys(
         self,

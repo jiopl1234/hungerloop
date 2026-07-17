@@ -109,6 +109,7 @@ class EventType(str, Enum):
     DRAFT_SAMPLED = "draft_sampled"
 
     # ----- Hunger -------------------------------------------------------
+    GLOBAL_STAGNATION_BLOCKED = "global_stagnation_blocked"
     HUNGER_RESUMED = "hunger_resumed"
     HUNGER_FROZEN = "hunger_frozen"
     HUNGER_REFILLED = "hunger_refilled"

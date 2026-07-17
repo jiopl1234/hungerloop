@@ -4,6 +4,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, cast
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -26,6 +27,7 @@ from hungerloop.models.hunger import (
     HungerPolicy,
 )
 from hungerloop.models.mission import Mission, MissionFeature, MissionPhase
+from hungerloop.models.refactor import RefactorTransaction, RefactorTransactionStatus
 from hungerloop.models.tracing import LoopTrace, StopReport
 from hungerloop.models.validation import ValidationReport
 from hungerloop.models.worker import WorkerResult
@@ -1067,6 +1069,17 @@ async def test_empty_plan_streak_triggers_blocked(tmp_path: Path) -> None:
     assert outcome.stop_reason is StopReason.BLOCKED
     assert outcome.goal_status == "blocked"
     assert any(event["event_type"] == "loop_rejected" for event in repo._events)
+    # The fuse must explain itself: a global-stagnation BLOCKED without an
+    # event is indistinguishable from an item-level block in the DB.
+    stagnation_events = [
+        event
+        for event in repo._events
+        if event["event_type"] == "global_stagnation_blocked"
+    ]
+    assert stagnation_events
+    payload = stagnation_events[-1]["payload"]
+    assert payload["threshold"] == 1
+    assert payload["no_progress_streak"] >= 1
     del orchestrator  # unused
 
 
@@ -1219,3 +1232,240 @@ async def test_safety_cap_emits_error_after_excessive_loops(tmp_path: Path) -> N
     assert isinstance(outcome, StopReport)
     assert outcome.stop_reason is StopReason.ERROR
     assert "max_loops_safety_cap=3" in outcome.recommendation
+
+
+# ---- ADR-010 auto-open + continuation interplay ----
+
+
+def _open_txn_for_t1(declared_keys: list[str]) -> RefactorTransaction:
+    return RefactorTransaction(
+        transaction_id="txn-auto-1",
+        task_id="t1",
+        opening_loop=1,
+        deadline_loop=4,
+        declared_regression_keys=declared_keys,
+        baseline_accepted_check_keys=declared_keys,
+        baseline_accepted_check_count=len(declared_keys),
+        baseline_best_state=BestState(
+            task_id="t1",
+            state_id="BEST-t1-1",
+            summary="baseline",
+            accepted_check_keys=declared_keys,
+        ),
+        snapshot_path=".txn_txn-auto-1",
+        status=RefactorTransactionStatus.OPEN,
+    )
+
+
+def _continuation_setup(
+    tmp_path: Path, repo: InMemoryRepository
+) -> tuple[LoopOrchestrator, Path]:
+    orchestrator = _build_orchestrator(tmp_path=tmp_path, repo=repo, workers={})
+    ws = orchestrator.workspace_manager
+    best = ws.best_files_dir("t1")
+    (best / "app.py").write_text("best = True\n", encoding="utf-8")
+    ws.write_manifest(
+        task_id="t1",
+        path=best,
+        status="best",
+        source_workspace_ref="test_seed",
+    )
+    rejected_candidate = ws.create_candidate_workspace("t1", 1)
+    (rejected_candidate / "app.py").write_text("candidate = True\n", encoding="utf-8")
+    ws.reject_candidate("t1", 1)
+    current_candidate = ws.create_candidate_workspace("t1", 2)
+    return orchestrator, current_candidate
+
+
+def test_repeated_regression_continues_when_transaction_declares_keys(
+    tmp_path: Path,
+) -> None:
+    """A sanctioned regression (open ADR-010 transaction declaring exactly
+    these keys) is the vehicle for landing the net-positive candidate —
+    abandoning the continuation would defeat it."""
+    repo = InMemoryRepository()
+    orchestrator, current_candidate = _continuation_setup(tmp_path, repo)
+    policy = HungerPolicy(refactor_transactions_enabled=True)
+    repo.set_hunger_policy("t1", policy)
+    repo.save_refactor_transaction(_open_txn_for_t1(["H-001:10"]))
+    repo.append_event(
+        EventType.CANDIDATE_CONTINUATION_SEEDED,
+        {"chain_length": 1, "regressed_check_keys": ["H-001:10"]},
+        task_id="t1",
+        loop_id=1,
+    )
+    previous_trace = LoopTrace(
+        task_id="t1",
+        loop_id=1,
+        phase="work",
+        active_hunger=100,
+        drive_budget=100,
+        work_pressure=100,
+        candidate_state_id="CAND-t1-1",
+        committed=False,
+        regressed_check_keys=["H-001:10"],
+    )
+
+    orchestrator._maybe_continue_rejected_candidate(
+        task_id="t1",
+        loop_id=2,
+        policy=policy,
+        previous_trace=previous_trace,
+        has_assignments=True,
+    )
+
+    seeded = [
+        event
+        for event in repo.list_events(
+            "t1", event_types=[EventType.CANDIDATE_CONTINUATION_SEEDED.value]
+        )
+        if event["loop_id"] == 2
+    ]
+    assert len(seeded) == 1
+    assert current_candidate.joinpath("app.py").read_text(encoding="utf-8") == (
+        "candidate = True\n"
+    )
+
+
+def test_repeated_regression_still_skips_when_transaction_covers_other_keys(
+    tmp_path: Path,
+) -> None:
+    repo = InMemoryRepository()
+    orchestrator, current_candidate = _continuation_setup(tmp_path, repo)
+    policy = HungerPolicy(refactor_transactions_enabled=True)
+    repo.set_hunger_policy("t1", policy)
+    repo.save_refactor_transaction(_open_txn_for_t1(["H-001:99"]))
+    repo.append_event(
+        EventType.CANDIDATE_CONTINUATION_SEEDED,
+        {"chain_length": 1, "regressed_check_keys": ["H-001:10"]},
+        task_id="t1",
+        loop_id=1,
+    )
+    previous_trace = LoopTrace(
+        task_id="t1",
+        loop_id=1,
+        phase="work",
+        active_hunger=100,
+        drive_budget=100,
+        work_pressure=100,
+        candidate_state_id="CAND-t1-1",
+        committed=False,
+        regressed_check_keys=["H-001:10"],
+    )
+
+    orchestrator._maybe_continue_rejected_candidate(
+        task_id="t1",
+        loop_id=2,
+        policy=policy,
+        previous_trace=previous_trace,
+        has_assignments=True,
+    )
+
+    skipped = repo.list_events(
+        "t1", event_types=[EventType.CANDIDATE_CONTINUATION_SKIPPED.value]
+    )
+    assert len(skipped) == 1
+    assert skipped[0]["payload"]["reason"] == "repeated_regression"
+    assert current_candidate.joinpath("app.py").read_text(encoding="utf-8") == (
+        "best = True\n"
+    )
+
+
+def _auto_open_report(
+    *,
+    newly: list[str],
+    regressed: list[str],
+) -> ValidationReport:
+    return ValidationReport(
+        id="VAL-t1-4",
+        task_id="t1",
+        loop_id=4,
+        candidate_state_id="CAND-t1-4",
+        baseline_state_id=None,
+        verdict=ValidationVerdict.FAIL,
+        attempted_hunger_item_ids=["H-001"],
+        newly_passed_check_keys=newly,
+        regressed_check_keys=regressed,
+        has_real_progress=False,
+    )
+
+
+def test_auto_open_calls_manager_on_repeated_net_positive_regression(
+    tmp_path: Path,
+) -> None:
+    repo = InMemoryRepository()
+    orchestrator = _build_orchestrator(tmp_path=tmp_path, repo=repo, workers={})
+    manager = MagicMock()
+    orchestrator.refactor_transaction_manager = manager
+    policy = HungerPolicy(
+        refactor_transactions_enabled=True,
+        refactor_auto_open_enabled=True,
+    )
+    repo.set_hunger_policy("t1", policy)
+    repo.save_loop_trace(
+        LoopTrace(
+            task_id="t1",
+            loop_id=3,
+            phase="work",
+            active_hunger=100,
+            drive_budget=100,
+            work_pressure=100,
+            candidate_state_id="CAND-t1-3",
+            committed=False,
+            regressed_check_keys=["H-001:10"],
+        )
+    )
+    validation = _auto_open_report(
+        newly=[f"H-001:{index}" for index in range(11, 17)],
+        regressed=["H-001:10"],
+    )
+
+    orchestrator._maybe_auto_open_refactor_transaction(
+        task_id="t1",
+        loop_id=4,
+        policy=policy,
+        validation=validation,
+        committed=False,
+    )
+
+    manager.open.assert_called_once()
+    kwargs = manager.open.call_args.kwargs
+    assert kwargs["task_id"] == "t1"
+    assert kwargs["loop_id"] == 4
+    assert kwargs["declared_regression_keys"] == ["H-001:10"]
+
+
+def test_auto_open_noop_when_committed_or_unwired(tmp_path: Path) -> None:
+    repo = InMemoryRepository()
+    orchestrator = _build_orchestrator(tmp_path=tmp_path, repo=repo, workers={})
+    policy = HungerPolicy(
+        refactor_transactions_enabled=True,
+        refactor_auto_open_enabled=True,
+    )
+    repo.set_hunger_policy("t1", policy)
+    validation = _auto_open_report(
+        newly=[f"H-001:{index}" for index in range(11, 17)],
+        regressed=["H-001:10"],
+    )
+
+    # No manager wired: must be a silent no-op.
+    orchestrator.refactor_transaction_manager = None
+    orchestrator._maybe_auto_open_refactor_transaction(
+        task_id="t1",
+        loop_id=4,
+        policy=policy,
+        validation=validation,
+        committed=False,
+    )
+
+    # Committed loop: never auto-open.
+    manager = MagicMock()
+    orchestrator.refactor_transaction_manager = manager
+    orchestrator._maybe_auto_open_refactor_transaction(
+        task_id="t1",
+        loop_id=4,
+        policy=policy,
+        validation=validation,
+        committed=True,
+    )
+    manager.open.assert_not_called()
