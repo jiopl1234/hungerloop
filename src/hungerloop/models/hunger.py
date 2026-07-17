@@ -189,6 +189,10 @@ class HungerPolicy(BaseModel):
     # CommitManager (the sanctioned I-3 amendment, not a new one).
     refactor_auto_open_enabled: bool = False
     refactor_auto_open_min_newly: int = 5
+    # Global no-progress fuse threshold (loops without a committed candidate
+    # before StopReason.BLOCKED). Momentum holds (strictly growing rejected
+    # newly-passed counts) do not consume this budget.
+    max_global_no_progress_loops: int = 5
     memory_auto_promote_enabled: bool = True
     memory_recall_enabled: bool = True
     # ---- v0.7.2: cold-start draft sampling (default preserves v0.7.1) ----
@@ -263,6 +267,13 @@ class HungerPolicy(BaseModel):
     def _validate_refactor_auto_open_min_newly(cls, v: int) -> int:
         if v < 1:
             raise ValueError("refactor_auto_open_min_newly must be positive")
+        return v
+
+    @field_validator("max_global_no_progress_loops")
+    @classmethod
+    def _validate_max_global_no_progress_loops(cls, v: int) -> int:
+        if v < 1:
+            raise ValueError("max_global_no_progress_loops must be positive")
         return v
 
 

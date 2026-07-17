@@ -375,3 +375,18 @@ def test_draft_sampling_k_roundtrips_via_payload_json() -> None:
     policy = HungerPolicy(draft_sampling_k=3)
     restored = HungerPolicy.model_validate(policy.model_dump(mode="json"))
     assert restored.draft_sampling_k == 3
+
+
+# ---------------------------------------------------------------------------
+# v0.7.x: configurable global no-progress fuse
+# ---------------------------------------------------------------------------
+
+
+def test_max_global_no_progress_loops_default() -> None:
+    assert HungerPolicy().max_global_no_progress_loops == 5
+
+
+def test_max_global_no_progress_loops_must_be_positive() -> None:
+    assert HungerPolicy(max_global_no_progress_loops=3).max_global_no_progress_loops == 3
+    with pytest.raises(ValidationError):
+        HungerPolicy(max_global_no_progress_loops=0)

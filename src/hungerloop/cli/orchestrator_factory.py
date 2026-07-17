@@ -54,6 +54,7 @@ def build_orchestrator(
     budget_allocator: BudgetAllocator | None = None,
     max_loops_safety_cap: int = 200,
     spec_check_synthesizer: _SpecSynthesizerProtocol | None = None,
+    max_global_no_progress_loops: int = 5,
 ) -> LoopOrchestrator:
     """Wire all v0.5a services into a :class:`LoopOrchestrator`.
 
@@ -125,7 +126,9 @@ def build_orchestrator(
         commit_manager=CommitManager(repo, workspace_manager),
         handoff_processor=handoff_processor,
         hunger_update=HungerUpdateService(repo),
-        stagnation_detector=StagnationDetector(repo),
+        stagnation_detector=StagnationDetector(
+            repo, max_global_no_progress_loops=max_global_no_progress_loops
+        ),
         refinement_compiler=RefinementCompiler(repo),
         memory_manager=MemoryManager(repo),
         max_loops_safety_cap=max_loops_safety_cap,

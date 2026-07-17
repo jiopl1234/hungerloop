@@ -312,6 +312,9 @@ def run(
             budget_allocator=budget_allocator,
             max_loops_safety_cap=max_loops,
             spec_check_synthesizer=spec_synthesizer,
+            max_global_no_progress_loops=(
+                ctx.repo.get_hunger_policy(task_id).max_global_no_progress_loops
+            ),
         )
         orchestrator.workspace_manager.ensure_task_workspace(task_id)
 

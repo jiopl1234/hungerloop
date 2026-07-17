@@ -20,3 +20,13 @@ def test_factory_injects_workspace_reader(tmp_path: Path) -> None:
         )
         == []
     )
+
+
+def test_factory_passes_global_no_progress_threshold(tmp_path: Path) -> None:
+    orchestrator = build_orchestrator(
+        repo=InMemoryRepository(),
+        workspace_root=tmp_path,
+        max_global_no_progress_loops=3,
+    )
+
+    assert orchestrator.stagnation_detector.max_global_no_progress == 3
