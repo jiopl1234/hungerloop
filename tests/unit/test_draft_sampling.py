@@ -37,6 +37,42 @@ from hungerloop.services.worker_runtime import WorkerRuntime
 from hungerloop.services.workspace_manager import WorkspaceManager
 
 
+@pytest.mark.parametrize("backend", ["memory", "sqlite"])
+def test_delete_evidence_decrements_usage_tool_calls(
+    backend: str, tmp_path: Path
+) -> None:
+    """Deleting tool-call evidence (loser-draft cleanup) must keep the usage
+    counter reconcilable with the evidence source of truth the D11 detector
+    walks; otherwise usage.tool_calls permanently overstates surviving rows.
+    """
+    repo: Any = (
+        InMemoryRepository()
+        if backend == "memory"
+        else SQLiteRepository(tmp_path / "t.sqlite")
+    )
+    repo.create_task("t1", "goal")
+    keep = repo.save_tool_call_as_evidence(
+        task_id="t1", loop_id=1, agent_id="a", tool_name="write_file",
+        args_summary="{}", result_summary="ok", success=True, elapsed_ms=1,
+    )
+    drop = repo.save_tool_call_as_evidence(
+        task_id="t1", loop_id=1, agent_id="a", tool_name="patch_file",
+        args_summary="{}", result_summary="no", success=False, elapsed_ms=1,
+    )
+    assert repo.get_usage_snapshot("t1").tool_calls == 2
+
+    repo.delete_evidence([drop])
+
+    usage = repo.get_usage_snapshot("t1")
+    assert usage.tool_calls == 1
+    # The counter now matches what a walk of the surviving evidence rows
+    # would recompute (D11 reconciliation invariant).
+    assert usage.tool_calls == repo.aggregate_evidence_usage("t1").tool_calls
+    assert {row["evidence_id"] for row in repo.list_evidence("t1")} == {keep}
+    if backend == "sqlite":
+        repo.close()
+
+
 def test_draft_sampling_requires_cold_start() -> None:
     base = {
         "draft_sampling_k": 3,
@@ -212,6 +248,9 @@ async def test_draft_sampling_selects_best_draft(
     assert payload["winner_passes_gate"] is True
     assert payload["requested_k"] == 3
     assert payload["draft_count"] == 3
+    assert payload["worker_passes_run"] == 3
+    assert payload["short_circuited_draft_indexes"] == []
+    assert payload["short_circuited_count"] == 0
     assert len(payload["per_draft"]) == 3
     # Important defect: the persisted handoff rows for the loop must hold
     # exactly the WINNER's handoff (draft two), never the last draft's
@@ -256,6 +295,9 @@ async def test_draft_sampling_short_circuits_on_identical_content(
     assert isinstance(payload, dict)
     assert payload["requested_k"] == 3
     assert payload["draft_count"] == 1
+    assert payload["worker_passes_run"] == 2
+    assert payload["short_circuited_draft_indexes"] == [2]
+    assert payload["short_circuited_count"] == 1
     assert payload["winner_draft_index"] == 1
     # Exactly one persisted handoff row survives (the winner's), despite the
     # per-draft re-persist under the same deterministic id.

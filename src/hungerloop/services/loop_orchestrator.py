@@ -363,6 +363,8 @@ class LoopOrchestrator:
         # ContextBuilder history (v0.7.1 loop memory).
         draft_evidence_ids: dict[int, set[str]] = {}
         previous_hashes: dict[str, str] | None = None
+        worker_passes_run = 0
+        short_circuited_draft_indexes: list[int] = []
         for draft_index in range(1, draft_k + 1):
             if draft_index > 1:
                 # Independence: clear cross-loop replay and re-seed the
@@ -385,6 +387,7 @@ class LoopOrchestrator:
                 plan=plan,
                 budget=budget,
             )
+            worker_passes_run += 1
             current_hashes = self.workspace_manager.candidate_files_hashes(
                 task_id, loop_id
             )
@@ -398,6 +401,7 @@ class LoopOrchestrator:
                 draft_evidence_ids[draft_index] = (
                     self._tool_call_evidence_ids(task_id) - evidence_before
                 )
+                short_circuited_draft_indexes.append(draft_index)
                 break
             previous_hashes = current_hashes
             probe = self.integrator.integrate(
@@ -437,15 +441,6 @@ class LoopOrchestrator:
         # The replay cache now holds the LAST draft's actions; drop it so
         # the next loop does not replay a discarded loser.
         self.worker_runtime.reset_inner_replay(task_id)
-        # Persisted handoff rows currently hold whichever draft ran last;
-        # replace them with exactly the winner's so the loop leaves the same
-        # state a single-draft run would (downstream _save_and_emit_handoffs
-        # skips handoffs that already carry an id, so a loser's handoff can
-        # otherwise feed the next loop's planning context). The delete also
-        # averts a PRIMARY KEY collision on re-insert.
-        self.repo.delete_worker_handoffs(task_id, loop_id)
-        for handoff in winner_result.handoffs:
-            self.repo.save_worker_handoff(handoff)
         # Drop every non-winner draft's tool-call evidence (losers plus the
         # short-circuited duplicate). The winner's ids are never in this set,
         # so its handoff evidence_ids and next-loop history stay intact.
@@ -455,14 +450,37 @@ class LoopOrchestrator:
             if index != winner_index
             for evidence_id in sorted(ids)
         ]
-        if loser_evidence_ids:
-            self.repo.delete_evidence(loser_evidence_ids)
+        # Atomic settle: the delete-handoffs → save-winner → delete-loser
+        # sequence must not half-apply (a crash between the delete and the
+        # re-save would strand the loop with no handoff rows at all). Persisted
+        # handoff rows currently hold whichever draft ran last; replace them
+        # with exactly the winner's so the loop leaves the same state a
+        # single-draft run would (downstream _save_and_emit_handoffs skips
+        # handoffs that already carry an id, so a loser's handoff can otherwise
+        # feed the next loop's planning context). The delete also averts a
+        # PRIMARY KEY collision on re-insert.
+        with self.repo.transaction():
+            self.repo.delete_worker_handoffs(task_id, loop_id)
+            for handoff in winner_result.handoffs:
+                self.repo.save_worker_handoff(handoff)
+            if loser_evidence_ids:
+                self.repo.delete_evidence(loser_evidence_ids)
+        # The on-disk handoff audit JSON still holds whichever draft ran last;
+        # rewrite it to the winner so the audit trail matches the DB rows.
+        self._rewrite_winner_handoff_audit(task_id, loop_id, winner_result)
         self.repo.append_event(
             EventType.DRAFT_SAMPLED,
             {
                 "loop_id": loop_id,
                 "requested_k": draft_k,
+                # ``draft_count`` is intentionally the number of drafts that
+                # reached deterministic evaluation. A duplicate can still
+                # consume a full worker/model pass, so expose that spend
+                # separately instead of overloading this field.
                 "draft_count": len(drafts),
+                "worker_passes_run": worker_passes_run,
+                "short_circuited_draft_indexes": short_circuited_draft_indexes,
+                "short_circuited_count": len(short_circuited_draft_indexes),
                 "winner_draft_index": winner_index,
                 "winner_passes_gate": gate_winner is not None,
                 "loser_evidence_rows_deleted": len(loser_evidence_ids),
@@ -483,6 +501,38 @@ class LoopOrchestrator:
             loop_id=loop_id,
         )
         return winner_result
+
+    def _rewrite_winner_handoff_audit(
+        self,
+        task_id: str,
+        loop_id: int,
+        winner_result: SchedulerResult,
+    ) -> None:
+        """Overwrite each ``handoffs/<assignment>.json`` with the winner's.
+
+        The scheduler writes one audit file per worker pass, so after draft
+        sampling the file holds whichever draft ran last — a loser when the
+        winner was not the final draft. The DB handoff rows are already
+        corrected; this keeps the on-disk audit trail consistent with them.
+        """
+        handoffs_dir = (
+            self.workspace_manager.task_root(task_id)
+            / "candidates"
+            / f"loop_{loop_id:03d}"
+            / "handoffs"
+        )
+        for handoff in winner_result.handoffs:
+            assignment_id = handoff.assignment_id
+            if not assignment_id:
+                continue
+            audit_path = handoffs_dir / f"{assignment_id}.json"
+            # Reject any assignment_id that escapes the handoffs dir (I-7).
+            if audit_path.resolve().parent != handoffs_dir.resolve():
+                continue
+            handoffs_dir.mkdir(parents=True, exist_ok=True)
+            audit_path.write_text(
+                handoff.model_dump_json(indent=2), encoding="utf-8"
+            )
 
     def _tool_call_evidence_ids(self, task_id: str) -> set[str]:
         """Every tool-call evidence id for a task (draft-sampling cleanup).

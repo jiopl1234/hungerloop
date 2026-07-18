@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 
 from hungerloop.cli.orchestrator_factory import build_orchestrator
@@ -83,7 +84,10 @@ async def test_loop_memory_dummy_propagates_failure_to_next_prompt(
                         "tool_name": "write_file",
                         "args": {"path": "notes.txt", "content": "noted"},
                     },
-                    {"tool_name": "run_shell", "args": {"argv": ["true"]}},
+                        {
+                            "tool_name": "run_shell",
+                            "args": {"argv": [sys.executable, "-c", "pass"]},
+                        },
                 ],
             ),
             _response(
@@ -93,7 +97,10 @@ async def test_loop_memory_dummy_propagates_failure_to_next_prompt(
                         "tool_name": "write_file",
                         "args": {"path": "hello.txt", "content": "hi"},
                     },
-                    {"tool_name": "run_shell", "args": {"argv": ["true"]}},
+                        {
+                            "tool_name": "run_shell",
+                            "args": {"argv": [sys.executable, "-c", "pass"]},
+                        },
                 ],
             ),
         ]
@@ -111,16 +118,23 @@ async def test_loop_memory_dummy_propagates_failure_to_next_prompt(
     assert report.stop_reason is StopReason.DONE
     assert len(dummy.prompts) >= 2
     assert "Prior loop context" not in dummy.prompts[0]
-    assert "Prior loop context" in dummy.prompts[1]
-    assert "patterns to avoid" in dummy.prompts[1]
-    assert "H-001:0 file_exists" in dummy.prompts[1]
-    assert "last attempt summary: explore" in dummy.prompts[1]
+    cross_loop_prompts = [
+        prompt for prompt in dummy.prompts if "Prior loop context" in prompt
+    ]
+    assert cross_loop_prompts, "loop 2 must receive prior-loop context"
+    loop_two_prompt = cross_loop_prompts[0]
+    assert "patterns to avoid" in loop_two_prompt
+    assert "H-001:0 file_exists" in loop_two_prompt
+    assert "last attempt summary: explore" in loop_two_prompt
 
 
 def _write_hello_actions() -> list[dict[str, object]]:
     return [
         {"tool_name": "write_file", "args": {"path": "hello.txt", "content": "hi"}},
-        {"tool_name": "run_shell", "args": {"argv": ["true"]}},
+        {
+            "tool_name": "run_shell",
+            "args": {"argv": [sys.executable, "-c", "pass"]},
+        },
     ]
 
 
@@ -175,6 +189,9 @@ def _assert_draft_sampling_matches_k1(
     # dummy provider is deterministic -> draft 2 reproduces draft 1 and
     # the short-circuit stops sampling after the duplicate is detected.
     assert payload["draft_count"] == 1
+    assert payload["worker_passes_run"] == 2
+    assert payload["short_circuited_draft_indexes"] == [2]
+    assert payload["short_circuited_count"] == 1
     assert payload["winner_draft_index"] == 1
 
     # k=1 (the default) never enters the draft-sampling branch at all.
@@ -229,14 +246,24 @@ async def test_loop_memory_dummy_draft_sampling_short_circuits_and_matches_k1_sq
     """
     task_id = "t1"
     k1_repo = SQLiteRepository(tmp_path / "k1.sqlite")
-    k1_report = await _run_hello_smoke(k1_repo, tmp_path / "k1", draft_sampling_k=1)
     k3_repo = SQLiteRepository(tmp_path / "k3.sqlite")
-    k3_report = await _run_hello_smoke(k3_repo, tmp_path / "k3", draft_sampling_k=3)
+    try:
+        k1_report = await _run_hello_smoke(
+            k1_repo, tmp_path / "k1", draft_sampling_k=1
+        )
+        k3_report = await _run_hello_smoke(
+            k3_repo, tmp_path / "k3", draft_sampling_k=3
+        )
 
-    _assert_draft_sampling_matches_k1(
-        task_id=task_id,
-        k1_repo=k1_repo,
-        k1_report=k1_report,
-        k3_repo=k3_repo,
-        k3_report=k3_report,
-    )
+        _assert_draft_sampling_matches_k1(
+            task_id=task_id,
+            k1_repo=k1_repo,
+            k1_report=k1_report,
+            k3_repo=k3_repo,
+            k3_report=k3_report,
+        )
+    finally:
+        # Close WAL connections deterministically — leaked handles hold
+        # file locks and flake tmp_path teardown on Windows.
+        k1_repo.close()
+        k3_repo.close()
