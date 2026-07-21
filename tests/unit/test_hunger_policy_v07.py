@@ -37,7 +37,7 @@ def test_default_synthesis_lifecycle_policy() -> None:
     assert policy.synthesis_conflict_threshold == 2
     assert policy.synthesis_audit_enabled is False
     assert policy.regression_confirm_reruns == 2
-    assert policy.rejected_candidate_continuation_enabled is True
+    assert policy.rejected_candidate_continuation_enabled is False
     assert policy.rejected_candidate_continuation_max_chain == 2
 
 
@@ -89,7 +89,7 @@ def test_policy_serialization_preserves_defaults() -> None:
     assert restored.synthesis_plan_time_tier == 0
     assert restored.synthesis_max_total_items == 20
     assert restored.regression_confirm_reruns == 2
-    assert restored.rejected_candidate_continuation_enabled is True
+    assert restored.rejected_candidate_continuation_enabled is False
     assert restored.rejected_candidate_continuation_max_chain == 2
     assert restored.refactor_transactions_enabled is False
     assert restored.max_declared_regressions == 5

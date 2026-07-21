@@ -159,10 +159,11 @@ def test_rejected_candidate_new_check_does_not_reset_stagnation() -> None:
     assert result["global_blocked"] is False
 
 
-def test_global_streak_holds_when_rejected_newly_growth_continues() -> None:
-    """A rejected candidate that strictly out-passes every rejected loop
-    since the last commit is converging, not stagnating — hold the streak
-    (spreadsheet-04's 8→15→17 continuation chain died to this fuse)."""
+def test_global_streak_increments_when_rejected_newly_growth_continues() -> None:
+    """A rejected candidate always increments the no-progress streak, even
+    when its newly-passed count strictly out-passes every rejected loop
+    since the last commit. Rejected progress never holds the streak
+    (the momentum-hold fuse was removed)."""
     h1 = _item("H-001")
     repo = _mock_repo({"H-001": h1})
     repo.list_loop_traces.return_value = [
@@ -178,10 +179,10 @@ def test_global_streak_holds_when_rejected_newly_growth_continues() -> None:
 
     result = detector.update("t1", 4, report, candidate_committed=False)
 
-    repo.increment_no_progress_streak.assert_not_called()
+    repo.increment_no_progress_streak.assert_called_once_with("t1")
     repo.reset_no_progress_streak.assert_not_called()
     assert result["global_blocked"] is False
-    assert result["no_progress_streak"] is None
+    assert result["no_progress_streak"] == 1
 
 
 def test_global_streak_increments_on_first_rejected_newly_after_commit() -> None:
@@ -220,9 +221,10 @@ def test_global_streak_increments_when_newly_count_plateaus() -> None:
     assert result["no_progress_streak"] == 1
 
 
-def test_momentum_window_restarts_at_last_commit() -> None:
-    """Rejected-loop newly counts from before the last commit must not
-    count toward the high-water mark."""
+def test_rejected_newly_window_restarts_at_last_commit() -> None:
+    """Rejected-loop newly counts from before the last commit are irrelevant
+    to the streak: a rejected candidate always increments the streak
+    regardless of newly-passed growth (the momentum-hold fuse was removed)."""
     h1 = _item("H-001")
     repo = _mock_repo({"H-001": h1})
     repo.list_loop_traces.return_value = [
@@ -231,8 +233,8 @@ def test_momentum_window_restarts_at_last_commit() -> None:
         _trace(3, committed=False, newly=["H-001:4", "H-001:5"]),
     ]
     detector = StagnationDetector(repo, max_global_no_progress_loops=5)
-    # 3 newly > post-commit high-water 2 → hold; if the pre-commit loop-1
-    # count (3) still counted, 3 > 3 would be False and this would increment.
+    # A rejected candidate always increments the streak; pre-commit loop
+    # history no longer affects the streak calculation.
     report = _report(
         attempted=["H-001"],
         newly_passed=["H-001:4", "H-001:5", "H-001:6"],
@@ -240,5 +242,6 @@ def test_momentum_window_restarts_at_last_commit() -> None:
 
     result = detector.update("t1", 4, report, candidate_committed=False)
 
-    repo.increment_no_progress_streak.assert_not_called()
+    repo.increment_no_progress_streak.assert_called_once_with("t1")
     assert result["global_blocked"] is False
+    assert result["no_progress_streak"] == 1

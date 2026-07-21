@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 
 from hungerloop.models.context import ContextPack, TruncationInfo
-from hungerloop.models.enums import CompletionMode, EvidenceType
+from hungerloop.models.enums import EvidenceType
 from hungerloop.models.events import EventType
 from hungerloop.models.hunger import AcceptanceCheck
 from hungerloop.models.planning import Assignment, BudgetAllocation
@@ -47,10 +47,6 @@ MAX_HISTORY_CHARS = 12000
 DEGRADED_FAILURE_LINE_CHARS = 120
 MAX_READ_COVERAGE_CHARS = 600
 MAX_FAILED_TOOL_LINES = 5
-READ_ONLY_REJECTED_HINT = (
-    "consecutive worker loops inspected files but emitted no write action; "
-    "next attempt must patch/write or declare a blocker"
-)
 # v0.7 memory recall caps (VAL-MEM-011)
 MAX_RECALLED_MEMORIES = 5
 MAX_RECALLED_MEMORIES_CHARS = 1200
@@ -184,14 +180,17 @@ class ContextBuilder:
         failure_lines = (
             history.rejected_lines[: K_REJECT_WINDOW * 4] + history.failed_tool_lines
         )
+        has_real_failures = bool(failure_lines)
+        prepended_context_lines = 0
         if history.read_coverage_summary:
             failure_lines.insert(0, history.read_coverage_summary)
-        if self._should_emit_read_only_rejected_hint(
-            task_id,
-            loop_id,
-            agent_id,
-        ):
-            failure_lines.insert(0, READ_ONLY_REJECTED_HINT)
+            prepended_context_lines += 1
+        # Protect the read-coverage recap and the newest real failure that
+        # follows it. The degrade sweep trims older failures first, preserving
+        # the most actionable failure at full detail.
+        protected_leading_lines = prepended_context_lines + (
+            1 if has_real_failures else 0
+        )
         (
             prior_handoff_summary,
             last_summary,
@@ -210,6 +209,7 @@ class ContextBuilder:
                 evidence_lines=evidence_lines,
                 failure_lines=failure_lines,
                 best_summary_truncated=best_summary_truncated,
+                protected_leading_lines=protected_leading_lines,
             )
         )
 
@@ -597,55 +597,6 @@ class ContextBuilder:
             return False
         return True
 
-    def _should_emit_read_only_rejected_hint(
-        self,
-        task_id: str,
-        current_loop_id: int,
-        agent_id: str,
-    ) -> bool:
-        streak_events = self.repo.list_events(
-            task_id,
-            until_loop=max(0, current_loop_id - 1),
-            event_types=[EventType.WORKER_READ_ONLY_STREAK.value],
-        )
-        for event in reversed(streak_events):
-            payload = event.get("payload")
-            if not isinstance(payload, dict):
-                continue
-            if payload.get("agent_id") != agent_id:
-                continue
-            return (
-                event.get("loop_id") == current_loop_id - 1
-                and payload.get("threshold_reached") is True
-            )
-
-        policy = self.repo.get_hunger_policy(task_id)
-        if policy.completion_mode != CompletionMode.SPEND_BUDGET:
-            return False
-        traces = [
-            trace
-            for trace in self.repo.list_loop_traces(task_id)
-            if not trace.committed and trace.loop_id < current_loop_id
-        ]
-        traces.sort(key=lambda trace: trace.loop_id, reverse=True)
-        recent = traces[:2]
-        if len(recent) < 2:
-            return False
-        evidence_rows = list(self.repo.list_successful_tool_call_evidence(task_id))
-        for trace in recent:
-            names: list[str] = []
-            for row in evidence_rows:
-                payload = row.get("payload")
-                if (
-                    _coerce_loop_id(row.get("loop_id")) == trace.loop_id
-                    and isinstance(payload, dict)
-                ):
-                    names.append(str(payload.get("tool_name", "")))
-            if not names or any(name != "read_file" for name in names):
-                return False
-        return True
-
-
 def _coerce_loop_id(value: object) -> int | None:
     if isinstance(value, int):
         return value
@@ -861,6 +812,7 @@ def _apply_history_cap(
     evidence_lines: list[str],
     failure_lines: list[str],
     best_summary_truncated: bool,
+    protected_leading_lines: int = 1,
 ) -> tuple[str, str | None, list[str], list[str], list[str], TruncationInfo | None]:
     prior_handoff_summary, last_summary = _clip_recent_summaries(
         prior_handoff_summary=prior_handoff_summary,
@@ -904,9 +856,11 @@ def _apply_history_cap(
 
     degraded_failures = 0
     degrade_index = len(failure_lines) - 1
-    # Degrade oldest-first, but never the newest line (index 0) — it keeps
-    # full detail so the most recent failure stays actionable.
-    while len(assembled) > MAX_HISTORY_CHARS and degrade_index >= 1:
+    # Degrade oldest-first, protecting the leading read-coverage recap and
+    # the newest real failure that follows it. This keeps the most actionable
+    # failure at full detail while older failures are compressed first.
+    floor = max(1, protected_leading_lines)
+    while len(assembled) > MAX_HISTORY_CHARS and degrade_index >= floor:
         clipped = _clip_required(
             failure_lines[degrade_index], DEGRADED_FAILURE_LINE_CHARS
         )

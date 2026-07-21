@@ -1027,7 +1027,14 @@ def test_blocked_synthesized_item_frees_active_slot() -> None:
     assert _count_active_synthesized_items("t1", repo) == 1
 
 
-def test_resolved_items_do_not_consume_lifetime_capacity() -> None:
+def test_lifetime_capacity_counts_every_h_syn_item_ever_created() -> None:
+    """The lifetime cap is a monotonic kill-switch: resolved items still
+    count, so ``synthesis_max_total_items`` hard-stops the synthesis LLM
+    instead of replenishing capacity every time a check auto-satisfies or
+    is closed (which would fire the synthesizer on every committed loop).
+    The active-slot cap (``_count_active_synthesized_items``) is where
+    resolved/BLOCKED items are excluded, so freed slots reopen concurrency
+    without reopening the lifetime budget."""
     repo = InMemoryRepository()
     repo.save_hunger_ledger(
         "t1",
@@ -1041,8 +1048,9 @@ def test_resolved_items_do_not_consume_lifetime_capacity() -> None:
             ],
         ),
     )
-    # OPEN and BLOCKED are unresolved and still count; resolved ones do not.
-    assert _count_synthesized_items("t1", repo) == 2
+    # Lifetime total counts all four; the active cap counts only OPEN.
+    assert _count_synthesized_items("t1", repo) == 4
+    assert _count_active_synthesized_items("t1", repo) == 1
 
 
 # ---------------------------------------------------------------------------

@@ -177,6 +177,15 @@ async def test_native_tool_protocol_request_and_response(
         patch_properties = patch_tool["function"]["parameters"]["properties"]
         assert patch_properties["start_line"]["minimum"] == 1
         assert patch_properties["end_line"]["minimum"] == 1
+        patch_description = patch_tool["function"]["description"]
+        assert "unique exact old_text occurrence" in patch_description
+        assert "whitespace-normalized" not in patch_description
+        run_shell_tool = next(
+            tool for tool in tools if tool["function"]["name"] == "run_shell"
+        )
+        run_shell_description = run_shell_tool["function"]["description"]
+        assert "['cmd', '/c', 'dir', '/b']" in run_shell_description
+        assert "['bash', '-lc'" in run_shell_description
         return httpx.Response(
             200,
             json={

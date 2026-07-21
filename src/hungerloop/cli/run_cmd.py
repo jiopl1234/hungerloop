@@ -89,8 +89,7 @@ def _resolve_stale_threshold(cli_value: int | None) -> int:
 @click.option(
     "--max-refinement-tier",
     type=int,
-    default=0,
-    show_default=True,
+    default=None,
     help="Highest deterministic refinement tier to generate.",
 )
 @click.option(
@@ -193,7 +192,7 @@ def run(
     budget_loops: int | None,
     spend_budget: bool,
     refinement_profile: str | None,
-    max_refinement_tier: int,
+    max_refinement_tier: int | None,
     ignore_stagnation: bool,
     draft_k: int | None,
     unblock_all: bool,
@@ -354,7 +353,7 @@ def _apply_user_overrides(
     budget_loops: int | None,
     spend_budget: bool,
     refinement_profile: str | None,
-    max_refinement_tier: int,
+    max_refinement_tier: int | None,
     ignore_stagnation: bool,
     draft_k: int | None,
     unblock_all: bool,
@@ -378,7 +377,7 @@ def _apply_user_overrides(
         budget_loops is not None
         or spend_budget
         or refinement_profile is not None
-        or max_refinement_tier > 0
+        or max_refinement_tier is not None
         or ignore_stagnation
         or draft_k is not None
     ):
@@ -390,7 +389,8 @@ def _apply_user_overrides(
             policy.completion_mode = CompletionMode.SPEND_BUDGET
         if refinement_profile is not None:
             policy.refinement_profile = refinement_profile
-        policy.max_refinement_tier = max_refinement_tier
+        if max_refinement_tier is not None:
+            policy.max_refinement_tier = max_refinement_tier
         if ignore_stagnation:
             policy.respect_stagnation = False
         if draft_k is not None:
@@ -463,12 +463,14 @@ def _validate_budgeted_refinement_flags(
     budget_loops: int | None,
     spend_budget: bool,
     refinement_profile: str | None,
-    max_refinement_tier: int,
+    max_refinement_tier: int | None,
     ignore_stagnation: bool,
 ) -> None:
     if spend_budget and budget_loops is None:
         raise click.UsageError("--spend-budget requires --budget-loops.")
-    if spend_budget and max_refinement_tier <= 0:
+    if spend_budget and (
+        max_refinement_tier is None or max_refinement_tier <= 0
+    ):
         raise click.UsageError(
             "--spend-budget requires --max-refinement-tier greater than 0."
         )
@@ -486,7 +488,7 @@ def _validate_budgeted_refinement_flags(
         raise click.UsageError("--ignore-stagnation requires --spend-budget.")
     if budget_loops is not None and budget_loops <= 0:
         raise click.UsageError("--budget-loops must be a positive integer.")
-    if max_refinement_tier < 0:
+    if max_refinement_tier is not None and max_refinement_tier < 0:
         raise click.UsageError("--max-refinement-tier must be >= 0.")
     if budget_loops is not None and max_loops < budget_loops:
         raise click.UsageError("--max-loops must be >= --budget-loops.")

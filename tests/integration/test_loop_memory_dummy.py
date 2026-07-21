@@ -186,12 +186,12 @@ def _assert_draft_sampling_matches_k1(
     assert len(events) == 1
     payload = events[0]["payload"]
     assert isinstance(payload, dict)
-    # dummy provider is deterministic -> draft 2 reproduces draft 1 and
-    # the short-circuit stops sampling after the duplicate is detected.
-    assert payload["draft_count"] == 1
-    assert payload["worker_passes_run"] == 2
-    assert payload["short_circuited_draft_indexes"] == [2]
-    assert payload["short_circuited_count"] == 1
+    # Fixed-k sampling evaluates every requested draft even when the provider
+    # is deterministic and all three workspaces are byte-identical.
+    assert payload["draft_count"] == 3
+    assert payload["worker_passes_run"] == 3
+    assert payload["short_circuited_draft_indexes"] == []
+    assert payload["short_circuited_count"] == 0
     assert payload["winner_draft_index"] == 1
 
     # k=1 (the default) never enters the draft-sampling branch at all.
@@ -211,7 +211,7 @@ def _assert_draft_sampling_matches_k1(
     assert k3_best.accepted_check_keys == k1_best.accepted_check_keys
 
 
-async def test_loop_memory_dummy_draft_sampling_short_circuits_and_matches_k1(
+async def test_loop_memory_dummy_draft_sampling_runs_fixed_k_and_matches_k1(
     tmp_path: Path,
 ) -> None:
     task_id = "t1"
@@ -229,7 +229,7 @@ async def test_loop_memory_dummy_draft_sampling_short_circuits_and_matches_k1(
     )
 
 
-async def test_loop_memory_dummy_draft_sampling_short_circuits_and_matches_k1_sqlite(
+async def test_loop_memory_dummy_draft_sampling_runs_fixed_k_and_matches_k1_sqlite(
     tmp_path: Path,
 ) -> None:
     """Same smoke as the InMemory variant, but on SQLiteRepository.
@@ -238,8 +238,8 @@ async def test_loop_memory_dummy_draft_sampling_short_circuits_and_matches_k1_sq
     before each re-run and before restoring the winner in
     ``LoopOrchestrator._run_draft_sampling``) guards against a PRIMARY KEY
     ``IntegrityError`` on ``worker_handoffs.handoff_id`` (see
-    ``v6__mission_runtime.sql``): re-running draft 2 under the same loop_id
-    re-derives the same deterministic handoff id as draft 1
+    ``v6__mission_runtime.sql``): re-running drafts under the same loop_id
+    re-derives the same deterministic handoff id
     (``WH-<task>-<loop>-<assignment_id>``). InMemoryRepository has no such
     constraint and silently overwrites, so only a SQLite-backed run
     exercises this guard.

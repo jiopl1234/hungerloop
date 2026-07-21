@@ -409,6 +409,43 @@ def test_run_draft_k_flag_sets_policy(context: CliContext) -> None:
     assert policy.draft_sampling_k == 3
 
 
+def test_run_draft_k_alone_preserves_persisted_refinement_tier(
+    context: CliContext,
+) -> None:
+    """Passing an unrelated override (``--draft-k``) must not silently reset
+    the task's persisted ``max_refinement_tier`` to the CLI default of 0."""
+    context.repo.save_hunger_ledger("t1", HungerLedger(task_id="t1", items=[]))
+    context.repo.set_hunger_policy("t1", HungerPolicy(max_refinement_tier=2))
+
+    runner = CliRunner()
+    result = runner.invoke(
+        cli,
+        ["run", "t1", "--draft-k", "3"],
+        obj=context,
+    )
+
+    assert result.exit_code == 0, result.output
+    policy = context.repo.get_hunger_policy("t1")
+    assert policy.draft_sampling_k == 3
+    assert policy.max_refinement_tier == 2
+
+
+def test_run_explicit_zero_resets_persisted_refinement_tier(
+    context: CliContext,
+) -> None:
+    context.repo.save_hunger_ledger("t1", HungerLedger(task_id="t1", items=[]))
+    context.repo.set_hunger_policy("t1", HungerPolicy(max_refinement_tier=2))
+
+    result = CliRunner().invoke(
+        cli,
+        ["run", "t1", "--max-refinement-tier", "0"],
+        obj=context,
+    )
+
+    assert result.exit_code == 0, result.output
+    assert context.repo.get_hunger_policy("t1").max_refinement_tier == 0
+
+
 def test_run_draft_k_out_of_range_rejected_before_persisting(
     context: CliContext,
 ) -> None:

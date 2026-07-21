@@ -1,6 +1,7 @@
 """Unit tests for built-in tool implementations (PRD §9.2)."""
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
 import pytest
@@ -150,9 +151,35 @@ async def test_patch_file_replaces_unique_match(workspace: Path) -> None:
     assert (workspace / "code.py").read_text() == "foo\nBAR\nbaz\n"
 
 
-async def test_patch_file_normalizes_whitespace_for_unique_line_window(
+async def test_patch_file_rejects_line_ending_only_mismatch(
     workspace: Path,
 ) -> None:
+    original = "alpha\nbeta\n"
+    (workspace / "code.py").write_text(original, encoding="utf-8")
+
+    outcome = await PatchFileTool().run(
+        args={
+            "path": "code.py",
+            "old_text": "alpha\r\nbeta\r\n",
+            "new_text": "replacement\r\n",
+        },
+        workspace_root=workspace,
+        task_id="t1",
+        loop_id=1,
+    )
+
+    assert outcome.success is False
+    assert outcome.result_summary == "no_match"
+    assert (workspace / "code.py").read_text(encoding="utf-8") == original
+
+
+async def test_patch_file_rejects_whitespace_only_multiline_match(
+    workspace: Path,
+) -> None:
+    # Whitespace-normalized matching was removed; the 2-space-indented
+    # old_text no longer matches the 4-space-indented source, so the tool
+    # reports no_match and leaves the file untouched. Kept as a regression
+    # guard confirming the normalization path is gone.
     (workspace / "code.py").write_text(
         "def run():\n    value = 1\n    return value\n",
         encoding="utf-8",
@@ -168,10 +195,10 @@ async def test_patch_file_normalizes_whitespace_for_unique_line_window(
         loop_id=1,
     )
 
-    assert outcome.success is True
-    assert outcome.result_summary == "replaced normalized lines 1-3"
+    assert outcome.success is False
+    assert outcome.result_summary == "no_match"
     assert (workspace / "code.py").read_text(encoding="utf-8") == (
-        "def run():\n    value = 2\n    return value\n"
+        "def run():\n    value = 1\n    return value\n"
     )
 
 
@@ -198,9 +225,14 @@ async def test_patch_file_line_anchor_selects_exact_occurrence(workspace: Path) 
     )
 
 
-async def test_patch_file_normalized_single_line_preserves_source_indent(
+async def test_patch_file_rejects_whitespace_only_anchored_single_line(
     workspace: Path,
 ) -> None:
+    # Indentation rebasing was removed; "return value" does not exactly
+    # match "    return   value" (different indent + internal spacing), so
+    # the tool reports no_match even with a line anchor and leaves the
+    # file untouched. Kept as a regression guard confirming the rebase
+    # path is gone.
     (workspace / "code.py").write_text(
         "def run():\n    return   value\n", encoding="utf-8"
     )
@@ -217,15 +249,21 @@ async def test_patch_file_normalized_single_line_preserves_source_indent(
         loop_id=1,
     )
 
-    assert outcome.success is True
+    assert outcome.success is False
+    assert outcome.result_summary == "no_match"
     assert (workspace / "code.py").read_text(encoding="utf-8") == (
-        "def run():\n    return changed\n"
+        "def run():\n    return   value\n"
     )
 
 
-async def test_patch_file_rejects_unanchored_normalized_single_line(
+async def test_patch_file_rejects_whitespace_only_unanchored_single_line(
     workspace: Path,
 ) -> None:
+    # The unsafe_normalized_single_line result code was removed along with
+    # whitespace normalization. "return value" does not exactly match
+    # "    return   value", so the tool reports no_match (regardless of
+    # line anchor presence) and leaves the file untouched. Kept as a
+    # regression guard confirming the unsafe_normalized path is gone.
     (workspace / "code.py").write_text(
         "def run():\n    return   value\n", encoding="utf-8"
     )
@@ -241,16 +279,19 @@ async def test_patch_file_rejects_unanchored_normalized_single_line(
     )
 
     assert outcome.success is False
-    assert outcome.result_summary == "unsafe_normalized_single_line"
-    assert "requires a line anchor" in outcome.summary
+    assert outcome.result_summary == "no_match"
     assert (workspace / "code.py").read_text(encoding="utf-8") == (
         "def run():\n    return   value\n"
     )
 
 
-async def test_patch_file_preserves_cross_dedent_normalized_reindent(
+async def test_patch_file_rejects_whitespace_only_cross_dedent_match(
     workspace: Path,
 ) -> None:
+    # Normalized reindent was removed; the old_text indentation does not
+    # match the source, so the tool reports no_match and leaves the file
+    # untouched. Kept as a regression guard confirming the reindent path
+    # is gone.
     original = "def run():\n    if ready:\n        work()\nreturn done\n"
     (workspace / "code.py").write_text(original, encoding="utf-8")
     outcome = await PatchFileTool().run(
@@ -264,15 +305,20 @@ async def test_patch_file_preserves_cross_dedent_normalized_reindent(
         loop_id=1,
     )
 
-    assert outcome.success is True
-    assert (workspace / "code.py").read_text(encoding="utf-8") == (
-        "def run():\n    if ready:\n        changed()\nreturn done\n"
-    )
+    assert outcome.success is False
+    assert outcome.result_summary == "no_match"
+    assert (workspace / "code.py").read_text(encoding="utf-8") == original
 
 
-async def test_patch_file_rejects_ambiguous_intentional_reindent(
+async def test_patch_file_rejects_whitespace_only_intentional_reindent(
     workspace: Path,
 ) -> None:
+    # The unsafe_normalized_indentation result code was removed along with
+    # normalized matching. The old_text does not exactly match the
+    # 4-space-indented source (its second line "return value" lacks the
+    # leading indent), so the tool reports no_match and leaves the file
+    # untouched. Kept as a regression guard confirming the
+    # unsafe_normalized_indentation path is gone.
     original = "def run():\n    value = 1\n    return value\n"
     (workspace / "code.py").write_text(original, encoding="utf-8")
     outcome = await PatchFileTool().run(
@@ -287,7 +333,7 @@ async def test_patch_file_rejects_ambiguous_intentional_reindent(
     )
 
     assert outcome.success is False
-    assert outcome.result_summary == "unsafe_normalized_indentation"
+    assert outcome.result_summary == "no_match"
     assert (workspace / "code.py").read_text(encoding="utf-8") == original
 
 
@@ -436,7 +482,10 @@ async def test_run_shell_argv_only(workspace: Path) -> None:
     sandbox = SandboxRunner(repo)
     tool = RunShellTool(sandbox)
     outcome = await tool.run(
-        args={"argv": ["echo", "hello"], "timeout": 5},
+        args={
+            "argv": [sys.executable, "-c", "print('hello')"],
+            "timeout": 5,
+        },
         workspace_root=workspace,
         task_id="t1",
         loop_id=1,

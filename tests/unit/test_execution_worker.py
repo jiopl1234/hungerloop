@@ -57,7 +57,14 @@ def test_execution_worker_prompt_includes_tool_arg_schemas() -> None:
     assert "write_file: args = {path: str (required), content: str (required)}" in prompt
     assert '"tool_name":"write_file"' in prompt
     assert '"path":"hello.txt"' in prompt
-    assert "never a command string" in prompt
+    assert "executes argv directly without an implicit shell" in prompt
+    assert "['cmd', '/c', 'dir', '/b']" in prompt
+    assert "['bash', '-lc', 'find . -maxdepth 2 -type f']" in prompt
+    assert "where a working Bash is available" in prompt
+    assert "Never pass one unsplit command as argv" in prompt
+    assert "empty action list before a verification has succeeded" not in prompt
+    assert "must patch them" not in prompt
+    assert "harness will reject your empty-actions handoff" not in prompt
 
 
 async def test_execution_worker_dispatches_scripted_actions(
@@ -384,6 +391,11 @@ async def test_execution_worker_replays_final_ranged_read_next_loop(
                 json_data=handoff_body,
                 usage=ModelUsage(input_tokens=1, output_tokens=1),
             ),
+            ModelResponse(
+                content=json.dumps(handoff_body),
+                json_data=handoff_body,
+                usage=ModelUsage(input_tokens=1, output_tokens=1),
+            ),
         ]
     )
     worker, _, workspace = _build_worker(tmp_path, client)
@@ -391,10 +403,16 @@ async def test_execution_worker_replays_final_ranged_read_next_loop(
     await worker.run(context=_ctx(loop_id=1), workspace_root=workspace)
     await worker.run(context=_ctx(loop_id=2), workspace_root=workspace)
 
-    assert len(captured_messages) == 2
-    second_loop = "\n".join(
-        message["content"] for message in captured_messages[1]
-    )
+    replay_prompts = [
+        "\n".join(message["content"] for message in messages)
+        for messages in captured_messages
+        if any(
+            "Replay of the last 1 action/result pair(s)" in message["content"]
+            for message in messages
+        )
+    ]
+    assert len(replay_prompts) == 1
+    second_loop = replay_prompts[0]
     assert "Replay of the last 1 action/result pair(s)" in second_loop
     assert "[lines 691-693 of 750]" in second_loop
     assert "TARGET-LINE-691" in second_loop
@@ -456,14 +474,12 @@ async def test_execution_worker_emits_consecutive_read_only_streak(
     assert first_payload["threshold_reached"] is False
     assert second_payload["streak"] == 2
     assert second_payload["threshold_reached"] is True
-    assert second_payload["read_count"] == 2
-    assert second_payload["blocked_nonwriting_action_count"] == (
-        MAX_SELF_REPAIR_ITERATIONS - 1
-    )
+    assert second_payload["read_count"] == MAX_SELF_REPAIR_ITERATIONS + 1
+    assert second_payload["blocked_nonwriting_action_count"] == 0
     assert second_payload["write_count"] == 0
 
 
-async def test_execution_worker_forces_nonempty_read_batches_toward_edit(
+async def test_execution_worker_read_followup_is_diagnostic_only(
     tmp_path: Path,
 ) -> None:
     import json
@@ -507,18 +523,16 @@ async def test_execution_worker_forces_nonempty_read_batches_toward_edit(
     )
 
     assert len(captured_messages) == MAX_SELF_REPAIR_ITERATIONS + 1
-    second_call = captured_messages[1][-1]["content"]
-    assert "MANDATORY EDIT" in second_call
-    assert "CALL BUDGET: 5 model call(s) remain" in second_call
-    third_call = captured_messages[2][-1]["content"]
-    assert third_call.startswith("STOP READING")
-    assert "CALL BUDGET: 4 model call(s) remain" in third_call
-    final_call = captured_messages[-1][-1]["content"]
-    assert "FINAL MODEL CALL" in final_call
-    assert "read-only response will be discarded" in final_call
+    for messages in captured_messages[1:]:
+        followup = messages[-1]["content"]
+        assert "Tool results from your previous action batch" in followup
+        assert "MANDATORY EDIT" not in followup
+        assert "STOP READING" not in followup
+        assert "FINAL MODEL CALL" not in followup
+        assert "must contain a write_file/patch_file" not in followup
 
 
-async def test_execution_worker_empty_batches_do_not_reset_nonwriting_block(
+async def test_execution_worker_empty_batch_ends_read_only_iteration(
     tmp_path: Path,
 ) -> None:
     import json
@@ -546,8 +560,7 @@ async def test_execution_worker_empty_batches_do_not_reset_nonwriting_block(
             usage=ModelUsage(input_tokens=1, output_tokens=1),
         )
 
-    # read, read, empty, read, read, read: the empty batch must not reset
-    # the non-writing streak, so batches 4-6 are all blocked.
+    # An empty batch is an explicit handoff, so responses after it are unused.
     client = DummyModelClient(
         [
             _resp(read_body),
@@ -572,10 +585,11 @@ async def test_execution_worker_empty_batches_do_not_reset_nonwriting_block(
     assert len(events) == 1
     payload = events[0]["payload"]
     assert isinstance(payload, dict)
-    assert payload["blocked_nonwriting_action_count"] == 3
+    assert payload["read_count"] == 2
+    assert payload["blocked_nonwriting_action_count"] == 0
 
 
-async def test_execution_worker_blocks_shell_only_batches_after_threshold(
+async def test_execution_worker_allows_shell_only_batches_after_threshold(
     tmp_path: Path,
 ) -> None:
     import json
@@ -621,9 +635,7 @@ async def test_execution_worker_blocks_shell_only_batches_after_threshold(
     assert isinstance(payload, dict)
     assert payload["read_count"] == 0
     assert payload["shell_count"] == MAX_SELF_REPAIR_ITERATIONS + 1
-    assert payload["blocked_nonwriting_action_count"] == (
-        MAX_SELF_REPAIR_ITERATIONS - 1
-    )
+    assert payload["blocked_nonwriting_action_count"] == 0
 
 
 def test_execution_worker_renders_acceptance_progress_block() -> None:
@@ -670,15 +682,10 @@ def test_execution_worker_omits_progress_block_when_no_keys_set() -> None:
     assert "[H-001:" not in user_msg
 
 
-async def test_execution_worker_rejects_empty_handoff_when_no_writes_under_verification(
+async def test_execution_worker_accepts_empty_handoff_without_forced_edit(
     tmp_path: Path,
 ) -> None:
-    """With acceptance_criteria present and no write_file/patch_file in
-    this loop, the worker must NOT accept an empty action batch as a
-    clean handoff — even if a run_shell happened to succeed against an
-    already-present artifact. This is the tightened cross-loop fix: the
-    looser "any run_shell success → verified" rule let mini-sql loops
-    2/3/4 hand off after only reading code, blocking progress."""
+    """An empty action list is an explicit handoff, even with verification."""
     import json
 
     from hungerloop.models.usage import ModelUsage
@@ -707,12 +714,8 @@ async def test_execution_worker_rejects_empty_handoff_when_no_writes_under_verif
     ctx = _ctx(acceptance_criteria=["command: python -c 'pass'"])
     await worker.run(context=ctx, workspace_root=workspace)
 
-    # All MAX_SELF_REPAIR_ITERATIONS+1 iterations consumed: each empty
-    # handoff is pushed back ("you have NOT yet written or patched") and
-    # the model (a DummyModelClient that keeps emitting empty) never
-    # writes, so we exhaust the budget. Under the OLD rule this would
-    # have stopped at iter 0 with 1 model call.
-    assert call_count["n"] == MAX_SELF_REPAIR_ITERATIONS + 1
+    # The model explicitly hands off immediately; later responses are unused.
+    assert call_count["n"] == 1
 
 
 async def test_execution_worker_followup_surfaces_patch_file_diagnostic(
@@ -798,7 +801,7 @@ async def test_execution_worker_followup_surfaces_patch_file_diagnostic(
     assert "closest_matches:" in body
 
 
-async def test_execution_worker_escalates_after_two_patch_misses(
+async def test_execution_worker_does_not_force_rewrite_after_patch_misses(
     tmp_path: Path,
 ) -> None:
     import json
@@ -853,8 +856,9 @@ async def test_execution_worker_escalates_after_two_patch_misses(
 
     third_turn = captured[2]
     last_user = next(message for message in reversed(third_turn) if message["role"] == "user")
-    assert "PATCH ESCALATION" in last_user["content"]
-    assert "write_file" in last_user["content"]
+    assert "old_text not found" in last_user["content"]
+    assert "PATCH ESCALATION" not in last_user["content"]
+    assert "FULL current file content" not in last_user["content"]
 
 
 async def test_execution_worker_passes_retry_kwargs(tmp_path: Path) -> None:

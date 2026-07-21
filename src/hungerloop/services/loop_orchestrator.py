@@ -29,7 +29,7 @@ from typing import Protocol, runtime_checkable
 
 from hungerloop.models.blackboard import CandidateState
 from hungerloop.models.context import ContextPack
-from hungerloop.models.enums import CompletionMode, LoopPhase, StopReason
+from hungerloop.models.enums import CompletionMode, LoopPhase, StopReason, ValidationVerdict
 from hungerloop.models.events import EventType
 from hungerloop.models.hunger import HungerClockState, HungerLedger, HungerPolicy, HungerSnapshot
 from hungerloop.models.mission import (
@@ -164,6 +164,9 @@ def _should_draft_sample(
 AUTO_OPEN_NET_RATIO = 3
 """Newly-passed checks required per repeated regressed key before the
 auto-open trigger considers a rejected candidate net-positive."""
+
+_NON_BLOCKING_FEATURE_ERROR_TYPES = frozenset({"model_call_error", "timeout"})
+"""Worker execution failures that do not make the feature itself blocked."""
 
 
 def _auto_open_declared_keys(
@@ -362,8 +365,9 @@ class LoopOrchestrator:
         # ``failure_patterns_to_avoid`` in the winner's next-loop
         # ContextBuilder history (v0.7.1 loop memory).
         draft_evidence_ids: dict[int, set[str]] = {}
-        previous_hashes: dict[str, str] | None = None
         worker_passes_run = 0
+        # Retained in the event payload for backward compatibility. Fixed-k
+        # sampling never short-circuits a requested draft.
         short_circuited_draft_indexes: list[int] = []
         for draft_index in range(1, draft_k + 1):
             if draft_index > 1:
@@ -388,22 +392,6 @@ class LoopOrchestrator:
                 budget=budget,
             )
             worker_passes_run += 1
-            current_hashes = self.workspace_manager.candidate_files_hashes(
-                task_id, loop_id
-            )
-            if previous_hashes is not None and current_hashes == previous_hashes:
-                # Deterministic-provider short-circuit: this draft
-                # reproduced the previous one byte-for-byte; further
-                # samples are pure waste (dummy provider, temp-0 configs).
-                # It still ran a worker pass and persisted tool-call evidence,
-                # and is always a loser (never appended to ``drafts``); record
-                # its rows so the post-selection cleanup drops them.
-                draft_evidence_ids[draft_index] = (
-                    self._tool_call_evidence_ids(task_id) - evidence_before
-                )
-                short_circuited_draft_indexes.append(draft_index)
-                break
-            previous_hashes = current_hashes
             probe = self.integrator.integrate(
                 task_id,
                 loop_id,
@@ -441,9 +429,9 @@ class LoopOrchestrator:
         # The replay cache now holds the LAST draft's actions; drop it so
         # the next loop does not replay a discarded loser.
         self.worker_runtime.reset_inner_replay(task_id)
-        # Drop every non-winner draft's tool-call evidence (losers plus the
-        # short-circuited duplicate). The winner's ids are never in this set,
-        # so its handoff evidence_ids and next-loop history stay intact.
+        # Drop every non-winner draft's tool-call evidence. The winner's ids
+        # are never in this set, so its handoff evidence_ids and next-loop
+        # history stay intact.
         loser_evidence_ids = [
             evidence_id
             for index, ids in draft_evidence_ids.items()
@@ -473,10 +461,9 @@ class LoopOrchestrator:
             {
                 "loop_id": loop_id,
                 "requested_k": draft_k,
-                # ``draft_count`` is intentionally the number of drafts that
-                # reached deterministic evaluation. A duplicate can still
-                # consume a full worker/model pass, so expose that spend
-                # separately instead of overloading this field.
+                # ``draft_count`` is the number of drafts that reached
+                # deterministic evaluation. Fixed-k sampling always evaluates
+                # every requested draft, even when two trees are byte-identical.
                 "draft_count": len(drafts),
                 "worker_passes_run": worker_passes_run,
                 "short_circuited_draft_indexes": short_circuited_draft_indexes,
@@ -688,12 +675,25 @@ class LoopOrchestrator:
             )
             return self._emit_stop(task_id, StopReason.SAFETY_STOP)
         previous_trace = self.repo.get_loop_trace(task_id, loop_id - 1)
-        self._maybe_continue_rejected_candidate(
+        continued_from_rejected = self._maybe_continue_rejected_candidate(
             task_id=task_id,
             loop_id=loop_id,
             policy=policy,
             previous_trace=previous_trace,
             has_assignments=bool(plan.assignments),
+        )
+        candidate_root = self.workspace_manager.candidate_files_dir(
+            task_id,
+            loop_id,
+        )
+        candidate_started_from_best = (
+            self.workspace_manager.workspace_matches_best_manifest(
+                task_id,
+                candidate_root,
+            )
+        )
+        candidate_hashes_before_worker = (
+            self.workspace_manager.candidate_files_hashes(task_id, loop_id)
         )
         self._emit_feature_assigned_events(
             task_id=task_id,
@@ -843,25 +843,82 @@ class LoopOrchestrator:
             loop_id=loop_id,
         )
         validation_phase = self._phase_for_validation(mission, plan)
-        try:
-            pipeline_result = await self.validation_pipeline.run(
-                task_id=task_id,
-                loop_id=loop_id,
-                candidate=candidate,
-                target_hunger_item_ids=attempted_hunger_item_ids,
-                mission=mission,
-                phase=validation_phase,
-                budget=budget,
+        # Skip full validation when the worker leaves a previously evaluated
+        # starting tree byte-identical. A first-loop mission seed is not
+        # redundant: it may satisfy checks before the worker edits anything.
+        # An open ADR-010 transaction can also change whether an unchanged
+        # rejected continuation is committable, so that case is revalidated.
+        candidate_hashes_after_worker = (
+            self.workspace_manager.candidate_files_hashes(task_id, loop_id)
+        )
+        candidate_unchanged = (
+            candidate_hashes_after_worker == candidate_hashes_before_worker
+        )
+        continuation_can_change_commit_outcome = (
+            continued_from_rejected
+            and self.repo.get_open_refactor_transaction(task_id) is not None
+        )
+        no_change_is_redundant = candidate_unchanged and (
+            candidate_started_from_best
+            or (
+                continued_from_rejected
+                and not continuation_can_change_commit_outcome
             )
-        except SafetyStopError:
-            self.workspace_manager.reject_candidate(task_id, loop_id)
+        )
+        if no_change_is_redundant:
             self.repo.append_event(
-                EventType.SAFETY_STOP,
-                {"loop_id": loop_id, "stage": "validation_pipeline"},
+                EventType.CANDIDATE_NO_EFFECTIVE_CHANGE,
+                {
+                    "candidate_state_id": candidate.id,
+                    "loop_id": loop_id,
+                    "baseline": "loop_start_workspace",
+                    "loop_start_source": (
+                        "rejected_continuation"
+                        if continued_from_rejected
+                        else "best_manifest"
+                    ),
+                },
                 task_id=task_id,
                 loop_id=loop_id,
             )
-            return self._emit_stop(task_id, StopReason.SAFETY_STOP)
+            best = self.repo.get_best_state(task_id)
+            pipeline_result = ValidationPipelineResult(
+                deterministic_report=ValidationReport(
+                    id=f"VAL-{task_id}-{loop_id}",
+                    task_id=task_id,
+                    loop_id=loop_id,
+                    candidate_state_id=candidate.id,
+                    baseline_state_id=best.state_id if best else None,
+                    verdict=ValidationVerdict.FAIL,
+                    attempted_hunger_item_ids=attempted_hunger_item_ids,
+                    currently_passed_check_keys=(
+                        list(best.accepted_check_keys) if best else []
+                    ),
+                    evidence_ids=list(candidate.evidence_ids),
+                ),
+                pipeline_verdict="fail",
+                stages_run=[],
+            )
+        else:
+            try:
+                pipeline_result = await self.validation_pipeline.run(
+                    task_id=task_id,
+                    loop_id=loop_id,
+                    candidate=candidate,
+                    target_hunger_item_ids=attempted_hunger_item_ids,
+                    mission=mission,
+                    phase=validation_phase,
+                    budget=budget,
+                )
+            except SafetyStopError:
+                self.workspace_manager.reject_candidate(task_id, loop_id)
+                self.repo.append_event(
+                    EventType.SAFETY_STOP,
+                    {"loop_id": loop_id, "stage": "validation_pipeline"},
+                    task_id=task_id,
+                    loop_id=loop_id,
+                )
+                return self._emit_stop(task_id, StopReason.SAFETY_STOP)
         validation = pipeline_result.deterministic_report
         self.repo.save_validation_report(validation)
         self._emit_check_events(task_id, loop_id, validation)
@@ -1195,7 +1252,7 @@ class LoopOrchestrator:
         policy: HungerPolicy,
         previous_trace: LoopTrace | None,
         has_assignments: bool,
-    ) -> None:
+    ) -> bool:
         if (
             not has_assignments
             or previous_trace is None
@@ -1203,7 +1260,7 @@ class LoopOrchestrator:
             or previous_trace.committed
             or previous_trace.stop_reason is not None
         ):
-            return
+            return False
 
         source_loop_id = loop_id - 1
         source_events = self.repo.list_events(
@@ -1271,7 +1328,7 @@ class LoopOrchestrator:
                 task_id=task_id,
                 loop_id=loop_id,
             )
-            return
+            return True
 
         self.repo.append_event(
             EventType.CANDIDATE_CONTINUATION_SKIPPED,
@@ -1279,6 +1336,7 @@ class LoopOrchestrator:
             task_id=task_id,
             loop_id=loop_id,
         )
+        return False
 
     def _save_and_emit_handoffs(
         self,
@@ -1415,6 +1473,11 @@ class LoopOrchestrator:
     ) -> None:
         feature = self._feature_for_assignment(mission, assignment)
         if mission is None or feature is None:
+            return
+        if (
+            not handoff.requires_human
+            and handoff.error_type in _NON_BLOCKING_FEATURE_ERROR_TYPES
+        ):
             return
         if not (handoff.requires_human or handoff.error_type is not None):
             return

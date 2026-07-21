@@ -4,7 +4,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, cast
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -320,6 +320,12 @@ async def test_next_loop_continues_rejected_candidate_in_isolation(
         ],
     )
     _seed_task(repo, [item])
+    repo.set_hunger_policy(
+        "t1",
+        repo.get_hunger_policy("t1").model_copy(
+            update={"rejected_candidate_continuation_enabled": True}
+        ),
+    )
 
     class _ContinuationWorker:
         async def run(
@@ -393,6 +399,81 @@ async def test_next_loop_continues_rejected_candidate_in_isolation(
 
 
 @pytest.mark.parametrize(
+    ("open_transaction", "expected_validation_calls"),
+    [(False, 1), (True, 2)],
+)
+async def test_no_effective_change_compares_with_loop_start_workspace(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    open_transaction: bool,
+    expected_validation_calls: int,
+) -> None:
+    repo = InMemoryRepository()
+    item = HungerItem(
+        id="H-001",
+        title="produce report",
+        priority=1.0,
+        gap_score=1.0,
+        acceptance_checks=[
+            AcceptanceCheck(
+                check_type=AcceptanceCheckType.FILE_EXISTS,
+                params={"path": "report.md"},
+            ),
+        ],
+    )
+    _seed_task(repo, [item])
+    repo.set_hunger_policy(
+        "t1",
+        repo.get_hunger_policy("t1").model_copy(
+            update={"rejected_candidate_continuation_enabled": True}
+        ),
+    )
+
+    class _NoChangeContinuationWorker:
+        async def run(
+            self, *, context: ContextPack, workspace_root: Path
+        ) -> WorkerResult:
+            if context.loop_id == 1:
+                (workspace_root / "partial.py").write_text(
+                    "partial = True\n", encoding="utf-8"
+                )
+            else:
+                assert (workspace_root / "partial.py").read_text(
+                    encoding="utf-8"
+                ) == "partial = True\n"
+            return WorkerResult(
+                agent_id=context.agent_id,
+                task_id=context.task_id,
+                loop_id=context.loop_id,
+                summary="no additional edit",
+                evidence_ids=[f"ev-{context.loop_id}"],
+            )
+
+    orchestrator = _build_orchestrator(
+        tmp_path=tmp_path,
+        repo=repo,
+        workers={"execution_worker_v1": _NoChangeContinuationWorker()},
+    )
+    pipeline_spy = AsyncMock(wraps=orchestrator.validation_pipeline.run)
+    monkeypatch.setattr(orchestrator.validation_pipeline, "run", pipeline_spy)
+
+    first = await orchestrator.step("t1")
+    if open_transaction:
+        repo.save_refactor_transaction(_open_txn_for_t1(["H-001:0"]))
+    second = await orchestrator.step("t1")
+
+    assert isinstance(first, LoopTrace)
+    assert isinstance(second, LoopTrace)
+    assert pipeline_spy.await_count == expected_validation_calls
+    events = repo.list_events(
+        "t1", event_types=[EventType.CANDIDATE_NO_EFFECTIVE_CHANGE.value]
+    )
+    assert len(events) == (0 if open_transaction else 1)
+    if events:
+        assert events[0]["loop_id"] == 2
+
+
+@pytest.mark.parametrize(
     ("policy", "prior_payload", "regressed_check_keys", "expected_reason"),
     [
         (
@@ -402,13 +483,19 @@ async def test_next_loop_continues_rejected_candidate_in_isolation(
             "policy_disabled",
         ),
         (
-            HungerPolicy(rejected_candidate_continuation_max_chain=2),
+            HungerPolicy(
+                rejected_candidate_continuation_enabled=True,
+                rejected_candidate_continuation_max_chain=2,
+            ),
             {"chain_length": 2, "regressed_check_keys": []},
             [],
             "max_chain_reached",
         ),
         (
-            HungerPolicy(rejected_candidate_continuation_max_chain=2),
+            HungerPolicy(
+                rejected_candidate_continuation_enabled=True,
+                rejected_candidate_continuation_max_chain=2,
+            ),
             {"chain_length": 1, "regressed_check_keys": ["H-OLD:0"]},
             ["H-OLD:0"],
             "repeated_regression",
@@ -1113,6 +1200,24 @@ class _RequiresHumanWorker:
         )
 
 
+class _TransientModelFailureWorker:
+    def __init__(self, error_type: str) -> None:
+        self.error_type = error_type
+
+    async def run(
+        self, *, context: ContextPack, workspace_root: Path
+    ) -> WorkerResult:
+        return WorkerResult(
+            agent_id=context.agent_id,
+            task_id=context.task_id,
+            loop_id=context.loop_id,
+            error=f"{self.error_type}:transient_failure",
+            error_type=self.error_type,
+            requires_human=False,
+            retryable=True,
+        )
+
+
 async def test_safety_stop_propagates(tmp_path: Path) -> None:
     repo = InMemoryRepository()
     item = HungerItem(
@@ -1159,6 +1264,7 @@ async def test_requires_human_short_circuits(tmp_path: Path) -> None:
         ],
     )
     _seed_task(repo, [item])
+    _save_mission_graph(repo, _mission_for_item())
 
     orchestrator = _build_orchestrator(
         tmp_path=tmp_path,
@@ -1171,6 +1277,55 @@ async def test_requires_human_short_circuits(tmp_path: Path) -> None:
     assert outcome.stop_reason is StopReason.HUMAN_REQUIRED
     assert outcome.goal_status == "paused"
     assert any(event["event_type"] == "human_required" for event in repo._events)
+    features = repo.list_mission_features("mission-1")
+    assert features[0].status == "blocked"
+    assert any(
+        event["event_type"] == EventType.MISSION_FEATURE_BLOCKED.value
+        for event in repo._events
+    )
+
+
+@pytest.mark.parametrize("error_type", ["model_call_error", "timeout"])
+async def test_transient_model_failure_keeps_feature_plannable(
+    tmp_path: Path,
+    error_type: str,
+) -> None:
+    repo = InMemoryRepository()
+    item = HungerItem(
+        id="H-001",
+        title="x",
+        priority=1.0,
+        gap_score=1.0,
+        acceptance_checks=[
+            AcceptanceCheck(
+                check_type=AcceptanceCheckType.FILE_EXISTS,
+                params={"path": "x.md"},
+            )
+        ],
+    )
+    _seed_task(repo, [item])
+    _save_mission_graph(repo, _mission_for_item())
+    orchestrator = _build_orchestrator(
+        tmp_path=tmp_path,
+        repo=repo,
+        workers={
+            "execution_worker_v1": _TransientModelFailureWorker(error_type)
+        },
+    )
+
+    first = await orchestrator.step("t1")
+    second = await orchestrator.step("t1")
+
+    assert isinstance(first, LoopTrace)
+    assert isinstance(second, LoopTrace)
+    assert first.selected_hunger_item_ids == ["H-001"]
+    assert second.selected_hunger_item_ids == ["H-001"]
+    features = repo.list_mission_features("mission-1")
+    assert features[0].status == "in_progress"
+    assert not any(
+        event["event_type"] == EventType.MISSION_FEATURE_BLOCKED.value
+        for event in repo._events
+    )
 
 
 async def test_human_paused_via_frozen_clock(tmp_path: Path) -> None:
@@ -1285,7 +1440,10 @@ def test_repeated_regression_continues_when_transaction_declares_keys(
     abandoning the continuation would defeat it."""
     repo = InMemoryRepository()
     orchestrator, current_candidate = _continuation_setup(tmp_path, repo)
-    policy = HungerPolicy(refactor_transactions_enabled=True)
+    policy = HungerPolicy(
+        refactor_transactions_enabled=True,
+        rejected_candidate_continuation_enabled=True,
+    )
     repo.set_hunger_policy("t1", policy)
     repo.save_refactor_transaction(_open_txn_for_t1(["H-001:10"]))
     repo.append_event(
@@ -1332,7 +1490,10 @@ def test_repeated_regression_still_skips_when_transaction_covers_other_keys(
 ) -> None:
     repo = InMemoryRepository()
     orchestrator, current_candidate = _continuation_setup(tmp_path, repo)
-    policy = HungerPolicy(refactor_transactions_enabled=True)
+    policy = HungerPolicy(
+        refactor_transactions_enabled=True,
+        rejected_candidate_continuation_enabled=True,
+    )
     repo.set_hunger_policy("t1", policy)
     repo.save_refactor_transaction(_open_txn_for_t1(["H-001:99"]))
     repo.append_event(

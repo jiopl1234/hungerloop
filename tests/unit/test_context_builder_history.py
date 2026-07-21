@@ -25,7 +25,6 @@ from hungerloop.services.context_builder import (
     MAX_HISTORY_CHARS,
     MAX_WORKSPACE_FILE_PATH_CHARS,
     MAX_WORKSPACE_FILES_LINE_CHARS,
-    READ_ONLY_REJECTED_HINT,
     ContextBuilder,
     _apply_history_cap,
 )
@@ -69,8 +68,12 @@ Required JSON shape example:
 """
     '{"summary":"created hello.txt","actions":[{"tool_name":"write_file",'
     '"args":{"path":"hello.txt","content":"hello"}}]}\n\n'
-    "Use exactly the listed args shape for each tool. For run_shell, use "
-    "an argv array and never a command string."
+    "Use exactly the listed args shape for each tool. run_shell executes argv "
+    "directly without an implicit shell. Use an argv array; for shell built-ins "
+    "or operators, invoke an available shell explicitly, for example "
+    "['cmd', '/c', 'dir', '/b'] on Windows or "
+    "['bash', '-lc', 'find . -maxdepth 2 -type f'] where a working Bash is "
+    "available. Never pass one unsplit command as argv."
 ).replace("{READ_FILE_SCHEMA}", _READ_FILE_SCHEMA).replace(
     "{PATCH_FILE_SCHEMA}", _PATCH_FILE_SCHEMA
 )
@@ -535,6 +538,52 @@ def test_latest_ranged_read_survives_history_truncation() -> None:
     assert "large.py[1-211,691-693]" in pack.failure_patterns_to_avoid[0]
 
 
+def test_newest_failure_keeps_full_detail_under_degradation() -> None:
+    """Under history overflow the degrade sweep must trim OLDER failures
+    first and keep the newest, most-actionable failure at full detail —
+    even though a read-coverage recap is prepended ahead of it."""
+    from hungerloop.services.context_builder import DEGRADED_FAILURE_LINE_CHARS
+
+    repo = InMemoryRepository()
+    _seed_rejected_loop_without_tool_evidence(repo, 1)
+    # A read gives the prepended coverage line (lands at failure index 0).
+    repo.save_tool_call_as_evidence(
+        task_id="t1", loop_id=1, agent_id="execution_worker_v1",
+        tool_name="read_file", args_summary="path=large.py offset=1 limit=50",
+        result_summary="[lines 1-50 of 750]\ncontent", success=True, elapsed_ms=1,
+    )
+    report = repo.get_validation_report("VAL-t1-1")
+    assert report is not None
+    failures = [
+        CheckResult(
+            hunger_item_id=f"H-{index:02d}",
+            check_index=0,
+            check_key=f"H-{index:02d}:0",
+            check_type=AcceptanceCheckType.FILE_EXISTS,
+            passed=False,
+            detail=("NEWEST-MARKER " if index == 0 else f"old-{index} ")
+            + (str(index) * 2000),
+        )
+        for index in range(10)
+    ]
+    repo.save_validation_report(
+        report.model_copy(update={"check_results": failures})
+    )
+
+    pack = _build_pack(repo, loop_id=2, path="large.py")
+
+    assert pack.truncation_info is not None
+    joined = "\n".join(pack.failure_patterns_to_avoid)
+    # The newest failure (rendered right after the coverage recap) keeps its
+    # full detail; some older failure was degraded to the one-line form.
+    assert "NEWEST-MARKER " + ("0" * 2000) in joined
+    assert any(
+        0 < len(line) <= DEGRADED_FAILURE_LINE_CHARS + 40
+        and line.startswith("loop 1: H-")
+        for line in pack.failure_patterns_to_avoid
+    )
+
+
 def test_read_coverage_merges_ranges_across_recent_loops() -> None:
     repo = InMemoryRepository()
     for loop_id in (1, 2):
@@ -566,7 +615,7 @@ def test_read_coverage_merges_ranges_across_recent_loops() -> None:
     assert "loops 1-2 large.py[1-349,500-519]" in coverage
 
 
-def test_budgeted_mode_warns_after_two_read_only_rejections() -> None:
+def test_read_only_history_stays_diagnostic_only() -> None:
     repo = InMemoryRepository()
     repo.set_hunger_policy(
         "t1",
@@ -587,32 +636,15 @@ def test_budgeted_mode_warns_after_two_read_only_rejections() -> None:
 
     pack = _build_pack(repo, loop_id=3, path="fizzbuzz.py")
 
-    assert pack.failure_patterns_to_avoid[0] == READ_ONLY_REJECTED_HINT
+    assert all(
+        "next attempt must patch/write" not in line
+        for line in pack.failure_patterns_to_avoid
+    )
     user_message = ExecutionWorker._messages(pack)[1]["content"]
-    assert READ_ONLY_REJECTED_HINT in user_message
+    assert "next attempt must patch/write" not in user_message
 
 
-def test_default_mode_does_not_warn_after_two_read_only_rejections() -> None:
-    repo = InMemoryRepository()
-    for loop_id in (1, 2):
-        _seed_rejected_loop_without_tool_evidence(repo, loop_id)
-        repo.save_tool_call_as_evidence(
-            task_id="t1",
-            loop_id=loop_id,
-            agent_id="execution_worker_v1",
-            tool_name="read_file",
-            args_summary="path=fizzbuzz.py",
-            result_summary="def fizzbuzz(n): return str(n)",
-            success=True,
-            elapsed_ms=1,
-        )
-
-    pack = _build_pack(repo, loop_id=3, path="fizzbuzz.py")
-
-    assert READ_ONLY_REJECTED_HINT not in pack.failure_patterns_to_avoid
-
-
-def test_default_mode_warns_from_worker_read_only_streak_event() -> None:
+def test_worker_read_only_streak_event_does_not_modify_context() -> None:
     repo = InMemoryRepository()
     repo.append_event(
         EventType.WORKER_READ_ONLY_STREAK,
@@ -630,54 +662,10 @@ def test_default_mode_warns_from_worker_read_only_streak_event() -> None:
 
     pack = _build_pack(repo, loop_id=3, path="fizzbuzz.py")
 
-    assert pack.failure_patterns_to_avoid[0] == READ_ONLY_REJECTED_HINT
-    assert READ_ONLY_REJECTED_HINT in ExecutionWorker._messages(pack)[1]["content"]
-
-
-def test_read_only_streak_event_is_scoped_to_worker_agent() -> None:
-    repo = InMemoryRepository()
-    repo.append_event(
-        EventType.WORKER_READ_ONLY_STREAK,
-        {
-            "agent_id": "other_worker",
-            "streak": 2,
-            "threshold_reached": True,
-        },
-        task_id="t1",
-        loop_id=2,
+    assert pack.failure_patterns_to_avoid == []
+    assert "next attempt must patch/write" not in (
+        ExecutionWorker._messages(pack)[1]["content"]
     )
-
-    pack = _build_pack(repo, loop_id=3, path="fizzbuzz.py")
-
-    assert READ_ONLY_REJECTED_HINT not in pack.failure_patterns_to_avoid
-
-
-def test_read_only_streak_finds_agent_event_before_other_worker_event() -> None:
-    repo = InMemoryRepository()
-    repo.append_event(
-        EventType.WORKER_READ_ONLY_STREAK,
-        {
-            "agent_id": "execution_worker_v1",
-            "streak": 2,
-            "threshold_reached": True,
-        },
-        task_id="t1",
-        loop_id=2,
-    )
-    repo.append_event(
-        EventType.WORKER_READ_ONLY_STREAK,
-        {
-            "agent_id": "other_worker",
-            "streak": 1,
-            "threshold_reached": False,
-        },
-        task_id="t1",
-        loop_id=2,
-    )
-
-    pack = _build_pack(repo, loop_id=3, path="fizzbuzz.py")
-
-    assert pack.failure_patterns_to_avoid[0] == READ_ONLY_REJECTED_HINT
 
 
 def test_static_workspace_reader_inventory_sorts_and_truncates() -> None:

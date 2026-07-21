@@ -502,6 +502,54 @@ async def test_targets_only(
     assert "H-ignored:0" not in report.currently_passed_check_keys
 
 
+async def test_no_progress_target_still_checks_regressions_for_continuation(
+    gate_setup: tuple[ValidationGate, InMemoryRepository, WorkspaceManager],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    gate, repo, _ = gate_setup
+    target = _file_exists_item("H-target", ["target.md"])
+    previous = _file_exists_item("H-prev", ["previous.md"])
+    repo.save_hunger_ledger(
+        "t1",
+        HungerLedger(task_id="t1", items=[target, previous]),
+    )
+    for item in (target, previous):
+        repo.save_hunger_item(item)
+    repo.save_best_state(
+        BestState(
+            task_id="t1",
+            state_id="prev",
+            summary="prev",
+            accepted_check_keys=["H-prev:0"],
+        )
+    )
+    repo.set_hunger_policy(
+        "t1",
+        HungerPolicy(
+            rejected_candidate_continuation_enabled=True,
+            regression_confirm_reruns=0,
+        ),
+    )
+    executed: list[str] = []
+
+    async def fail_checks(**kwargs: Any) -> tuple[bool, str, str | None]:
+        path = str(kwargs["check"].params["path"])
+        executed.append(path)
+        return False, f"missing {path}", f"ev-{path}"
+
+    monkeypatch.setattr(gate.runner, "run", fail_checks)
+
+    report = await gate.validate(
+        task_id="t1",
+        loop_id=1,
+        candidate=_candidate(evidence=["seed-ev"]),
+        target_hunger_item_ids=["H-target"],
+    )
+
+    assert executed == ["target.md", "previous.md"]
+    assert report.regressed_check_keys == ["H-prev:0"]
+
+
 # ---- baseline_state_id wiring ------------------------------------------------
 
 

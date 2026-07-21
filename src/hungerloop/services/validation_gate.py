@@ -83,14 +83,15 @@ class ValidationGate:
         all_evidence_ids: list[str] = list(candidate.evidence_ids)
         checks_by_key: dict[str, Any] = {}
 
-        for item in items_to_check:
+        # P2 Phase 1: Run target checks that are NOT yet passing (failing
+        # checks the worker is trying to fix). If none newly pass, skip
+        # the expensive regression phase — the candidate cannot commit
+        # without newly_passed (I-3), so regression checks are wasted work.
+        for item in target_items:
             for idx, check in enumerate(item.acceptance_checks):
                 check_key = make_check_key(item.id, idx)
                 checks_by_key[check_key] = check
-
-                is_target = item.id in target_hunger_item_ids
-                is_regression_check = check_key in previously_passed
-                if not is_target and not is_regression_check:
+                if check_key in previously_passed:
                     continue
 
                 passed, detail, ev_id = await self.runner.run(
@@ -109,7 +110,7 @@ class ValidationGate:
                     hunger_item_id=item.id,
                     check_index=idx,
                     check_key=check_key,
-                    check_type=check.check_type.value,
+                    check_type=check.check_type,
                     passed=passed,
                     previously_passed=previously,
                     newly_passed=newly,
@@ -121,6 +122,55 @@ class ValidationGate:
                 all_results.append(result)
                 if ev_id:
                     all_evidence_ids.append(ev_id)
+
+        # P2 Phase 2: Run regression checks if Phase 1 showed progress,
+        # OR if Phase 1 had no checks to run (all target checks already
+        # passing — the candidate might still have regressed something).
+        continuation_needs_regression_evidence = self.repo.get_hunger_policy(
+            task_id
+        ).rejected_candidate_continuation_enabled
+        if (
+            any(r.newly_passed for r in all_results)
+            or not all_results
+            or continuation_needs_regression_evidence
+        ):
+            for item in items_to_check:
+                for idx, check in enumerate(item.acceptance_checks):
+                    check_key = make_check_key(item.id, idx)
+                    if check_key not in previously_passed:
+                        continue
+                    if any(r.check_key == check_key for r in all_results):
+                        continue
+
+                    checks_by_key[check_key] = check
+                    passed, detail, ev_id = await self.runner.run(
+                        check=check,
+                        task_id=task_id,
+                        loop_id=loop_id,
+                        candidate=candidate,
+                        workspace_root=workspace_root,
+                    )
+
+                    previously = check_key in previously_passed
+                    newly = passed and not previously
+                    is_regressed = previously and not passed
+
+                    result = CheckResult(
+                        hunger_item_id=item.id,
+                        check_index=idx,
+                        check_key=check_key,
+                        check_type=check.check_type,
+                        passed=passed,
+                        previously_passed=previously,
+                        newly_passed=newly,
+                        regressed=is_regressed,
+                        detail=detail,
+                        evidence_id=ev_id,
+                        workspace_ref=candidate.workspace_ref,
+                    )
+                    all_results.append(result)
+                    if ev_id:
+                        all_evidence_ids.append(ev_id)
 
         all_results, confirmation_evidence_ids = await self._confirm_regressions(
             task_id=task_id,

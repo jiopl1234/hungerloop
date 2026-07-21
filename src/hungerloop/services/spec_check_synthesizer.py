@@ -249,24 +249,23 @@ def _is_source_quote_anchored(
 
 
 def _count_synthesized_items(ledger_task_id: str, repo: RepositoryProtocol) -> int:
-    """Count unresolved ``H-SYN-*`` items against the lifetime cap.
+    """Count every ``H-SYN-*`` item ever created against the lifetime cap.
 
-    Resolved items (CLOSED — e.g. invalid synthesis — and
-    VALIDATED_SATISFIED — auto-satisfied at baseline) no longer consume
-    ``synthesis_max_total_items``: a zero-information proposal must not
-    permanently shrink the objective budget. Their accepted checks stay
-    in the I-5 regression baseline regardless of this count.
+    ``synthesis_max_total_items`` is a monotonic kill-switch: it bounds how
+    many synthesized objectives (and therefore how many synthesis LLM
+    calls) a run will ever spend on. Resolved items — CLOSED (invalid
+    synthesis) and VALIDATED_SATISFIED (auto-satisfied at baseline) — MUST
+    still count. Excluding them lets capacity replenish every time a check
+    resolves, so the synthesizer fires on every committed loop (bounded
+    only by CostGuard) instead of hard-stopping at the cap.
+
+    Freeing *concurrency* when items resolve is the job of the separate
+    active-slot cap (:func:`_count_active_synthesized_items`), which does
+    exclude resolved/BLOCKED items. The two caps are intentionally
+    distinct: total = lifetime budget, active = concurrent backpressure.
     """
     ledger = repo.get_hunger_ledger(ledger_task_id)
-    resolved = {
-        HungerItemStatus.CLOSED,
-        HungerItemStatus.VALIDATED_SATISFIED,
-    }
-    return sum(
-        1
-        for item in ledger.items
-        if item.id.startswith("H-SYN-") and item.status not in resolved
-    )
+    return sum(1 for item in ledger.items if item.id.startswith("H-SYN-"))
 
 
 def _count_active_synthesized_items(

@@ -106,6 +106,7 @@ class EventType(str, Enum):
     CANDIDATE_REJECTED = "candidate_rejected"
     CANDIDATE_CONTINUATION_SEEDED = "candidate_continuation_seeded"
     CANDIDATE_CONTINUATION_SKIPPED = "candidate_continuation_skipped"
+    CANDIDATE_NO_EFFECTIVE_CHANGE = "candidate_no_effective_change"
     DRAFT_SAMPLED = "draft_sampled"
 
     # ----- Hunger -------------------------------------------------------

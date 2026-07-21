@@ -178,7 +178,7 @@ class HungerPolicy(BaseModel):
     synthesis_conflict_threshold: int = 2
     synthesis_audit_enabled: bool = False
     regression_confirm_reruns: int = 2
-    rejected_candidate_continuation_enabled: bool = True
+    rejected_candidate_continuation_enabled: bool = False
     rejected_candidate_continuation_max_chain: int = 2
     refactor_transactions_enabled: bool = False
     max_declared_regressions: int = 5
@@ -189,9 +189,9 @@ class HungerPolicy(BaseModel):
     # CommitManager (the sanctioned I-3 amendment, not a new one).
     refactor_auto_open_enabled: bool = False
     refactor_auto_open_min_newly: int = 5
-    # Global no-progress fuse threshold (loops without a committed candidate
-    # before StopReason.BLOCKED). Momentum holds (strictly growing rejected
-    # newly-passed counts) do not consume this budget.
+    # Global no-progress fuse threshold (loops without committed progress
+    # before StopReason.BLOCKED). Rejected candidates consume this budget even
+    # when their raw validation report contains newly-passed checks.
     max_global_no_progress_loops: int = 5
     memory_auto_promote_enabled: bool = True
     memory_recall_enabled: bool = True

@@ -110,23 +110,10 @@ class ExecutionWorker:
         evidence_ids: list[str] = []
         artifact_ids: list[str] = []
         summary = ""
-        # A (tightened): "verified" now means "wrote/patched a file in
-        # THIS loop AND then a run_shell succeeded" — not just "a
-        # run_shell happened to succeed". Cross-loop replay surfaced the
-        # bug: with the looser rule, a worker entering loop N (after
-        # loop N-1 already committed a partial implementation) could
-        # read the existing file, run a test that was already passing,
-        # and call it verified — handing off without writing anything.
-        # mini-sql loops 2/3/4 all exhibited exactly this: empty actions
-        # accepted after pure-read iterations, 0 newly_passed, blocked.
         wrote_anything = False
-        wrote_then_verified = False
         read_count = 0
         shell_count = 0
         write_attempt_count = 0
-        patch_no_match_count = 0
-        consecutive_nonwriting_iterations = 0
-        blocked_nonwriting_action_count = 0
         needs_verification = bool(context.acceptance_criteria)
 
         for iteration in range(MAX_SELF_REPAIR_ITERATIONS + 1):
@@ -162,63 +149,19 @@ class ExecutionWorker:
 
             actions = self._extract_actions(response.json_data)
             action_results: list[tuple[str, ToolResult]] = []
-            batch_has_write_action = any(
-                self._stringify(action.get("tool_name", ""))
-                in ("write_file", "patch_file")
-                for action in actions
-            )
-            block_nonwriting_batch = (
-                consecutive_nonwriting_iterations >= 2
-                and not wrote_anything
-                and bool(actions)
-                and not batch_has_write_action
-            )
             for action in actions:
                 tool_name = self._stringify(action.get("tool_name", ""))
                 args_raw = action.get("args", {})
                 args = args_raw if isinstance(args_raw, dict) else {}
-
-                if block_nonwriting_batch:
-                    blocked_nonwriting_action_count += 1
-                    result = ToolResult(
-                        tool_name=tool_name,
-                        success=False,
-                        summary=(
-                            "read-only action blocked after two consecutive "
-                            "non-writing batches; use write_file or patch_file"
-                        ),
-                        error=(
-                            "read_only_budget_exhausted: the next action batch "
-                            "must edit the candidate before further inspection"
-                        ),
-                        error_type="read_only_budget_exhausted",
-                    )
-                else:
-                    result = await self.tool_harness.execute(
-                        context=context,
-                        tool_name=tool_name,
-                        args=args,
-                        workspace_root=workspace_root,
-                    )
+                result = await self.tool_harness.execute(
+                    context=context,
+                    tool_name=tool_name,
+                    args=args,
+                    workspace_root=workspace_root,
+                )
                 evidence_ids.extend(result.evidence_ids)
                 artifact_ids.extend(result.artifact_ids)
                 action_results.append((tool_name, result))
-
-            patch_no_match_count += sum(
-                tool_name == "patch_file"
-                and not result.success
-                and any(
-                    marker in (result.error or result.summary)
-                    for marker in (
-                        "old_text not found",
-                        "old_text matches",
-                        "whitespace-normalized match is ambiguous",
-                        "whitespace-normalized single-line patch requires",
-                        "whitespace-normalized patch has an unsafe indentation",
-                    )
-                )
-                for tool_name, result in action_results
-            )
 
             new_summary = self._stringify(
                 (response.json_data or {}).get("summary", "")
@@ -230,9 +173,6 @@ class ExecutionWorker:
                     else f"{summary}\n[repair iter {iteration + 1}] {new_summary}"
                 )
 
-            # Track the two halves separately so a write in iter K plus a
-            # run_shell success in iter K+M (M>=0) counts as verified —
-            # but a run_shell success without any prior write does NOT.
             this_iter_wrote = any(
                 tn in ("write_file", "patch_file") and result.success
                 for tn, result in action_results
@@ -246,142 +186,48 @@ class ExecutionWorker:
                 tn in ("write_file", "patch_file")
                 for tn, _ in action_results
             )
-            this_iter_attempted_write = any(
-                tn in ("write_file", "patch_file") for tn, _ in action_results
-            )
-            # Empty batches count as non-writing too — otherwise a model can
-            # reset the mechanical block by interleaving empty responses
-            # between read batches.
-            if not this_iter_attempted_write:
-                consecutive_nonwriting_iterations += 1
-            else:
-                consecutive_nonwriting_iterations = 0
             wrote_anything = wrote_anything or this_iter_wrote
             this_iter_shell_succeeded = any(
                 tn == "run_shell" and r.success for tn, r in action_results
             )
-            wrote_then_verified = wrote_then_verified or (
-                wrote_anything and this_iter_shell_succeeded
+            work_complete = wrote_anything and (
+                this_iter_shell_succeeded or not needs_verification
             )
-            verification_complete = wrote_then_verified or not needs_verification
 
             # Decide whether to do another self-repair iteration.
             if iteration >= MAX_SELF_REPAIR_ITERATIONS:
                 break
+            if not action_results:
+                break
             any_failed = any(not r.success for _, r in action_results)
-            if action_results and not any_failed and verification_complete:
-                break  # all tools good AND we've verified; commit to handoff
-            if not action_results and verification_complete:
-                break  # model handed off; either verification done or no criteria
+            if not any_failed and work_complete:
+                break
 
-            # Stitch results back so the next call has them in-context.
-            # If the batch was empty AND we haven't seen a verification
-            # pass yet, push the worker to add one rather than letting it
-            # surrender silently.
             assistant_payload = json.dumps(response.json_data or {})
-            if not action_results and not verification_complete:
-                if not wrote_anything:
-                    followup = (
-                        "Your action batch was empty but you have NOT yet "
-                        "written or patched any file in this loop. Reading "
-                        "code and re-running tests that already pass does "
-                        "not move any failing acceptance check from fail to "
-                        "pass — only edits do. Emit a JSON action batch "
-                        "that includes AT LEAST ONE write_file or "
-                        "patch_file targeting the source you intend to fix, "
-                        "followed by a run_shell that re-executes the "
-                        "relevant verification command(s) from your "
-                        "acceptance_criteria. Only return an empty actions "
-                        "list AFTER you have written code AND a run_shell "
-                        "verification has exited 0 in this same loop."
+            results_lines: list[str] = []
+            for tn, r in action_results:
+                line = f"- {tn}: success={r.success}"
+                if r.error_type:
+                    line += f" error_type={r.error_type}"
+                if r.error:
+                    line += "\n  error:\n    " + r.error[:1500].replace(
+                        "\n", "\n    "
                     )
-                else:
-                    followup = (
-                        "Your action batch was empty but although you HAVE "
-                        "written/patched a file this loop, no run_shell has "
-                        "yet exited 0 to verify the change took effect. "
-                        "Emit a corrective JSON action batch that runs the "
-                        "verification command(s) from your "
-                        "acceptance_criteria via run_shell. Only return an "
-                        "empty actions list after run_shell has exited 0."
+                if r.output_excerpt:
+                    line += "\n  output:\n    " + r.output_excerpt.replace(
+                        "\n", "\n    "
                     )
-            else:
-                results_lines: list[str] = []
-                for tn, r in action_results:
-                    line = f"- {tn}: success={r.success}"
-                    if r.error_type:
-                        line += f" error_type={r.error_type}"
-                    # Cap aligned with the patch_file tool's diagnostic
-                    # budget (1500 chars) so the closest_matches /
-                    # occurrences block emitted by failed patches is
-                    # actually visible to the model on its repair turn.
-                    if r.error:
-                        line += "\n  error:\n    " + r.error[:1500].replace(
-                            "\n", "\n    "
-                        )
-                    if r.output_excerpt:
-                        line += "\n  output:\n    " + r.output_excerpt.replace(
-                            "\n", "\n    "
-                        )
-                    elif r.summary and r.summary != r.error:
-                        # Surface summary only when it carries info not
-                        # already in `error` (which mirrors summary for
-                        # most failure paths).
-                        line += "\n  summary:\n    " + r.summary[:1500].replace(
-                            "\n", "\n    "
-                        )
-                    results_lines.append(line)
-                followup = (
-                    "Tool results from your previous action batch:\n\n"
-                    + "\n".join(results_lines)
-                    + "\n\nIf any verification failed, emit a corrective "
-                    "JSON action batch that fixes the underlying defect "
-                    "AND re-runs the verification via run_shell so the "
-                    "harness can see the new exit status. Only emit "
-                    '{"summary": "...", "actions": []} after a run_shell '
-                    "verification has exited 0 in this turn."
-                )
-                if not verification_complete and not wrote_anything:
-                    followup += (
-                        "\n\nMANDATORY EDIT: You have not written or patched "
-                        "any source in this loop. A non-empty read_file or "
-                        "run_shell batch does not count as progress. Your next "
-                        "JSON action batch must include at least one write_file "
-                        "or patch_file action that addresses a failing check, "
-                        "followed by run_shell verification."
+                elif r.summary and r.summary != r.error:
+                    line += "\n  summary:\n    " + r.summary[:1500].replace(
+                        "\n", "\n    "
                     )
-                if patch_no_match_count >= 2:
-                    followup += (
-                        "\n\nPATCH ESCALATION: patch_file has missed old_text at "
-                        "least twice in this loop. Stop retrying guessed exact "
-                        "patches. Use read_file with offset/limit to inspect the "
-                        "current enclosing function, then use write_file with the "
-                        "FULL current file content while replacing that complete "
-                        "function. Re-run verification after the rewrite."
-                    )
-            remaining_calls = MAX_SELF_REPAIR_ITERATIONS - iteration
-            budget_note = (
-                f"CALL BUDGET: {remaining_calls} model call(s) remain in this "
-                "loop after this response."
+                results_lines.append(line)
+            followup = (
+                "Tool results from your previous action batch:\n\n"
+                + "\n".join(results_lines)
+                + "\n\nIf additional work is needed, emit the next JSON "
+                "action batch. Otherwise return an empty actions list."
             )
-            if consecutive_nonwriting_iterations >= 2 and not wrote_anything:
-                followup = (
-                    "STOP READING: consecutive action batches inspected files "
-                    "without attempting an edit. "
-                    f"{budget_note} Use the next response to patch/write the "
-                    "best-supported fix and verify it; do not request another "
-                    "code slice.\n\n"
-                    + followup
-                )
-            else:
-                followup += f"\n\n{budget_note}"
-            if iteration == MAX_SELF_REPAIR_ITERATIONS - 1:
-                followup += (
-                    "\n\nFINAL MODEL CALL: your next response is the last "
-                    "response available in this loop. It must contain a "
-                    "write_file/patch_file edit and run_shell verification. "
-                    "A read-only response will be discarded with no progress."
-                )
             messages = [
                 *messages,
                 {"role": "assistant", "content": assistant_payload},
@@ -406,9 +252,7 @@ class ExecutionWorker:
                     "read_count": read_count,
                     "shell_count": shell_count,
                     "write_count": write_attempt_count,
-                    "blocked_nonwriting_action_count": (
-                        blocked_nonwriting_action_count
-                    ),
+                    "blocked_nonwriting_action_count": 0,
                     "threshold_reached": (
                         streak >= READ_ONLY_DIAGNOSTIC_THRESHOLD
                     ),
@@ -522,25 +366,12 @@ class ExecutionWorker:
             "You are an execution worker that emits structured JSON actions. "
             "Respond only with a JSON object containing 'summary' (string) "
             "and 'actions' (list of {tool_name, args}). Do not wrap the JSON "
-            "in Markdown.\n\n"
-            "SELF-VERIFY BEFORE HANDOFF — STRICT RULE:\n"
-            "1. After every write/edit, include a run_shell action that "
-            "   runs the verification command(s) from acceptance_criteria.\n"
-            "2. The harness will give you multiple follow-up turns whenever "
-            "   any tool fails OR whenever you emit an empty action list "
-            "   before a verification has succeeded.\n"
-            "3. If a verification fails: rewrite the file(s) with corrected "
-            "   logic and re-run the verification IN THE SAME TURN. Do not "
-            "   hand off with 'actions: []' until run_shell exits 0.\n"
-            "4. 'I don't know how to fix this' is never a valid reason to "
-            "   hand off — keep iterating until either the verification "
-            "   passes or the harness exhausts your repair budget.\n"
-            "5. Reading files and running tests that already pass is NOT "
-            "   progress. The harness will reject your empty-actions "
-            "   handoff unless THIS loop contains at least one "
-            "   write_file/patch_file action AND a subsequent run_shell "
-            "   that exited 0. If the existing implementation has bugs, "
-            "   you must patch them — not just inspect them."
+            "in Markdown. Inspect the workspace with read_file or run_shell "
+            "when needed. Use write_file or patch_file when implementation "
+            "changes are required, and run relevant acceptance commands after "
+            "edits when practical. Return an empty actions list to hand off "
+            "when no further tool action is needed; the harness independently "
+            "validates the candidate."
         )
         prior_context = ExecutionWorker._prior_loop_context(context)
         recall_block = ExecutionWorker._recalled_memories_block(context)
@@ -554,8 +385,12 @@ class ExecutionWorker:
             "Required JSON shape example:\n"
             '{"summary":"created hello.txt","actions":[{"tool_name":'
             '"write_file","args":{"path":"hello.txt","content":"hello"}}]}\n\n'
-            "Use exactly the listed args shape for each tool. For run_shell, "
-            "use an argv array and never a command string."
+            "Use exactly the listed args shape for each tool. run_shell "
+            "executes argv directly without an implicit shell. Use an argv "
+            "array; for shell built-ins or operators, invoke an available "
+            "shell explicitly, for example ['cmd', '/c', 'dir', '/b'] on "
+            "Windows or ['bash', '-lc', 'find . -maxdepth 2 -type f'] where "
+            "a working Bash is available. Never pass one unsplit command as argv."
         )
         if prior_replay:
             pair_count = len(prior_replay) // 2

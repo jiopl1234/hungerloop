@@ -342,7 +342,7 @@ the additions below use score in any decision.
   per-agent streaks across loops.
 - Rejected-candidate continuation: an uncommitted prior candidate tree
   may seed the next loop's candidate (never `best/`, preserving I-4).
-  Gated by `rejected_candidate_continuation_enabled` (default `True`)
+  Gated by `rejected_candidate_continuation_enabled` (default `False`)
   and `rejected_candidate_continuation_max_chain` (default `2`);
   abandoned when the same regression key repeats across consecutive
   rejected loops. Events: `CANDIDATE_CONTINUATION_SEEDED` /
@@ -375,5 +375,5 @@ the additions below use score in any decision.
 | Flag | Default | Effect |
 |------|---------|--------|
 | `regression_confirm_reruns` | `2` | Reruns required to clear a regressed check; every rerun must pass |
-| `rejected_candidate_continuation_enabled` | `True` | Seed next candidate from the prior rejected tree |
+| `rejected_candidate_continuation_enabled` | `False` | Seed next candidate from the prior rejected tree |
 | `rejected_candidate_continuation_max_chain` | `2` | Consecutive continuation limit before reset to best |

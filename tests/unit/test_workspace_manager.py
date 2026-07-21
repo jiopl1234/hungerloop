@@ -185,6 +185,34 @@ def test_draft_archive_and_restore(tmp_path: Path) -> None:
     assert manager.draft_archive_dir("t1", 1, 2).is_dir()
 
 
+def test_draft_archive_and_restore_excludes_worker_run_junk(
+    tmp_path: Path,
+) -> None:
+    """A worker test run can drop hungerloop.sqlite* / caches into the
+    candidate tree; archive_draft → restore_draft must not carry that junk
+    into the winner tree (which CommitManager then promotes into best/)."""
+    manager = WorkspaceManager(tmp_path)
+    manager.create_candidate_workspace("t1", 1)
+    files = manager.candidate_files_dir("t1", 1)
+    (files / "spreadsheet.py").write_text("real = 1", encoding="utf-8")
+    (files / "hungerloop.sqlite").write_text("JUNK", encoding="utf-8")
+    (files / "hungerloop.sqlite-wal").write_text("JUNK", encoding="utf-8")
+    (files / "__pycache__").mkdir()
+    (files / "__pycache__" / "x.pyc").write_text("JUNK", encoding="utf-8")
+
+    archive = manager.archive_draft("t1", 1, 1)
+    assert (archive / "spreadsheet.py").exists()
+    assert not (archive / "hungerloop.sqlite").exists()
+    assert not (archive / "hungerloop.sqlite-wal").exists()
+    assert not (archive / "__pycache__").exists()
+
+    manager.create_candidate_workspace("t1", 1)
+    manager.restore_draft("t1", 1, 1)
+    restored = manager.candidate_files_dir("t1", 1)
+    assert (restored / "spreadsheet.py").read_text(encoding="utf-8") == "real = 1"
+    assert not (restored / "hungerloop.sqlite").exists()
+
+
 def test_candidate_files_hashes_detects_identical_drafts(tmp_path: Path) -> None:
     manager = WorkspaceManager(tmp_path)
     manager.create_candidate_workspace("t1", 1)

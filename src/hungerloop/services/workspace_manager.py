@@ -353,7 +353,14 @@ class WorkspaceManager:
         destination = self.draft_archive_dir(task_id, loop_id, draft_index)
         if destination.exists():
             shutil.rmtree(destination)
-        shutil.copytree(source, destination)
+        # Exclude worker-run junk (hungerloop.sqlite*, caches) exactly like
+        # continue_candidate_from_rejected — otherwise a winning draft's
+        # restored tree carries that junk into best/ on commit.
+        shutil.copytree(
+            source,
+            destination,
+            ignore=shutil.ignore_patterns(*sorted(_CONTINUATION_IGNORE_NAMES)),
+        )
         return destination
 
     def restore_draft(self, task_id: str, loop_id: int, draft_index: int) -> None:
@@ -364,7 +371,11 @@ class WorkspaceManager:
         destination = self.candidate_files_dir(task_id, loop_id)
         if destination.exists():
             shutil.rmtree(destination)
-        shutil.copytree(source, destination)
+        shutil.copytree(
+            source,
+            destination,
+            ignore=shutil.ignore_patterns(*sorted(_CONTINUATION_IGNORE_NAMES)),
+        )
         self._write_manifest(
             task_id=task_id,
             loop_id=loop_id,
@@ -376,7 +387,7 @@ class WorkspaceManager:
         )
 
     def candidate_files_hashes(self, task_id: str, loop_id: int) -> dict[str, str]:
-        """Content hashes of the current candidate tree (draft short-circuit)."""
+        """Return content hashes for exact candidate-tree comparisons."""
         return _workspace_file_hashes(self.candidate_files_dir(task_id, loop_id))
 
     def workspace_matches_best_manifest(

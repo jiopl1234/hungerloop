@@ -821,9 +821,8 @@ def _native_openai_tools() -> list[dict[str, object]]:
             "function": {
                 "name": "patch_file",
                 "description": (
-                    "Replace one unique old_text occurrence. Exact matching is "
-                    "preferred; optional line anchors narrow a whitespace-normalized "
-                    "fallback."
+                    "Replace one unique exact old_text occurrence. Optional line "
+                    "anchors narrow the exact-match search region."
                 ),
                 "parameters": {
                     "type": "object",
@@ -844,8 +843,11 @@ def _native_openai_tools() -> list[dict[str, object]]:
             "function": {
                 "name": "run_shell",
                 "description": (
-                    "Run an argv-only command in the candidate workspace. "
-                    "Pipes, redirects, globs, and && require argv ['sh', '-c', '...']."
+                    "Run argv directly in the candidate workspace. Shell built-ins "
+                    "and operators require an available shell explicitly, for "
+                    "example ['cmd', '/c', 'dir', '/b'] on Windows or "
+                    "['bash', '-lc', 'find . -maxdepth 2 -type f'] where Bash is "
+                    "available."
                 ),
                 "parameters": {
                     "type": "object",

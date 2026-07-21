@@ -150,96 +150,6 @@ def _positive_line_number(value: object, *, name: str) -> int | None:
     return parsed
 
 
-def _canonical_patch_line(line: str) -> str:
-    """Collapse all whitespace on one line for resilient patch matching."""
-    return " ".join(line.split())
-
-
-def _normalized_line_matches(
-    *,
-    original_lines: list[str],
-    old_text: str,
-) -> list[tuple[int, int]]:
-    """Return line-window matches after per-line whitespace normalization."""
-    old_lines = old_text.splitlines()
-    while old_lines and not old_lines[0].strip():
-        old_lines.pop(0)
-    while old_lines and not old_lines[-1].strip():
-        old_lines.pop()
-    if not old_lines:
-        return []
-
-    needle = [_canonical_patch_line(line) for line in old_lines]
-    haystack = [
-        _canonical_patch_line(line.rstrip("\r\n")) for line in original_lines
-    ]
-    width = len(needle)
-    return [
-        (index, index + width)
-        for index in range(0, len(haystack) - width + 1)
-        if haystack[index : index + width] == needle
-    ]
-
-
-def _replacement_preserving_line_ending(segment: str, new_text: str) -> str:
-    """Keep the source line terminator for a normalized full-line match."""
-    if new_text.endswith(("\n", "\r")):
-        return new_text
-    if segment.endswith("\r\n"):
-        return new_text + "\r\n"
-    if segment.endswith("\n"):
-        return new_text + "\n"
-    if segment.endswith("\r"):
-        return new_text + "\r"
-    return new_text
-
-
-def _leading_indent_of_first_content_line(text: str) -> str:
-    for line in text.splitlines():
-        if line.strip():
-            return line[: len(line) - len(line.lstrip())]
-    return ""
-
-
-def _reindent_normalized_replacement(
-    segment: str,
-    old_text: str,
-    new_text: str,
-) -> str | None:
-    """Preserve source indentation when old/new line structure is unchanged."""
-    source_lines = segment.splitlines()
-    old_lines = old_text.splitlines()
-    while old_lines and not old_lines[0].strip():
-        old_lines.pop(0)
-    while old_lines and not old_lines[-1].strip():
-        old_lines.pop()
-    new_lines = new_text.splitlines(keepends=True)
-    if len(source_lines) != len(old_lines) or len(new_lines) != len(old_lines):
-        return None
-
-    rebased: list[str] = []
-    for source_line, expected_line, replacement_line in zip(
-        source_lines,
-        old_lines,
-        new_lines,
-        strict=True,
-    ):
-        expected_has_content = bool(expected_line.strip())
-        replacement_has_content = bool(replacement_line.strip())
-        if expected_has_content != replacement_has_content:
-            return None
-        if not replacement_has_content:
-            rebased.append(replacement_line)
-            continue
-        expected_indent = _leading_indent_of_first_content_line(expected_line)
-        replacement_indent = _leading_indent_of_first_content_line(replacement_line)
-        if expected_indent != replacement_indent:
-            return None
-        source_indent = _leading_indent_of_first_content_line(source_line)
-        rebased.append(source_indent + replacement_line[len(replacement_indent) :])
-    return "".join(rebased)
-
-
 def _cap_diagnostic(text: str, limit: int = _PATCH_DIAGNOSTIC_CHAR_BUDGET) -> str:
     """Hard cap the entire patch_file diagnostic blob."""
     if len(text) <= limit:
@@ -434,7 +344,7 @@ class WriteFileTool:
 
 
 class PatchFileTool:
-    """Replace one unique exact or whitespace-normalized match in a file.
+    """Replace one unique exact match in a file.
 
     The non-uniqueness rule prevents accidental corruption when the
     caller is non-LLM (e.g. a deterministic test script) — it also lets
@@ -529,91 +439,6 @@ class PatchFileTool:
         region = original[region_start:region_end]
         occurrences = region.count(old_text)
         if occurrences == 0:
-            region_lines = original_lines[effective_start - 1 : effective_end]
-            normalized_matches = _normalized_line_matches(
-                original_lines=region_lines,
-                old_text=old_text,
-            )
-            if len(normalized_matches) == 1:
-                normalized_fallback_allowed = (
-                    start_line is not None
-                    or end_line is not None
-                    or len(old_text.splitlines()) >= 2
-                )
-                if not normalized_fallback_allowed:
-                    return ToolOutcome(
-                        success=False,
-                        summary=(
-                            "whitespace-normalized single-line patch requires a "
-                            f"line anchor in {path_arg}; provide start_line/end_line "
-                            "or use a multi-line old_text"
-                        ),
-                        args_summary=f"path={path_arg}",
-                        result_summary="unsafe_normalized_single_line",
-                    )
-                local_start_line, local_end_line = normalized_matches[0]
-                local_start = sum(len(line) for line in region_lines[:local_start_line])
-                local_end = sum(len(line) for line in region_lines[:local_end_line])
-                match_start = region_start + local_start
-                match_end = region_start + local_end
-                segment = original[match_start:match_end]
-                rebased_replacement = _reindent_normalized_replacement(
-                    segment,
-                    old_text,
-                    new_text,
-                )
-                if rebased_replacement is None:
-                    return ToolOutcome(
-                        success=False,
-                        summary=(
-                            "whitespace-normalized patch has an unsafe indentation "
-                            f"rebase in {path_arg}; re-read the enclosing block and "
-                            "use an exact patch or write_file"
-                        ),
-                        args_summary=f"path={path_arg}",
-                        result_summary="unsafe_normalized_indentation",
-                    )
-                replacement = _replacement_preserving_line_ending(
-                    segment,
-                    rebased_replacement,
-                )
-                patched = original[:match_start] + replacement + original[match_end:]
-                safe.write_text(patched, encoding="utf-8")
-                matched_start_line = effective_start + local_start_line
-                matched_end_line = effective_start + local_end_line - 1
-                return ToolOutcome(
-                    success=True,
-                    summary=(
-                        f"patched {path_arg} using whitespace-normalized lines "
-                        f"{matched_start_line}-{matched_end_line}"
-                    ),
-                    args_summary=(
-                        f"path={path_arg} old_len={len(old_text)} "
-                        f"new_len={len(new_text)} match=whitespace_normalized"
-                    ),
-                    result_summary=(
-                        f"replaced normalized lines "
-                        f"{matched_start_line}-{matched_end_line}"
-                    ),
-                    artifact_type="file_patch",
-                    artifact_path=path_arg,
-                    artifact_summary=f"patch_file {path_arg}",
-                )
-            if len(normalized_matches) > 1:
-                matched_lines = [
-                    str(effective_start + match[0])
-                    for match in normalized_matches[:_PATCH_DIAGNOSTIC_MAX_OCCURRENCES]
-                ]
-                return ToolOutcome(
-                    success=False,
-                    summary=_cap_diagnostic(
-                        f"old_text whitespace-normalized match is ambiguous in "
-                        f"{path_arg}: {len(normalized_matches)} matches at lines "
-                        + ", ".join(matched_lines)
-                    ),
-                    args_summary=f"path={path_arg}",
-                    result_summary=f"ambiguous_normalized:{len(normalized_matches)}",
-                )
             header = (
                 f"old_text not found in {path_arg}\n"
                 f"old_text_preview ({len(old_text)} chars): "
