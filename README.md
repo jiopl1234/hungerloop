@@ -1,8 +1,10 @@
 # HungerLoop v0.7.0
 
-基于"check 级别提交"和"饥饿度预算"的 Python 异步 Agent 迭代循环框架。v0.6 增加 mission runtime：多 feature 拓扑规划、结构化 worker handoff、三阶段验证流水线、SQLite→artifact 单向镜像以及 mission CLI。
+基于"check 级别提交"和"饥饿度预算"的 Python 异步 Agent 迭代循环框架。v0.7 Loop-Objective Evolution 在 v0.6 mission runtime 之上完成 spec-to-check 合成、worker discovery credit、ADR-010 refactor transactions、Layer-3 记忆自动推广与跨任务召回，同时保留 mission CLI 和 SQLite→artifact 单向镜像。
 
-> **状态**：v0.7.0 — Mission runtime GA。CLI 默认打开 `hungerloop.sqlite`，支持跨进程恢复 dummy 运行，并完整保留 v0.5f 的 I-3..I-10 不变量。
+> **状态**：v0.7.0: Loop-Objective Evolution GA。最终 gate 已验证 102 条断言全部通过：`pytest` 1747 passed / 1 skipped / 20 approved deselected、`mypy --strict src/` 104 files clean、`ruff check src/ tests/` clean、CLI smoke passed，无 persistent services/ports。
+>
+> **分支进展（`v0.7.1-v0.7.2`，已推送远端）**：冷启动 draft sampling（`--draft-k` / `draft_sampling_k`）、动量感知全局熔断（`max_global_no_progress_loops` policy 可配）、ADR-010 refactor transaction auto-open、`TOOL_CALL_FAILED` 错误归因、seed-hint 回归命名。
 
 ---
 
@@ -11,7 +13,7 @@
 1. [核心概念](#核心概念)
 2. [功能矩阵](#功能矩阵)
 3. [安装](#安装)
-4. [v0.6 Mission 快速开始](#v06-mission-快速开始)
+4. [v0.7 Mission 快速开始](#v07-mission-快速开始)
 5. [5 分钟快速开始（legacy acceptance checks）](#5-分钟快速开始legacy-acceptance-checks)
 6. [完整工作流程](#完整工作流程)
 7. [CLI 使用教程](#cli-使用教程)
@@ -47,20 +49,32 @@ HungerLoop 是一个把 Agent 长任务"编译"成可观察、可中断、可恢
 | `WorkerRuntime` + `ExecutionWorker` | ✅ | `BudgetGuard`、副作用门禁、`ToolNotPermitted`（§6/§7/§28.11） |
 | `DummyModelClient` / `OpenAIModelClient` | ✅ | 重试、JSON 安全、`Retry-After`、错误证据落库（§11.4 / §28.2 / §28.3） |
 | `ModelConfig` + `PricingTable` | ✅ | YAML 配置，禁明文 key，仅环境变量（§10 / §11.3） |
-| `MemoryManager` | ✅ | 每轮生成 `MemoryCandidate`，确定性谓词（§19） |
+| `MemoryManager` | ✅ | 每轮生成 `MemoryCandidate`，确定性谓词，v0.7 支持 Layer-3 自动推广与跨任务 recall（§19） |
 | `SkillManager` | ✅ | `DONE` 且 ≥2 个 check 通过时发卡（§20） |
 | `SQLiteRepository` | ✅ | 前向迁移、WAL、usage_snapshots、task_locks、events、traces、reports、memory、skill |
-| `MissionRuntime` | ✅ | `MissionPlanner`、`WorkerScheduler`、`HandoffProcessor`、`ValidationPipeline`、`MissionStateUpdater`、7 个 mission CLI 子命令（v0.6） |
+| `MissionRuntime` | ✅ | `MissionPlanner`、`WorkerScheduler`、`HandoffProcessor`、`ValidationPipeline`、`MissionStateUpdater`、7 个 mission CLI 子命令（v0.6 runtime，v0.7 扩展） |
+| `SpecCheckSynthesizer` | ✅ | 从 mission/spec 覆盖需求合成 validation checks，补齐 spec coverage synthesis（v0.7） |
+| Worker discovery credit | ✅ | 结构化 handoff 可提出 checks，发现型工作通过 compiler 路径计入 ledger（v0.7） |
+| Refactor transactions (ADR-010) | ✅ | 声明式、限期、policy-gated 的 I-3 回归豁免，仅限交易声明 check keys（v0.7）；分支新增 policy-gated auto-open（`refactor_auto_open_enabled` + `refactor_transactions_enabled`，默认关，带 min-newly 下限与 3x net-positive 比率门槛） |
+| Cross-task memory recall | ✅ | Layer-3 记忆自动推广后可在新任务中按相关性召回（v0.7） |
+| Draft sampling（冷启动） | ✅ | `--draft-k` / `policy.draft_sampling_k`（1..5，默认 1=off）：首个 loop 起草 k 份候选，score-free 选优、输者草稿归档、只持久化胜者 handoff、`DRAFT_SAMPLED` 事件落库（v0.7.1-v0.7.2 分支） |
+| Momentum-aware 全局熔断 | ✅ | `max_global_no_progress_loops`（默认 5）policy 可配；被拒 candidate 刷新 newly-passed 高水位时 streak 保持不递增，熔断时发 `GLOBAL_STAGNATION_BLOCKED` 事件（v0.7.1-v0.7.2 分支） |
 | `LearningWorker` / `ResearchWorker` | ⏳ | v0.5d |
-| `LLMPlanner` + 真并发 fan-out/join | ⏳ | v0.7 |
+| `LLMPlanner` + 真并发 fan-out/join | ⏳ | 后续版本 |
 | `Azure OpenAI` 运行时 | ⏳ | 占位实现，调用时显式失败 |
-| 长期记忆生产化推广流程 | ⏳ | 后续版本 |
+| 长期记忆生产化推广流程 | ✅ | v0.7 Layer-3 promotion gate、自动推广和跨任务召回 |
 
 ---
 
 ## 安装
 
-要求 Python 3.11+。
+要求 Python 3.11+。本地开发推荐使用虚拟环境；Windows PowerShell 可用 `.venv\Scripts\Activate.ps1`，POSIX shell 可用 `source .venv/bin/activate`。
+
+必要环境约定：
+
+- `dummy` provider 不需要 API key，适合本地确定性回归。
+- OpenAI 运行时只读取 `OPENAI_API_KEY` 这类环境变量名，不允许在 YAML、README 或 `.env` 内容中写明文 secret。
+- `HUNGERLOOP_LOCK_STALE_SEC` 可覆盖陈旧锁阈值；`HUNGERLOOP_MISSION_RUNTIME=0` 仅是旧 v0.6 rollback flag，v0.7 正常路径不依赖它。
 
 ```bash
 # 克隆并安装（含开发工具链）
@@ -70,18 +84,18 @@ python3 -m venv .venv
 source .venv/bin/activate
 pip install -e ".[dev]"
 
-# 验证
+# 验证（v0.7 final gate）
 hungerloop --version
-pytest tests/        # 应通过 ≥761 unit + ≥19 integration 的 v0.6 基线
-mypy --strict src/   # 应零错误
+pytest tests/        # final gate: 1747 passed, 1 skipped, 20 approved Windows baseline deselected
+mypy --strict src/   # 104 files clean
 ruff check src/ tests/
 ```
 
 ---
 
-## v0.6 Mission 快速开始
+## v0.7 Mission 快速开始
 
-创建一个最小 mission spec，然后通过 mission runtime 创建、运行和查看状态：
+v0.7 继续使用 v0.6 引入的 mission artifact 和 CLI 入口，并在运行时补上 spec-to-check synthesis、worker discovery credit、refactor transaction 和 memory recall 能力。创建一个最小 mission spec，然后通过 mission runtime 创建、运行和查看状态：
 
 ```bash
 # 1. 准备 mission artifact
@@ -90,7 +104,7 @@ cat > demo-mission/mission.md <<'MD'
 # Demo Mission
 
 ## Description
-Generate a short report through the v0.6 mission runtime.
+Generate a short report through the v0.7 mission runtime.
 MD
 
 cat > demo-mission/features.yaml <<'YAML'
@@ -122,7 +136,7 @@ YAML
 # 2. 创建 mission task
 hungerloop mission new demo-mission-1 --from demo-mission --goal "Generate a short report"
 
-# 3. 运行 mission runtime（保留 v0.5f cost guard / workspace isolation）
+# 3. 运行 mission runtime（保留 v0.5f cost guard / workspace isolation 和 v0.6 artifact mirror）
 hungerloop mission run demo-mission-1 --max-loops 5
 
 # 4. 查看 mission cockpit
@@ -192,7 +206,7 @@ hungerloop trace export demo-1 --format jsonl
    3. ExecutionWorker     → 调模型/工具，写候选     │       │
    4. ValidationGate      → 跑目标 check + 回归 check│       │
    5. CommitManager       → 满足 I-3 才提交          │       │
-   6. MemoryManager       → 抽取 MemoryCandidate     │       │
+   6. MemoryManager       → 抽取/推广 MemoryCandidate │       │
    7. SkillManager        → DONE+≥2 check 时发卡    │       │
                           └────────────────────────────────┘
                       │
@@ -251,11 +265,12 @@ hungerloop run <task_id> \
   [--raise-cost-ceiling]        # 提高一次成本上限（SAFETY_STOP 后用）
   [--steal-lock]                # 抢占陈旧锁
   [--lock-stale-sec SEC]        # 自定义陈旧阈值（默认 1800）
+  [--draft-k N]                 # 冷启动 draft 采样份数（仅首 loop；1=关闭，最大 5）
 ```
 
 **resume 预检（preflight）**：每次 `run` 启动前会检查 task 当前状态、上次 stop 原因、锁是否陈旧，并把检查结果落库为事件。如果状态不允许恢复（如 `HUMAN_PAUSED` 但未传 `--resume`），CLI 会用清晰提示退出。
 
-### `hungerloop mission` — v0.6 mission runtime
+### `hungerloop mission` — v0.7 mission runtime
 
 ```bash
 hungerloop mission new <task_id> [--goal TEXT] [--from PATH] [--contract PATH]
@@ -267,10 +282,10 @@ hungerloop mission edit <task_id>
 hungerloop mission import <task_id> --from PATH
 ```
 
-7 个 mission 子命令覆盖 v0.6 的完整 mission 生命周期：
+7 个 mission 子命令覆盖 v0.6 引入并由 v0.7 扩展的完整 mission 生命周期：
 
-- `mission new`：从 `mission.md` / `features.yaml` / `validation-contract.yaml` 创建 mission task；若传 `--accept` 则回退 legacy task 创建路径。
-- `mission run`：运行 mission-aware orchestrator；`HUNGERLOOP_MISSION_RUNTIME=0` 是 **DEPRECATED, removable in v0.7.0** 的临时回滚旗标，会强制隐藏 mission row 并走 v0.5f legacy path。
+- `mission new`：从 `mission.md` / `features.yaml` / `validation-contract.yaml` 创建 mission task；若传 `--accept` 则回退 legacy task 创建路径。v0.7 会通过 `SpecCheckSynthesizer` 补齐 spec coverage checks。
+- `mission run`：运行 mission-aware orchestrator；`HUNGERLOOP_MISSION_RUNTIME=0` 仍是旧 v0.6 rollback flag，仅用于兼容诊断，v0.7 正常路径不依赖它。
 - `mission status`：显示 mission cockpit（phase / feature / validation 摘要），`--json` 输出结构化状态。
 - `mission features`：列出 feature 队列，可按 phase 过滤。
 - `mission validation`：列出 validation contract assertion 状态，可按 phase 过滤。
@@ -318,7 +333,7 @@ hungerloop hunger resume <task_id>              # 解冻
 hungerloop memory list <task_id> [--state candidate|approved|rejected]
 ```
 
-显示 `MemoryManager` 抽取的候选记忆（事实/流程/偏好/陷阱），可按生命周期状态过滤。每条候选带确定性谓词标记（`action_verified`、`reusable`、`non_volatile`、`traceable`）。
+显示 `MemoryManager` 抽取并在 v0.7 中可自动推广的候选记忆（事实/流程/偏好/陷阱），可按生命周期状态过滤。每条候选带确定性谓词标记（`action_verified`、`reusable`、`non_volatile`、`traceable`），已推广的 Layer-3 memory 可被后续任务按相关性召回。
 
 ### `hungerloop skill list` — 列出技能卡
 
@@ -395,7 +410,7 @@ retry:
   initial_backoff_sec: 1.0
 ```
 
-**安全规则（强制）**：YAML 不允许写 `api_key:` 明文，只能指定 `api_key_env: <ENV_VAR_NAME>`。Azure OpenAI 在调用时显式抛错（v0.5b/c 范围外）。
+**安全规则（强制）**：YAML 不允许写 `api_key:` 明文，只能指定 `api_key_env: <ENV_VAR_NAME>`。Azure OpenAI 仍是占位运行时，在调用时显式抛错。
 
 `dummy` provider 不需要 key，用于本地确定性回归。
 
@@ -405,10 +420,10 @@ retry:
 
 | ID | 名称 | 落地位置 |
 | -- | ---- | -------- |
-| I-3 | Check 级别提交，永不基于分数 | `commit_manager.py`、`hunger_update.py` |
+| I-3 | Check 级别提交，永不基于分数；ADR-010 只允许 policy-gated、限期、声明式 refactor transaction 豁免 | `commit_manager.py`、`hunger_update.py` |
 | I-4 | 工作区隔离：只有 `CommitManager` 写 `best/` | `workspace_manager.py` |
 | I-5 | 目标验证 + 回归：先前通过的 check 仍要重测 | `validation_gate.py` |
-| I-6 | 停滞检测仅计算 `attempted` item | `stagnation_detector.py` |
+| I-6 | 停滞检测仅计算 `attempted` item；全局熔断阈值 policy 可配（`max_global_no_progress_loops`，默认 5），被拒 candidate 刷新 newly-passed 高水位时 streak 保持不递增 | `stagnation_detector.py` |
 | I-7 | 沙箱隔离：路径白名单 + 进程组清理 | `sandbox_runner.py`、`path_safety.py` |
 | I-8 | 成本守卫：每次调用前后都校验预算 | `cost_guard.py` |
 | I-9 | `BLOCKED ≠ DONE`；停止原因严格优先级 | `hunger_engine.py` |
@@ -426,9 +441,10 @@ src/hungerloop/
   services/       # 无状态服务；统一通过 DI 拿 repo
     mission_planner.py       # v0.6 mission feature → assignment planner
     worker_scheduler.py      # v0.6 sequential topology executor
-    handoff_processor.py     # v0.6 structured handoff → ledger compiler path
+    handoff_processor.py     # v0.6 structured handoff → ledger compiler path；v0.7 proposed checks/discovery credit
     validation_pipeline.py   # deterministic + scrutiny + user-testing stages
     mission_state_updater.py # SQLite → best/mission.md|features.yaml|validation-contract.yaml|services.yaml mirror
+    ...                      # v0.7 spec-to-check synthesis、refactor transaction、memory recall services
     validators/              # deterministic/scrutiny/user-testing validators
   repository/     # Protocol + InMemoryRepository + SQLiteRepository + 迁移
     migrations/   # v1__initial.sql、v2__memory_candidate_lifecycle.sql、
@@ -450,7 +466,7 @@ docs/
 ## 开发与测试
 
 ```bash
-# 全量测试
+# 全量测试（v0.7 final gate）
 pytest tests/
 
 # 严格类型检查（必须零错误）
@@ -464,6 +480,10 @@ hungerloop --version
 hungerloop new "smoke test" --accept-file examples/demo_task.yaml --task-id smoke
 hungerloop run smoke
 ```
+
+最新 final gate 结果：`pytest` 1747 passed / 1 skipped / 20 approved Windows baseline deselected；`mypy --strict src/` 104 files clean；`ruff check src/ tests/` clean；CLI smoke passed。20 个 deselection 是已批准的 Windows baseline 过滤，不包含 secret 或持久服务。
+
+v0.7.1-v0.7.2 分支 gate 记录（随 commit `0fb5e02` 验证）：`pytest` 1912 passed / 12 known Windows env failures（与 pristine 分支结果一致）；`mypy --strict` 104 files clean；`ruff` clean。
 
 **关键约定**：
 
@@ -482,15 +502,16 @@ hungerloop run smoke
 
 - `specs/PRD/hungerloop_v0_6_prd.md` — v0.6 产品需求与 ADR-007/008/009 收敛口径
 - `specs/v0.6_implementation/` — M1..M6 + RC 的 EARS 实现规格
+- `specs/v0.7_implementation/` — Loop-Objective Evolution 实现规格和最终 scope
 - `docs/architecture/v0.6/adr/` — v0.6 架构决策记录
+- `docs/architecture/v0.7/adr/ADR-010-refactor-transactions.md` — 有界 refactor transaction 决策
 - `CLAUDE.md` — 不变量、约定、MCP 工具用法
 - `RELEASE_CHECKLIST.md` — 发布前验证步骤
 
 **路线图**：
 
-- **v0.6.x**：mission runtime bugfix / hardening
-- **v0.7**：`LLMPlanner`、并发 fan-out + join、cross-task memory recall、`services.yaml` rich semantics
-- **v0.8+**：Web UI
+- **v0.7.x**：Loop-Objective Evolution hardening、Windows baseline 维护、v0.6 mission runtime 兼容性修复。已在 `v0.7.1-v0.7.2` 分支落地：draft sampling、动量感知全局熔断、ADR-010 auto-open、worker recovery 简化与 fixed-k 采样保留
+- **v0.8+**：`LLMPlanner`、真并发 fan-out + join、`services.yaml` rich semantics、Web UI
 
 ---
 
