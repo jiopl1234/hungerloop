@@ -6,7 +6,7 @@ A Python async agent iterative-loop framework built on "check-level commits" and
 
 > **Status**: v0.7.0: Loop-Objective Evolution GA. The final gate verified all 102 assertions passing: `pytest` 1747 passed / 1 skipped / 20 approved deselected, `mypy --strict src/` 104 files clean, `ruff check src/ tests/` clean, CLI smoke passed, no persistent services/ports.
 >
-> **Branch progress (`v0.7.1-v0.7.2`, pushed)**: cold-start draft sampling (`--draft-k` / `draft_sampling_k`), momentum-aware global fuse (policy-configurable `max_global_no_progress_loops`), ADR-010 refactor transaction auto-open, `TOOL_CALL_FAILED` error attribution, seed-hint regression naming.
+> **Branch progress (`v0.7.1-v0.7.2`, pushed)**: cold-start draft sampling (`--draft-k` / `draft_sampling_k`), policy-configurable global no-progress fuse (`max_global_no_progress_loops`), ADR-010 refactor transaction auto-open, `TOOL_CALL_FAILED` error attribution, seed-hint regression naming.
 
 ---
 
@@ -60,7 +60,7 @@ See [Invariants Reference](#invariants-reference) for the full list.
 | Refactor transactions (ADR-010) | ✅ | Declarative, time-boxed, policy-gated I-3 regression waivers limited to transaction-declared check keys (v0.7); branch adds policy-gated auto-open (`refactor_auto_open_enabled` + `refactor_transactions_enabled`, off by default, with min-newly floor and 3x net-positive ratio gate) |
 | Cross-task memory recall | ✅ | Promoted Layer-3 memories can be recalled by relevance in new tasks (v0.7) |
 | Draft sampling (cold start) | ✅ | `--draft-k` / `policy.draft_sampling_k` (1..5, default 1=off): the first loop drafts k candidates, picks a winner score-free, archives loser drafts, persists only the winner's handoffs, and records a `DRAFT_SAMPLED` event (v0.7.1-v0.7.2 branch) |
-| Momentum-aware global fuse | ✅ | `max_global_no_progress_loops` (default 5) is policy-configurable; when a rejected candidate strictly grows the newly-passed high-water mark the streak holds instead of incrementing, and the fuse emits a `GLOBAL_STAGNATION_BLOCKED` event (v0.7.1-v0.7.2 branch) |
+| Policy-configurable global fuse | ✅ | `max_global_no_progress_loops` (default 5) is policy-configurable; rejected candidates always increment the no-progress streak even when their raw report contains newly-passed checks (no momentum hold), and the fuse emits a `GLOBAL_STAGNATION_BLOCKED` event (v0.7.1-v0.7.2 branch) |
 | `LearningWorker` / `ResearchWorker` | ⏳ | v0.5d |
 | `LLMPlanner` + true concurrent fan-out/join | ⏳ | Future release |
 | `Azure OpenAI` runtime | ⏳ | Placeholder implementation; fails explicitly when called |
@@ -429,7 +429,7 @@ The `dummy` provider needs no key and is used for deterministic local regression
 | I-3 | Check-level commits, never score-based; ADR-010 allows only policy-gated, time-boxed, declarative refactor transaction waivers | `commit_manager.py`, `hunger_update.py` |
 | I-4 | Workspace isolation: only the `CommitManager` writes `best/` | `workspace_manager.py` |
 | I-5 | Targeted validation + regression: previously passing checks are re-tested | `validation_gate.py` |
-| I-6 | Stagnation detection counts only `attempted` items; the global fuse threshold is policy-configurable (`max_global_no_progress_loops`, default 5), and the streak holds when a rejected candidate grows the newly-passed high-water mark | `stagnation_detector.py` |
+| I-6 | Stagnation detection counts only `attempted` items; the global fuse threshold is policy-configurable (`max_global_no_progress_loops`, default 5), and rejected candidates increment the streak even with raw newly-passed checks | `stagnation_detector.py` |
 | I-7 | Sandbox isolation: path whitelist + process-group cleanup | `sandbox_runner.py`, `path_safety.py` |
 | I-8 | Cost guard: budget checked before and after every call | `cost_guard.py` |
 | I-9 | `BLOCKED ≠ DONE`; strict stop-reason priority | `hunger_engine.py` |
@@ -517,7 +517,7 @@ v0.7.1-v0.7.2 branch gate record (verified with commit `0fb5e02`): `pytest` 1912
 
 **Roadmap**:
 
-- **v0.7.x**: Loop-Objective Evolution hardening, Windows baseline maintenance, v0.6 mission runtime compatibility fixes. Already landed on the `v0.7.1-v0.7.2` branch: draft sampling, momentum-aware global fuse, ADR-010 auto-open, worker recovery simplification with fixed-k sampling preserved
+- **v0.7.x**: Loop-Objective Evolution hardening, Windows baseline maintenance, v0.6 mission runtime compatibility fixes. Already landed on the `v0.7.1-v0.7.2` branch: draft sampling, policy-configurable global fuse, ADR-010 auto-open, worker recovery simplification with fixed-k sampling preserved
 - **v0.8+**: `LLMPlanner`, true concurrent fan-out + join, `services.yaml` rich semantics, Web UI
 
 ---

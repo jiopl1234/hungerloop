@@ -6,7 +6,7 @@
 
 > **状态**：v0.7.0: Loop-Objective Evolution GA。最终 gate 已验证 102 条断言全部通过：`pytest` 1747 passed / 1 skipped / 20 approved deselected、`mypy --strict src/` 104 files clean、`ruff check src/ tests/` clean、CLI smoke passed，无 persistent services/ports。
 >
-> **分支进展（`v0.7.1-v0.7.2`，已推送远端）**：冷启动 draft sampling（`--draft-k` / `draft_sampling_k`）、动量感知全局熔断（`max_global_no_progress_loops` policy 可配）、ADR-010 refactor transaction auto-open、`TOOL_CALL_FAILED` 错误归因、seed-hint 回归命名。
+> **分支进展（`v0.7.1-v0.7.2`，已推送远端）**：冷启动 draft sampling（`--draft-k` / `draft_sampling_k`）、policy 可配的全局无进展熔断（`max_global_no_progress_loops`）、ADR-010 refactor transaction auto-open、`TOOL_CALL_FAILED` 错误归因、seed-hint 回归命名。
 
 ---
 
@@ -60,7 +60,7 @@ HungerLoop 是一个把 Agent 长任务"编译"成可观察、可中断、可恢
 | Refactor transactions (ADR-010) | ✅ | 声明式、限期、policy-gated 的 I-3 回归豁免，仅限交易声明 check keys（v0.7）；分支新增 policy-gated auto-open（`refactor_auto_open_enabled` + `refactor_transactions_enabled`，默认关，带 min-newly 下限与 3x net-positive 比率门槛） |
 | Cross-task memory recall | ✅ | Layer-3 记忆自动推广后可在新任务中按相关性召回（v0.7） |
 | Draft sampling（冷启动） | ✅ | `--draft-k` / `policy.draft_sampling_k`（1..5，默认 1=off）：首个 loop 起草 k 份候选，score-free 选优、输者草稿归档、只持久化胜者 handoff、`DRAFT_SAMPLED` 事件落库（v0.7.1-v0.7.2 分支） |
-| Momentum-aware 全局熔断 | ✅ | `max_global_no_progress_loops`（默认 5）policy 可配；被拒 candidate 刷新 newly-passed 高水位时 streak 保持不递增，熔断时发 `GLOBAL_STAGNATION_BLOCKED` 事件（v0.7.1-v0.7.2 分支） |
+| Policy 可配全局熔断 | ✅ | `max_global_no_progress_loops`（默认 5）policy 可配；被拒 candidate 即使 raw report 含 newly-passed 也照常递增无进展 streak（无 momentum 保持），熔断时发 `GLOBAL_STAGNATION_BLOCKED` 事件（v0.7.1-v0.7.2 分支） |
 | `LearningWorker` / `ResearchWorker` | ⏳ | v0.5d |
 | `LLMPlanner` + 真并发 fan-out/join | ⏳ | 后续版本 |
 | `Azure OpenAI` 运行时 | ⏳ | 占位实现，调用时显式失败 |
@@ -425,7 +425,7 @@ retry:
 | I-3 | Check 级别提交，永不基于分数；ADR-010 只允许 policy-gated、限期、声明式 refactor transaction 豁免 | `commit_manager.py`、`hunger_update.py` |
 | I-4 | 工作区隔离：只有 `CommitManager` 写 `best/` | `workspace_manager.py` |
 | I-5 | 目标验证 + 回归：先前通过的 check 仍要重测 | `validation_gate.py` |
-| I-6 | 停滞检测仅计算 `attempted` item；全局熔断阈值 policy 可配（`max_global_no_progress_loops`，默认 5），被拒 candidate 刷新 newly-passed 高水位时 streak 保持不递增 | `stagnation_detector.py` |
+| I-6 | 停滞检测仅计算 `attempted` item；全局熔断阈值 policy 可配（`max_global_no_progress_loops`，默认 5），被拒 candidate 即使有 raw newly-passed 也照常递增 streak | `stagnation_detector.py` |
 | I-7 | 沙箱隔离：路径白名单 + 进程组清理 | `sandbox_runner.py`、`path_safety.py` |
 | I-8 | 成本守卫：每次调用前后都校验预算 | `cost_guard.py` |
 | I-9 | `BLOCKED ≠ DONE`；停止原因严格优先级 | `hunger_engine.py` |
@@ -512,7 +512,7 @@ v0.7.1-v0.7.2 分支 gate 记录（随 commit `0fb5e02` 验证）：`pytest` 191
 
 **路线图**：
 
-- **v0.7.x**：Loop-Objective Evolution hardening、Windows baseline 维护、v0.6 mission runtime 兼容性修复。已在 `v0.7.1-v0.7.2` 分支落地：draft sampling、动量感知全局熔断、ADR-010 auto-open、worker recovery 简化与 fixed-k 采样保留
+- **v0.7.x**：Loop-Objective Evolution hardening、Windows baseline 维护、v0.6 mission runtime 兼容性修复。已在 `v0.7.1-v0.7.2` 分支落地：draft sampling、policy 可配全局熔断阈值、ADR-010 auto-open、worker recovery 简化与 fixed-k 采样保留
 - **v0.8+**：`LLMPlanner`、真并发 fan-out + join、`services.yaml` rich semantics、Web UI
 
 ---
