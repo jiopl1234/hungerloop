@@ -369,55 +369,74 @@ class LoopOrchestrator:
         # Retained in the event payload for backward compatibility. Fixed-k
         # sampling never short-circuits a requested draft.
         short_circuited_draft_indexes: list[int] = []
-        for draft_index in range(1, draft_k + 1):
-            if draft_index > 1:
-                # Independence: clear cross-loop replay and re-seed the
-                # canonical candidate tree from best/ (+ mission seed).
-                self.worker_runtime.reset_inner_replay(task_id)
-                # Drop the prior draft's persisted handoff rows so this
-                # draft's re-run cannot collide on the deterministic handoff
-                # primary key (WH-<task>-<loop>-<assignment>) — a hard
-                # IntegrityError on the SQLite backend.
-                self.repo.delete_worker_handoffs(task_id, loop_id)
-                self.workspace_manager.create_candidate_workspace(
+        sampling_start_evidence = self._tool_call_evidence_ids(task_id)
+        try:
+            for draft_index in range(1, draft_k + 1):
+                if draft_index > 1:
+                    # Independence: clear cross-loop replay and re-seed the
+                    # canonical candidate tree from best/ (+ mission seed).
+                    self.worker_runtime.reset_inner_replay(task_id)
+                    # Drop the prior draft's persisted handoff rows so this
+                    # draft's re-run cannot collide on the deterministic handoff
+                    # primary key (WH-<task>-<loop>-<assignment>) — a hard
+                    # IntegrityError on the SQLite backend.
+                    self.repo.delete_worker_handoffs(task_id, loop_id)
+                    self.workspace_manager.create_candidate_workspace(
+                        task_id,
+                        loop_id,
+                        seed_source_dir=_mission_workspace_seed_source(mission),
+                    )
+                evidence_before = self._tool_call_evidence_ids(task_id)
+                scheduler_result = await self._run_assignments(
+                    task_id=task_id,
+                    loop_id=loop_id,
+                    plan=plan,
+                    budget=budget,
+                )
+                worker_passes_run += 1
+                probe = self.integrator.integrate(
                     task_id,
                     loop_id,
-                    seed_source_dir=_mission_workspace_seed_source(mission),
+                    [handoff.as_worker_result() for handoff in scheduler_result.handoffs],
                 )
-            evidence_before = self._tool_call_evidence_ids(task_id)
-            scheduler_result = await self._run_assignments(
-                task_id=task_id,
-                loop_id=loop_id,
-                plan=plan,
-                budget=budget,
-            )
-            worker_passes_run += 1
-            probe = self.integrator.integrate(
-                task_id,
-                loop_id,
-                [handoff.as_worker_result() for handoff in scheduler_result.handoffs],
-            )
-            attempted = self._attempted_hunger_item_ids(
-                plan, skipped_ids=scheduler_result.skipped_ids
-            )
-            pipeline_result = await self.validation_pipeline.run(
-                task_id=task_id,
-                loop_id=loop_id,
-                candidate=probe,
-                target_hunger_item_ids=attempted,
-                mission=mission,
-                phase=validation_phase,
-                budget=budget,
-            )
-            evaluation = evaluation_from_validation_report(
-                f"{probe.id}-d{draft_index}",
-                pipeline_result.deterministic_report,
-            )
-            self.workspace_manager.archive_draft(task_id, loop_id, draft_index)
-            draft_evidence_ids[draft_index] = (
-                self._tool_call_evidence_ids(task_id) - evidence_before
-            )
-            drafts.append((draft_index, scheduler_result, evaluation))
+                attempted = self._attempted_hunger_item_ids(
+                    plan, skipped_ids=scheduler_result.skipped_ids
+                )
+                pipeline_result = await self.validation_pipeline.run(
+                    task_id=task_id,
+                    loop_id=loop_id,
+                    candidate=probe,
+                    target_hunger_item_ids=attempted,
+                    mission=mission,
+                    phase=validation_phase,
+                    budget=budget,
+                )
+                evaluation = evaluation_from_validation_report(
+                    f"{probe.id}-d{draft_index}",
+                    pipeline_result.deterministic_report,
+                )
+                self.workspace_manager.archive_draft(task_id, loop_id, draft_index)
+                draft_evidence_ids[draft_index] = (
+                    self._tool_call_evidence_ids(task_id) - evidence_before
+                )
+                drafts.append((draft_index, scheduler_result, evaluation))
+
+        except SafetyStopError:
+            # Abort path: the settle below never runs, so drop every
+            # draft's loop-scoped tool-call evidence and the in-flight
+            # draft's persisted handoff rows. Otherwise a resumed loop's
+            # planning context would read phantom state from the aborted
+            # sampling.
+            with self.repo.transaction():
+                self.repo.delete_worker_handoffs(task_id, loop_id)
+                aborted_evidence_ids = sorted(
+                    self._tool_call_evidence_ids(task_id)
+                    - sampling_start_evidence
+                )
+                if aborted_evidence_ids:
+                    self.repo.delete_evidence(aborted_evidence_ids)
+            self.worker_runtime.reset_inner_replay(task_id)
+            raise
 
         evaluations = [entry[2] for entry in drafts]
         gate_winner = select_commit_candidate(evaluations)
@@ -737,13 +756,20 @@ class LoopOrchestrator:
             )
 
         try:
+            # Lazy trace fetch: on SQLite list_loop_traces deserializes
+            # every LoopTrace, and the gate ignores the count when k <= 1.
+            prior_trace_count = (
+                len(self.repo.list_loop_traces(task_id))
+                if policy.draft_sampling_k > 1
+                else 0
+            )
             if _should_draft_sample(
                 draft_sampling_k=policy.draft_sampling_k,
                 has_assignments=bool(plan.assignments),
                 accepted_check_keys=(
                     list(best_before.accepted_check_keys) if best_before else []
                 ),
-                prior_trace_count=len(self.repo.list_loop_traces(task_id)),
+                prior_trace_count=prior_trace_count,
             ):
                 scheduler_result = await self._run_draft_sampling(
                     task_id=task_id,
@@ -1023,7 +1049,7 @@ class LoopOrchestrator:
             task_id=task_id,
             loop_id=loop_id,
             policy=policy,
-            validation=effective_validation,
+            validation=validation,  # raw report: effective zeroes newly_passed
             committed=bool(commit_decision["committed"]),
         )
 
@@ -1222,8 +1248,19 @@ class LoopOrchestrator:
         exactly those keys so the next continuation candidate can commit.
         ``RefactorTransactionManager.open`` re-validates everything and
         emits the audit events; a failed open is its rejected-open event.
+        Callers must pass the raw (un-zeroed) report: the orchestrator's
+        ``effective_validation`` strips ``newly_passed_check_keys`` on the
+        reject path for progress accounting, which would deadlock the
+        min-newly / net-positive gate below.
         """
         if committed or self.refactor_transaction_manager is None:
+            return
+        if not (
+            policy.refactor_transactions_enabled
+            and policy.refactor_auto_open_enabled
+        ):
+            # Mirrors the gate first check; avoids a full trace fetch
+            # on every rejected loop when the feature is off (default).
             return
         previous = self._previous_rejected_trace(task_id, loop_id)
         declared = _auto_open_declared_keys(policy, validation, previous)

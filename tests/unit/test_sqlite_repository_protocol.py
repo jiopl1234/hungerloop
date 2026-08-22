@@ -369,3 +369,23 @@ def test_sqlite_schema_rejects_bad_evidence_type(tmp_path: Path) -> None:
             assert "CHECK" in str(exc).upper()
         else:
             raise AssertionError("bad evidence_type was accepted")
+
+
+def test_sqlite_list_failed_tool_call_evidence_since_loop_window(
+    tmp_path: Path,
+) -> None:
+    repo = _repo(tmp_path)
+    for loop_id in (1, 2, 3, 7, 8):
+        repo.save_tool_call_as_evidence(
+            task_id="t1",
+            loop_id=loop_id,
+            agent_id="a1",
+            tool_name="patch_file",
+            args_summary="path=foo.py",
+            result_summary="no_match",
+            success=False,
+            elapsed_ms=5,
+        )
+    assert len(repo.list_failed_tool_call_evidence("t1")) == 5
+    windowed = repo.list_failed_tool_call_evidence("t1", since_loop_id=7)
+    assert sorted(int(row["loop_id"]) for row in windowed) == [7, 8]

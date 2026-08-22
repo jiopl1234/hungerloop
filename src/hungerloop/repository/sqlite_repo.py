@@ -855,18 +855,23 @@ class SQLiteRepository:
         return out
 
     def list_failed_tool_call_evidence(
-        self, task_id: str
+        self, task_id: str, *, since_loop_id: int | None = None
     ) -> list[dict[str, object]]:
-        rows = self.conn.execute(
-            """
+        sql = """
             SELECT evidence_id, task_id, loop_id, payload_json
             FROM evidence
             WHERE task_id = ?
               AND evidence_type = ?
-            ORDER BY rowid ASC
-            """,
-            (task_id, EvidenceType.TOOL_CALL.value),
-        ).fetchall()
+            """
+        params: list[object] = [task_id, EvidenceType.TOOL_CALL.value]
+        if since_loop_id is not None:
+            # Rows with NULL loop_id are excluded by the comparison,
+            # matching the windowed caller semantics (loop-less rows
+            # can never belong to a rejected-loop window).
+            sql += " AND loop_id >= ?\n"
+            params.append(since_loop_id)
+        sql += " ORDER BY rowid ASC"
+        rows = self.conn.execute(sql, tuple(params)).fetchall()
         out: list[dict[str, object]] = []
         for row in rows:
             payload = _loads(str(row["payload_json"]))

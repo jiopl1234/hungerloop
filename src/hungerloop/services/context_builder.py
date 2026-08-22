@@ -422,7 +422,9 @@ class ContextBuilder:
 
         failed_tool_rows: dict[tuple[str, str], tuple[int, int, dict[str, object]]] = {}
         min_failed_loop = current_loop_id - K_REJECT_WINDOW
-        for row in self.repo.list_failed_tool_call_evidence(task_id):
+        for row in self.repo.list_failed_tool_call_evidence(
+            task_id, since_loop_id=min_failed_loop
+        ):
             failed_loop = _coerce_loop_id(row.get("loop_id"))
             if failed_loop is None:
                 continue

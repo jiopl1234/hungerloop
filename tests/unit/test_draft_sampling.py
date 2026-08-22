@@ -18,7 +18,7 @@ from hungerloop.services.budget_allocator import BudgetAllocator
 from hungerloop.services.budget_guard import BudgetGuard
 from hungerloop.services.commit_manager import CommitManager
 from hungerloop.services.context_builder import ContextBuilder
-from hungerloop.services.cost_guard import CostGuard
+from hungerloop.services.cost_guard import CostGuard, SafetyStopError
 from hungerloop.services.handoff_processor import HandoffProcessor
 from hungerloop.services.hunger_engine import HungerEngine
 from hungerloop.services.hunger_update import HungerUpdateService
@@ -442,3 +442,65 @@ def test_delete_evidence_removes_named_rows(backend: str, tmp_path: Path) -> Non
 
     if isinstance(repo, SQLiteRepository):
         repo.close()
+
+
+async def test_draft_sampling_abort_cleans_loser_state_on_safety_stop(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    """SafetyStopError mid-sampling must not leak loser evidence/handoffs.
+
+    Regression guard: before the fix, an aborted draft loop left the
+    in-flight draft's handoff rows and every completed loser's tool-call
+    evidence behind, so a resumed loop's planning context read phantom
+    state from the aborted sampling.
+    """
+    orchestrator, repo, workspace_manager = _make_orchestrator(tmp_path)
+    task_id, loop_id = "t1", 1
+    workspace_manager.create_candidate_workspace(task_id, loop_id)
+    files = workspace_manager.candidate_files_dir(task_id, loop_id)
+
+    draft_outputs = iter(["draft one", "draft two"])
+
+    async def fake_run_assignments(**kwargs: Any) -> Any:
+        summary = next(draft_outputs)
+        (files / "a.py").write_text(summary, encoding="utf-8")
+        repo.save_tool_call_as_evidence(
+            task_id=task_id,
+            loop_id=loop_id,
+            agent_id="execution_worker_v1",
+            tool_name="write_file",
+            args_summary="a.py",
+            result_summary=summary,
+            success=True,
+            elapsed_ms=1,
+        )
+        return _persist_draft_handoff(repo, summary)
+
+    pipeline_calls = 0
+
+    async def fake_pipeline_run(**kwargs: Any) -> ValidationPipelineResult:
+        nonlocal pipeline_calls
+        pipeline_calls += 1
+        if pipeline_calls == 1:
+            return _pipeline_result(_report(loop_id, newly_passed=[]))
+        raise SafetyStopError("cost ceiling exceeded")
+
+    monkeypatch.setattr(orchestrator, "_run_assignments", fake_run_assignments)
+    monkeypatch.setattr(orchestrator.validation_pipeline, "run", fake_pipeline_run)
+
+    with pytest.raises(SafetyStopError):
+        await orchestrator._run_draft_sampling(
+            task_id=task_id,
+            loop_id=loop_id,
+            plan=_plan_with_one_assignment(task_id, loop_id),
+            budget=_budget(),
+            draft_k=3,
+            mission=None,
+        )
+
+    # Draft 1 completed (evidence + handoff), draft 2 was in flight when the
+    # stop hit: the abort cleanup must remove both drafts' loop-scoped state.
+    assert pipeline_calls == 2
+    assert repo.list_worker_handoffs(task_id) == []
+    assert repo.list_failed_tool_call_evidence(task_id) == []
+    assert repo.list_successful_tool_call_evidence(task_id) == []

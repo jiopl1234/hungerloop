@@ -574,7 +574,7 @@ class InMemoryRepository:
         return out
 
     def list_failed_tool_call_evidence(
-        self, task_id: str
+        self, task_id: str, *, since_loop_id: int | None = None
     ) -> list[dict[str, object]]:
         out: list[dict[str, object]] = []
         for eid, row in self._evidence.items():
@@ -584,6 +584,10 @@ class InMemoryRepository:
                 continue
             if row.get("success") is not False:
                 continue
+            if since_loop_id is not None:
+                loop_id = row.get("loop_id")
+                if not isinstance(loop_id, int) or loop_id < since_loop_id:
+                    continue
             out.append(
                 {
                     "evidence_id": eid,

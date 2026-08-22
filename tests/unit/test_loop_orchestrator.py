@@ -1630,3 +1630,102 @@ def test_auto_open_noop_when_committed_or_unwired(tmp_path: Path) -> None:
         committed=True,
     )
     manager.open.assert_not_called()
+
+
+async def test_step_auto_opens_transaction_on_rejected_net_positive_candidate(
+    tmp_path: Path,
+) -> None:
+    """End-to-end guard: the ADR-010 auto-open trigger fires through _step_inner.
+
+    Regression test for the dead trigger: the call site passed
+    ``effective_validation`` (``newly_passed_check_keys`` zeroed on the reject
+    path), so the min-newly / net-positive gate could never clear and the
+    feature was unreachable in production.
+    """
+    repo = InMemoryRepository()
+    item = HungerItem(
+        id="H-001",
+        title="produce report",
+        priority=1.0,
+        gap_score=1.0,
+        acceptance_checks=[
+            AcceptanceCheck(
+                check_type=AcceptanceCheckType.FILE_EXISTS,
+                params={"path": "report.md"},
+                description="Report file exists",
+            ),
+        ],
+    )
+    _seed_task(repo, [item])
+    repo.set_hunger_policy(
+        "t1",
+        HungerPolicy(
+            refactor_transactions_enabled=True,
+            refactor_auto_open_enabled=True,
+        ),
+    )
+    actions = [
+        {
+            "tool_name": "write_file",
+            "args": {"path": "report.md", "content": "# demo report\n"},
+        }
+    ]
+    orchestrator = _build_full_orchestrator(
+        tmp_path=tmp_path,
+        repo=repo,
+        model_client=DummyModelClient.with_actions(actions),
+    )
+    manager = MagicMock()
+    manager.get_active_transaction.return_value = None
+    orchestrator.refactor_transaction_manager = manager
+
+    def _report(loop_id: int, newly: list[str]) -> ValidationReport:
+        # Rejected-but-net-positive raw report: the single regression repeats
+        # the previous rejected candidate; CommitManager rejects (no open
+        # transaction), so effective_validation is zeroed on this path.
+        return ValidationReport(
+            id=f"VAL-t1-{loop_id}",
+            task_id="t1",
+            loop_id=loop_id,
+            candidate_state_id=f"CAND-t1-{loop_id}",
+            baseline_state_id=None,
+            verdict=ValidationVerdict.PARTIAL,
+            attempted_hunger_item_ids=["H-001"],
+            newly_passed_check_keys=newly,
+            regressed_check_keys=["H-001:10"],
+            currently_passed_check_keys=newly,
+            has_real_progress=True,
+        )
+
+    orchestrator.validation_pipeline = MagicMock(
+        run=AsyncMock(
+            side_effect=[
+                ValidationPipelineResult(
+                    deterministic_report=_report(1, ["H-001:0"]),
+                    pipeline_verdict="fail",
+                    stages_run=["deterministic"],
+                ),
+                ValidationPipelineResult(
+                    deterministic_report=_report(
+                        2, [f"H-001:{index}" for index in range(6)]
+                    ),
+                    pipeline_verdict="fail",
+                    stages_run=["deterministic"],
+                ),
+            ]
+        )
+    )
+
+    first = await orchestrator.step("t1")
+    assert isinstance(first, LoopTrace)
+    assert first.committed is False
+    manager.open.assert_not_called()  # no prior rejected trace yet
+
+    second = await orchestrator.step("t1")
+    assert isinstance(second, LoopTrace)
+    assert second.committed is False
+    manager.open.assert_called_once()
+    kwargs = manager.open.call_args.kwargs
+    assert kwargs["task_id"] == "t1"
+    assert kwargs["loop_id"] == 2
+    assert kwargs["declared_regression_keys"] == ["H-001:10"]

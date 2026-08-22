@@ -262,3 +262,21 @@ def test_save_artifact_helper() -> None:
     art = Artifact(artifact_id="a1", task_id="t1", loop_id=1, artifact_type="patch")
     repo.save_artifact(art)
     assert repo.get_artifacts_by_ids(["a1"])[0].artifact_type == "patch"
+
+
+def test_list_failed_tool_call_evidence_since_loop_window() -> None:
+    repo = InMemoryRepository()
+    for loop_id in (1, 2, 3, 7, 8):
+        repo.save_tool_call_as_evidence(
+            task_id="t1",
+            loop_id=loop_id,
+            agent_id="a1",
+            tool_name="patch_file",
+            args_summary="path=foo.py",
+            result_summary="no_match",
+            success=False,
+            elapsed_ms=5,
+        )
+    assert len(repo.list_failed_tool_call_evidence("t1")) == 5
+    windowed = repo.list_failed_tool_call_evidence("t1", since_loop_id=7)
+    assert sorted(int(row["loop_id"]) for row in windowed) == [7, 8]
